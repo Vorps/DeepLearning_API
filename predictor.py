@@ -114,12 +114,13 @@ class Predictor():
         config_file_dest = PREDICTIONS_DIRECTORY()+self.train_name+"/"+self.dataset.dataset_filename.split("/")[-1].replace(".h5", "_")+self.groupsInput[0].replace("/", "_")+".yml"
 
         if os.path.exists(config_file_dest):
-            accept = builtins.input("The prediction {} {} already exists ! Do you want to overwrite it (yes,no) : ".format(self.train_name, self.dataset.dataset_filename.split("/")[-1]))
-            if accept != "yes":
-                return
-            else:
-                if os.path.exists(config_file_dest):
-                    os.remove(config_file_dest)
+            if os.environ["DL_API_OVERWRITE"] != "True":
+                accept = builtins.input("The prediction {} {} already exists ! Do you want to overwrite it (yes,no) : ".format(self.train_name, self.dataset.dataset_filename.split("/")[-1]))
+                if accept != "yes":
+                    return
+            
+            if os.path.exists(config_file_dest):
+                os.remove(config_file_dest)
         if not os.path.exists(PREDICTIONS_DIRECTORY()+self.train_name+"/"):
             os.makedirs(PREDICTIONS_DIRECTORY()+self.train_name+"/")
         shutil.copyfile(CONFIG_FILE(), config_file_dest)
@@ -154,16 +155,17 @@ class Predictor():
                             for transformFunction in self.transform.values():
                                 out_data = transformFunction.loadDataset(out_dataset)(out_data)
                         out_data = out_data.numpy()"""
-                        out_dataset = DataSet.getDatasetsFromIndex(self.dataloader_prediction.dataset.data[self.groupsInput[0].replace("_0", "")], self.dataloader_prediction.dataset.mapping[x])[0]
+                        out_dataset = DataSet.getDatasetsFromIndex(self.dataloader_prediction.dataset.data[self.groupsInput[0].replace("_0", "")], self.dataloader_prediction.dataset.mapping[x])
+                        name_dataset = "_".join([dataset.name.split("/")[-1] for dataset in out_dataset])
                         with DatasetUtils(PREDICTIONS_DIRECTORY()+self.train_name+"/"+self.dataset.dataset_filename.split("/")[-1], read=False) as datasetUtils:
-                            for group in out_data:
-                                datasetUtils.writeImage(group, out_dataset.name, out_dataset.to_image(out_data[group].numpy()))
+                            for i, group in enumerate(out_data):
+                                print(out_data[group].shape)
+                                out = out_data[group].numpy()
+                                datasetUtils.writeImage(group, name_dataset, out_dataset[0].to_image(out, out.dtype))
                                 if self.metrics is not None:
                                     datasetUtils.h5.attrs["value"] = value
-                                    print(value)
-                                    print(values)
-                                    for name, value in values.items():
-                                        datasetUtils.h5.attrs[name] = value
+                                    for name in values:
+                                        datasetUtils.h5.attrs[name] = values[name]
                         out_data.clear()
 
                     it += 1

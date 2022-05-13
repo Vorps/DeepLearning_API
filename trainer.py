@@ -1,3 +1,4 @@
+from functools import partial
 import importlib
 import torch
 import tqdm
@@ -6,7 +7,8 @@ import numpy as np
 import datetime
 import os
 from enum import Enum
-from DeepLearning_API import DataTrain, config, MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, gpuInfo, getDevice, _getModule
+from DeepLearning_API import DataTrain, config, MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, gpuInfo, getDevice, _getModule, Loss
+from DeepLearning_API.networks import network
 import datetime
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
@@ -23,57 +25,17 @@ class State(Enum):
     
     def __str__(self) -> str:
         return self.value
-
-class Optimizer():
-    
-    @config("Optimizer")
-    def __init__(self, name : str = "AdamW") -> None:
-        self.name = name
-    
-    def getOptimizer(self, model : str) -> torch.nn.Module:
-        return config("Trainer.Optimizer")(getattr(importlib.import_module('torch.optim'), self.name))(model.parameters(), config = None)
-
-class Scheduler():
-
-    @config("Scheduler")
-    def __init__(self, name : str = "ReduceLROnPlateau") -> None:
-        self.name = name
-
-    def getSheduler(self, optimizer : str) -> torch.nn.Module:
-        return config("Trainer.Scheduler")(getattr(importlib.import_module('torch.optim.lr_scheduler'), self.name))(optimizer, config = None)
-
-class Criterion():
-
-    @config(None)
-    def __init__(self, group : str = "Default", l : float = 1) -> None:
-        self.l = l
-        self.group = group
-
-    def getCriterion(self, classpath : str, group : str) -> torch.nn.Module:
-        module, name = _getModule(classpath, "criterion")
-
-        return config("Trainer.criterions."+group+".criterion."+classpath)(getattr(importlib.import_module(module), name))(config = None)
-
-class Criterions():
-
-    @config(None)
-    def __init__(self, criterion : Dict[str, Criterion] = {"default:torch_nn_CrossEntropyLoss:Dice:NCC" : Criterion()}) -> None:
-        self.criterions = criterion
-
-    def getCriterions(self, group) -> Dict[str, Tuple[float, torch.nn.Module]]:
-        for key in self.criterions:
-            self.criterions[key] = (self.criterions[key].group, self.criterions[key].l, self.criterions[key].getCriterion(key, group))
-        return self.criterions
-
+        
 class Model():
 
     @config("Model")
-    def __init__(self, classpath : str = "default:UNet") -> None:
-        self.module, self.name = _getModule(classpath, "network")
+    def __init__(self, classpath : str = "default:segmentation.UNet") -> None:
+        self.module, self.name = _getModule(classpath.split(".")[-1] if len(classpath.split(".")) > 1 else classpath, "networks" + "."+".".join(classpath.split(".")[:-1]) if len(classpath.split(".")) > 1 else "")
         
-    def getModel(self) -> torch.nn.Module:
+    def getModel(self) -> network.Network:
         return getattr(importlib.import_module(self.module), self.name)(config = None, args="Trainer.Model")
-    
+
+
 class Trainer:
 
     @config("Trainer")
@@ -83,9 +45,6 @@ class Trainer:
                     groupsInput : List[str] = ["default"],
                     train_name : str = "default",
                     device : int = None,
-                    optimizer : Optimizer = Optimizer(),
-                    scheduler : Scheduler = Scheduler(),
-                    criterions: Dict[str, Criterions] = {"default" : Criterions()},
                     nb_batch_per_step : int = 1,
                     manual_seed : int = None,
                     epochs: int = 100,
@@ -109,13 +68,6 @@ class Trainer:
         self.groupsInput    = groupsInput
         self.autocast       = autocast
         
-        self.model          = model.getModel().to(self.device)
-        
-        self.optimizer      = optimizer.getOptimizer(self.model)
-        self.scheduler      = scheduler.getSheduler(self.optimizer)
-        self.criterions     = criterions
-        for classpath in self.criterions:
-            self.criterions[classpath] = self.criterions[classpath].getCriterions(classpath)
         
         self.epochs = epochs
         self.nb_batch_per_step = nb_batch_per_step
@@ -125,6 +77,10 @@ class Trainer:
         self.it_validation = it_validation
         self.checkpoints : Dict[str, float] = {}
         self.tb = None
+        
+        self.model          = model.getModel().to(self.device)
+        self.model.init(self.model.__class__.__name__, partial(Loss, device = self.device, nb_batch_per_step = self.nb_batch_per_step, groupsInput = self.groupsInput))
+        
 
     def __enter__(self) -> None:
         pynvml.nvmlInit()
@@ -146,13 +102,13 @@ class Trainer:
         if state == State.RESUME:
             self.checkpoint_load()
         if state == State.TRAIN and os.path.exists(STATISTICS_DIRECTORY()+self.train_name+"/"):
-            accept = input("The model {} already exists ! Do you want to overwrite it (yes,no) : ".format(self.train_name))
-            if accept != "yes":
-                return
-            else:
-                for directory_path in [STATISTICS_DIRECTORY(), MODELS_DIRECTORY(), CHECKPOINTS_DIRECTORY(), SETUPS_DIRECTORY()]:
-                    if os.path.exists(directory_path+self.train_name+"/"):
-                        shutil.rmtree(directory_path+self.train_name+"/")
+            if os.environ["DL_API_OVERWRITE"] != "True":
+                accept = input("The model {} already exists ! Do you want to overwrite it (yes,no) : ".format(self.train_name))
+                if accept != "yes":
+                    return
+            for directory_path in [STATISTICS_DIRECTORY(), MODELS_DIRECTORY(), CHECKPOINTS_DIRECTORY(), SETUPS_DIRECTORY()]:
+                if os.path.exists(directory_path+self.train_name+"/"):
+                    shutil.rmtree(directory_path+self.train_name+"/")
 
         self.tb = SummaryWriter(log_dir = STATISTICS_DIRECTORY()+self.train_name+"/")
         
@@ -170,95 +126,79 @@ class Trainer:
             for self.epoch in epoch:
                 self._train()
     
-    def _loss(self, out_dict : torch.Tensor, data_dict : Dict[str, torch.Tensor]) -> torch.Tensor:
-        loss = 0
-        losses = np.array([])
-        for group in self.criterions:
-            output = out_dict[group] if group in out_dict else None
-            for true_group, l, criterion in self.criterions[group].values():
-                target = data_dict[true_group].to(self.device, non_blocking=False) if true_group in data_dict else None
-                result = criterion(output, target)
-                losses = np.append(losses, result.item())  
-                loss = loss + l*result
-        return loss, losses
-    
-    def getInput(self, data_dict : Dict[str, List[torch.Tensor]]) -> torch.Tensor:    
-        input = torch.cat([data_dict[group] for group in self.groupsInput], dim=0)
-        return torch.unsqueeze(input, dim=0)
+    def getInput(self, data_dict : Dict[str, List[torch.Tensor]]) -> torch.Tensor:
+        return torch.cat([torch.unsqueeze(data_dict[group], dim=1) for group in self.groupsInput], dim=1)
 
     def _train(self) -> None:
         self.model.train()
         scaler = torch.cuda.amp.GradScaler(enabled=self.autocast)
 
-        training_losses = []
-        training_loss = []
-        self.optimizer.zero_grad()
-        description = lambda loss : "Training : (Loss {:.4f}) ".format(loss)+gpuInfo(self.device)
+        for model in self.model.getSubModels():
+            model.optimizer.zero_grad()
 
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = description(0), total=len(self.dataloader_training), leave=False) as batch_iter:
+        description = lambda : "Training : Loss ("+" ".join(["{} : {:.4f}".format(model.getName(), model.loss.getLastValue()) for model in self.model.getSubModels()])+") "+gpuInfo(self.device)
+
+        with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = description(), total=len(self.dataloader_training), leave=False) as batch_iter:
             for i, data_dict in batch_iter:
                 with torch.cuda.amp.autocast(enabled=self.autocast):
                     input = self.getInput(data_dict)
-                    out = self.model(input.to(self.device))
+                    out = self.model.backward(input.to(self.device))
                     
-                    loss, losses = self._loss(out, data_dict)
-                    loss = loss / self.nb_batch_per_step
-
-                    if (i+1) % self.nb_batch_per_step == 0 or (i+1) % self.it_validation == 0:
-                        scaler.scale(loss).backward()
-                        scaler.step(self.optimizer)
-                        scaler.update()
-                        self.optimizer.zero_grad()
+                    if (i+1) % self.nb_batch_per_step == 0 or (i+1) % self.it_validation == 0:    
+                        for model in self.model.getSubModels():
+                            if model.loss.criterions:
+                                scaler.scale(model.loss.loss).backward()
+                                scaler.step(model.optimizer)
+                                scaler.update()
+                                model.optimizer.zero_grad()
 
                     if (self.it+1) % self.it_validation == 0:
-                        name = self.checkpoint_save()
                         if self.dataloader_validation is not None:
-                            mean_validation_loss = self._validate()
-                            self.checkpoints[name] = mean_validation_loss
+                            self._validate()
                         else:
-                            self.checkpoints[name] = np.mean(training_loss)
+                            self._update_lr()
                         
-                        self._train_log(out, training_losses)
-                        training_losses = []
+                        self._train_log(input, out)
+
+                        for model in self.model.getSubModels():
+                            model.loss.clear()
+
                         self.model.train()
                         self.epoch_it += 1
 
-                batch_iter.set_description(description(loss.item()*self.nb_batch_per_step))
-                training_losses.append(losses)
-                training_loss.append(loss.item())
+                batch_iter.set_description(description())
                 
                 self.it += 1
 
-        return np.mean(training_loss)
+    def _update_lr(self):
+        name = self.checkpoint_save()
+        loss = []
+        for model in self.model.getSubModels():
+            value = model.loss.mean()
+            if model.scheduler is not None:
+                if model.scheduler.__class__.__name__ == 'ReduceLROnPlateau':
+                    model.scheduler.step(value)
+                else:
+                    model.scheduler.step()
+            loss.append(value)
+
+        self.checkpoints[name] = np.mean(np.asarray(loss))
 
     @torch.no_grad()
     def _validate(self) -> None:
-
         self.model.eval()
-        validation_losses = []
-        validation_loss = []
-        description = lambda loss : "Validation : (Loss {:.4f}) ".format(loss)+gpuInfo(self.device)
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = description(0), total=len(self.dataloader_validation), leave=False) as batch_iter:
+        description = lambda : "Validation : Loss ("+" ".join(["{} : {:.4f}".format(model.getName(), model.loss.getLastValue()) for model in self.model.getSubModels()])+") "+gpuInfo(self.device)
+
+        with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = description(), total=len(self.dataloader_validation), leave=False) as batch_iter:
             for _, data_dict in batch_iter:
                 input = self.getInput(data_dict)
-                out = self.model(input.to(self.device))
-                loss, losses = self._loss(out, data_dict)
-                    
-                validation_losses.append(losses)
-                validation_loss.append(loss.item())
+                out = self.model.backward(input.to(self.device))
+                batch_iter.set_description(description())
 
-                batch_iter.set_description(description(loss.item()))
-
-        if self.scheduler is not None:
-            if self.scheduler.__class__.__name__ == 'ReduceLROnPlateau':
-                self.scheduler.step(np.mean(validation_loss))
-            else:
-                self.scheduler.step()
-        
-        self._validation_log(out, validation_losses)
-        
-        return np.mean(validation_loss)
-
+        self._update_lr()
+        self._validation_log(input, out)
+        for model in self.model.getSubModels():
+            model.loss.clear()
 
     def checkpoint_save(self) -> None:
         path = CHECKPOINTS_DIRECTORY()+self.train_name+"/"
@@ -269,8 +209,7 @@ class Trainer:
             'epoch': self.epoch,
             'it': self.it,
             'checkpoints' : self.checkpoints,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict()}, 
+            'model_state_dict': self.model.state_dict()}.update({'{}_optimizer_state_dict'.format(model.getName()): model.optimizer.state_dict() for model in self.model.getSubModels()}), 
             path+name)
         return path+name
         
@@ -290,7 +229,8 @@ class Trainer:
             name = sorted(os.listdir(path))[-1]
             checkpoint = torch.load(path+name)
             self.model.load_state_dict(checkpoint['model_state_dict'])
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            for model in self.model.getSubModels():
+                model.optimizer.load_state_dict(checkpoint['{}_optimizer_state_dict'.format(model.getName())])
             self.epoch = checkpoint['epoch']
             self.it = checkpoint['it']
             self.checkpoints = checkpoint['checkpoints']
@@ -303,48 +243,26 @@ class Trainer:
             name = sorted(os.listdir(path))[-1]
             self.model.load_state_dict(torch.load(path+name))
         else:
-            raise Exception("Model : {} does not exist !".format(self.train_name))
-
-
-    def _loss(self, out_dict : torch.Tensor, data_dict : Dict[str, torch.Tensor]) -> torch.Tensor:
-        loss = 0
-        losses = np.array([])
-        for group in self.criterions:
-            for true_group, l, criterion in self.criterions[group].values():
-                input = data_dict[true_group].to(self.device, non_blocking=False) if true_group in data_dict else None
-                target = out_dict[group] if group in out_dict else None
-                result = criterion(input, target)
-                losses = np.append(losses, result.item())  
-                loss = loss + l*result
-        return loss, losses
-    
-
-    def _loss_format(self, losses : List[float]):
-        training_loss = dict()
-        i = 0
-        for group in self.criterions:
-            for true_group, l, criterion in self.criterions[group].values():
-                training_loss[group+":"+criterion.__class__.__name__] = losses[i]
-                i+=1
-        return training_loss
+            raise Exception("Model : {} does not exist !".format(self.train_name))    
         
-    def _train_log(self, out, losses):
-        print(np.mean(np.array(losses), axis=0))
-        self.tb.add_scalars("Loss/Trainning", self._loss_format(np.mean(np.array(losses), axis=0)), self.it)
-
-        """for name, weight in self.model.named_parameters():
-            print(name)
+    def _train_log(self, input, out):
+        for model in self.model.getSubModels():
+            self.tb.add_scalars("{}/Loss/Trainning".format(model.getName()), model.loss.format(), self.it)
+            self.tb.add_scalar("{}/Learning Rate".format(model.getName()), model.optimizer.param_groups[0]['lr'], self.it)
+        for name, weight in self.model.named_parameters():
             self.tb.add_histogram(name, weight, self.it)
-            self.tb.add_histogram(f'{name}.grad',weight.grad, self.it)"""
-        image =  self.model.logImage(out)
-        if image is not None:
-            self.tb.add_image("result/Train", image, self.it, dataformats='HW') 
+            if weight.grad is not None:
+                self.tb.add_histogram(f'{name}.grad',weight.grad, self.it)
+        images =  self.model.logImage(input, out)
+        if images is not None:
+            for name, image in images.items():
+                self.tb.add_image("result/Train/"+name, image, self.it, dataformats='HW' if image.ndim == 2 else 'CHW')
 
 
-    def _validation_log(self, out, losses):
-        self.tb.add_scalars("Loss/Validation", self._loss_format(np.mean(np.array(losses), axis=0)), self.it)
-        image =  self.model.logImage(out)
-        if image is not None:
-            self.tb.add_image("result/Validation", image, self.it, dataformats='HW') 
-        self.tb.add_scalar("Learning Rate", self.optimizer.param_groups[0]['lr'], self.it)
-
+    def _validation_log(self, input, out):
+        for model in self.model.getSubModels():
+            self.tb.add_scalars("{}/Loss/Validation".format(model.getName()), model.loss.format(), self.it)
+        images =  self.model.logImage(input, out)
+        if images is not None:
+            for name, image in images.items():
+                self.tb.add_image("result/Validation/"+name, image, self.it, dataformats='HW' if image.ndim == 2 else 'CHW')

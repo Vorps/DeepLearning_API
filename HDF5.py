@@ -149,8 +149,8 @@ class HDF5():
         def __len__(self) -> int:
             return len(self.patch_slices)
 
-        def to_image(self, data : np.ndarray) -> sitk.Image:
-            image = sitk.GetImageFromArray(data.astype(self._dataset.dtype))
+        def to_image(self, data : np.ndarray, dtype = None) -> sitk.Image:
+            image = sitk.GetImageFromArray(data.astype(self._dataset.dtype if dtype is None else dtype))
             image.SetOrigin(self._origin)
             image.SetSpacing(self._spacing)
             image.SetDirection(self._direction)

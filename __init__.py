@@ -12,6 +12,8 @@ from .config import config
 from .transform import Transform, TransformLoader
 from .HDF5 import HDF5
 from .dataset import DataSet, DataTrain, DataPrediction, Group
+from .metric import Dice
+from .criterion import Loss
 from .trainer import Trainer, State
 from .predictor import Predictor
-from .metric import Dice
+from . import networks

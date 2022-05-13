@@ -113,10 +113,7 @@ class DataSet(data.Dataset):
                     if len(self.cache[group]) > 5:
                         self.unloadData(group, self.cache[group].pop(0))
                     self.loadData(group, x)
-                data_tmp = dataset.data
-                for transformFunction in self.groups[group].post_transforms:
-                    data_tmp = transformFunction.loadDataset(dataset)(data_tmp)
-                data["{}_{}".format(group, i)] = data_tmp
+                data["{}".format(group) if len(datasets) == 1 else "{}_{}".format(group, i)] = dataset.data
         return data
 
                 
@@ -133,7 +130,7 @@ class DataSet(data.Dataset):
                 data_tmp = dataset.getData(self.patch_size, p)
                 for transformFunction in self.groups[group].post_transforms:
                     data_tmp = transformFunction.loadDataset(dataset)(data_tmp)
-                data["{}_{}".format(group, i)] = data_tmp
+                data["{}".format(group) if len(datasets) == 1 else "{}_{}".format(group, i)] = data_tmp
         return data
 
 class Data(ABC):

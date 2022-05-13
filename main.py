@@ -11,6 +11,7 @@ def main():
     parser = argparse.ArgumentParser(description="DeepLearing API",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("type", type=State, choices=list(State))
+    parser.add_argument('-y', action='store_true', help="Accept overwrite")
     parser.add_argument("-c", "--config", default="None", help="Configuration file location")
     parser.add_argument("-models_dir", "--MODELS_DIRECTORY", default="./Models/", help="Models location")
     parser.add_argument("-checkpoints_dir", "--CHECKPOINTS_DIRECTORY", default="./Checkpoints/", help="Checkpoints location")
@@ -26,6 +27,7 @@ def main():
     os.environ["DL_API_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
     os.environ["DL_API_STATISTICS_DIRECTORY"] = config["STATISTICS_DIRECTORY"]
     os.environ["DL_API_SETUPS_DIRECTORY"] = config["SETUPS_DIRECTORY"]
+    os.environ["DL_API_OVERWRITE"] = "{}".format(config["y"])
     os.environ["DEEP_LEANING_API_CONFIG_MODE"] = "Done"
     
     if config["config"] == "None":
