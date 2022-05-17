@@ -66,7 +66,7 @@ class Generator(network.Network):
                                         decoder_channels=decoder_channels,
                                         final_channels=final_channels,
                                         downSampleMode="MAXPOOL",
-                                        upSampleMode="UPSAMPLE",
+                                        upSampleMode="CONV_TRANSPOSE",
                                         attention=attention,
                                         blockConfig=blockConfig)
         self.model = torch.nn.Sequential(*[network.ResBlock(decoder_channels[-1], decoder_channels[-1], blockConfig, dim) for _ in range(2)], 

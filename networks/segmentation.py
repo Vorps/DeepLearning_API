@@ -53,15 +53,15 @@ class Decoder(torch.nn.Module):
         if upSampleMode == UpSampleMode.UPSAMPLE:
             upSample = torch.nn.Upsample(scale_factor=2, mode='nearest')
         if upSampleMode == UpSampleMode.CONV_TRANSPOSE:
-            upSample = network.getTorchModule("ConvTranspose", dim = dim)(in_channels = in_channels, out_channels = in_channels, kernel_size = 2, stride = 2, padding = 0)
+            upSample = network.getTorchModule("ConvTranspose", dim = dim)(in_channels = in_channels, out_channels = out_channels, kernel_size = 2, stride = 2, padding = 0)
         return upSample
 
     def __init__(self, channels : List[int], encoder_channels : List[int], blockConfig : network.BlockConfig, upSampleMode : UpSampleMode, attention : bool, dim : int) -> None:
         super().__init__()
         self.encoder_channels = encoder_channels
         self.upsampling = torch.nn.ModuleList([Decoder._upsample_function(channels[i], channels[i+1], upSampleMode, dim = dim) for i in range(len(channels)-1)])
-        
-        self.decoder_blocks = torch.nn.ModuleList([network.ConvBlock(channels[i] + encoder_channels[-i-2], channels[i+1], blockConfig, dim=dim) for i in range(len(channels)-1)]) 
+
+        self.decoder_blocks = torch.nn.ModuleList([network.ConvBlock(channels[i + (0 if upSampleMode == UpSampleMode.UPSAMPLE else 1)]+encoder_channels[-i-2], channels[i+1], blockConfig, dim=dim) for i in range(len(channels)-1)]) 
         self.attentionBlocks = torch.nn.ModuleList([network.AttentionBlock(channels[i], encoder_channels[-i-2], channels[i+1], dim=dim) for i in range(len(channels)-1)]) if attention else None
 
     def forward(self, x : torch.Tensor, encoder_filters : torch.nn.ModuleList) -> torch.Tensor:
