@@ -79,6 +79,8 @@ class Trainer:
         self.tb = None
         
         self.model          = model.getModel().to(self.device)
+        #print(self.model)
+        #exit(0)
         self.model.init(self.model.__class__.__name__, partial(Loss, device = self.device, nb_batch_per_step = self.nb_batch_per_step, groupsInput = self.groupsInput))
         
 
@@ -205,12 +207,15 @@ class Trainer:
         name = DATE()+".pt"
         if not os.path.exists(path):
             os.makedirs(path)
-        torch.save({
+
+        save_dict = {
             'epoch': self.epoch,
             'it': self.it,
             'checkpoints' : self.checkpoints,
-            'model_state_dict': self.model.state_dict()}.update({'{}_optimizer_state_dict'.format(model.getName()): model.optimizer.state_dict() for model in self.model.getSubModels()}), 
-            path+name)
+            'model_state_dict': self.model.state_dict()}
+        save_dict.update({'{}_optimizer_state_dict'.format(model.getName()): model.optimizer.state_dict() for model in self.model.getSubModels()})
+
+        torch.save(save_dict, path+name)
         return path+name
         
     def save(self, checkpoint_filename) -> None:

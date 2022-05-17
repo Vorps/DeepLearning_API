@@ -66,7 +66,7 @@ class Generator(network.Network):
                                         decoder_channels=decoder_channels,
                                         final_channels=final_channels,
                                         downSampleMode="MAXPOOL",
-                                        upSampleMode="CONV_TRANSPOSE",
+                                        upSampleMode="UPSAMPLE",
                                         attention=attention,
                                         blockConfig=blockConfig)
         self.model = torch.nn.Sequential(*[network.ResBlock(decoder_channels[-1], decoder_channels[-1], blockConfig, dim) for _ in range(2)], 
@@ -98,7 +98,7 @@ class CycleGanDiscriminator(network.Network):
     def forward(self, _ : torch.Tensor) -> Dict[str, torch.Tensor]:
         return {}
 
-    def backward(self, input : torch.Tensor):
+    def backward(self, input : torch.Tensor) -> Dict[str, torch.Tensor]:
         network.set_requires_grad([self], True)
         
         A = torch.unsqueeze(input[:,0,...], 1)
@@ -200,10 +200,10 @@ class CycleGan(network.Network):
     def getSubModels(self) -> List[network.Network]:
         return [self.generator, self.discriminator]
         
-    def forward(self, x : torch.Tensor) -> torch.Tensor:
+    def forward(self, x : torch.Tensor) -> Dict[str, torch.Tensor]:
         return self.generator(x)
 
-    def backward(self, x : torch.Tensor) -> torch.Tensor:
+    def backward(self, x : torch.Tensor) -> Dict[str, torch.Tensor]:
         result = {}          
         result[self.generator.getName()] = self.generator.backward(x, self.discriminator)
         result[self.discriminator.getName()] = self.discriminator.backward(torch.cat((x, result[self.generator.getName()]["fake_A"].detach(), result[self.generator.getName()]["fake_B"].detach()), dim=1))
@@ -211,37 +211,3 @@ class CycleGan(network.Network):
 
     def logImage(self, input : torch.Tensor, output : Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
         return self.generator.logImage(input, output[self.generator.getName()])
-
-"""   def backward_G(self):
-        # GAN loss D_A(G_A(A))
-        D_fake_A = self.netD_A(self.fake_B)
-        # GAN loss D_B(G_B(B))
-        D_fake_B = self.netD_B(self.fake_A)
-        
-        # Forward cycle loss || G_B(G_A(A)) - A||
-        self.loss_cycle_A = self.criterionCycle(self.rec_A, self.real_A) * lambda_A
-        # Backward cycle loss || G_A(G_B(B)) - B||
-        self.loss_cycle_B = self.criterionCycle(self.rec_B, self.real_B) * lambda_B
-        # combined loss and calculate gradients
-        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B
-        self.loss_G.backward()
-
-    def backward_D_basic(self, netD, real, fake):
-
-        pred_real = netD(real)
-        loss_D_real = self.criterionGAN(pred_real, True)
-        # Fake
-        pred_fake = netD(fake.detach())
-        loss_D_fake = self.criterionGAN(pred_fake, False)
-        # Combined loss and calculate gradients
-        loss_D = (loss_D_real + loss_D_fake) * 0.5
-        loss_D.backward()
-        return loss_D
-
-    def backward_D_A(self):
-        fake_B = self.fake_B_pool.query(self.fake_B)
-        self.loss_D_A = self.backward_D_basic(self.netD_A, self.real_B, fake_B)
-
-    def backward_D_B(self):
-        fake_A = self.fake_A_pool.query(self.fake_A)
-        self.loss_D_B = self.backward_D_basic(self.netD_B, self.real_A, fake_A)"""

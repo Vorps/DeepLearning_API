@@ -1,8 +1,5 @@
 from enum import Enum
-from functools import partial
-import importlib
 import torch
-from abc import ABC, abstractmethod
 import numpy as np
 from typing import Dict, List
 from DeepLearning_API import config
@@ -39,7 +36,6 @@ class Encoder(torch.nn.Module):
     def __init__(self, channels : List[int], blockConfig : network.BlockConfig, downSampleMode : DownSampleMode, dim : int) -> None:
         super().__init__()
         self.encoder_blocks = torch.nn.ModuleList([network.ConvBlock(channels[i], channels[i+1], blockConfig, dim=dim) for i in range(len(channels)-1)])
-
         self.pool = torch.nn.ModuleList([Encoder._upsample_function(channels[i+1], blockConfig, downSampleMode, dim=dim) for i in range(len(channels)-2)])
     
     def forward(self, x : torch.Tensor) -> torch.Tensor:
@@ -57,7 +53,7 @@ class Decoder(torch.nn.Module):
         if upSampleMode == UpSampleMode.UPSAMPLE:
             upSample = torch.nn.Upsample(scale_factor=2, mode='nearest')
         if upSampleMode == UpSampleMode.CONV_TRANSPOSE:
-            upSample = network.getTorchModule("ConvTranspose", dim = dim)(in_channels = in_channels, out_channels = out_channels, kernel_size = 2, stride = 2, padding = 0)
+            upSample = network.getTorchModule("ConvTranspose", dim = dim)(in_channels = in_channels, out_channels = in_channels, kernel_size = 2, stride = 2, padding = 0)
         return upSample
 
     def __init__(self, channels : List[int], encoder_channels : List[int], blockConfig : network.BlockConfig, upSampleMode : UpSampleMode, attention : bool, dim : int) -> None:
@@ -65,7 +61,7 @@ class Decoder(torch.nn.Module):
         self.encoder_channels = encoder_channels
         self.upsampling = torch.nn.ModuleList([Decoder._upsample_function(channels[i], channels[i+1], upSampleMode, dim = dim) for i in range(len(channels)-1)])
         
-        self.decoder_blocks = torch.nn.ModuleList([network.ConvBlock(channels[i] + (encoder_channels[-i-2] if upSampleMode == UpSampleMode.UPSAMPLE else 0), channels[i+1], blockConfig, dim=dim) for i in range(len(channels)-1)]) 
+        self.decoder_blocks = torch.nn.ModuleList([network.ConvBlock(channels[i] + encoder_channels[-i-2], channels[i+1], blockConfig, dim=dim) for i in range(len(channels)-1)]) 
         self.attentionBlocks = torch.nn.ModuleList([network.AttentionBlock(channels[i], encoder_channels[-i-2], channels[i+1], dim=dim) for i in range(len(channels)-1)]) if attention else None
 
     def forward(self, x : torch.Tensor, encoder_filters : torch.nn.ModuleList) -> torch.Tensor:

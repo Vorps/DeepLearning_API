@@ -79,7 +79,7 @@ class Network(torch.nn.Module, ABC):
                 elif self.init_type == 'orthogonal':
                     torch.nn.init.orthogonal_(m.weight.data, gain=self.init_gain)
                 else:
-                    raise NotImplementedError('initialization method [%s] is not implemented' % self.init_type)
+                    raise NotImplementedError('Initialization method {} is not implemented'.format(self.init_type))
                 if hasattr(m, 'bias') and m.bias is not None:
                     torch.nn.init.constant_(m.bias.data, 0.0)
             elif classname.find('BatchNorm') != -1:
@@ -104,7 +104,8 @@ class Network(torch.nn.Module, ABC):
     def logImage(self, input : torch.Tensor, output : Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
         return None
 
-    def _logImageNormalize(self, input : torch.Tensor):
+    @staticmethod
+    def _logImageNormalize(input : torch.Tensor):
         b = -np.min(input)
         a = 1/(np.max(input)+b)
         return a*(input+b)
@@ -179,4 +180,3 @@ class AttentionBlock(torch.nn.Module):
         psi = self.relu(g1+x1)
         psi = self.psi(psi)
         return x*psi
-

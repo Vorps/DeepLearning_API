@@ -56,6 +56,7 @@ class Criterion(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
+        #self.device = device
 
 class Dice(Criterion):
     
