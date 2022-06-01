@@ -7,7 +7,7 @@ import numpy as np
 import datetime
 import os
 from enum import Enum
-from DeepLearning_API import DataTrain, config, MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, gpuInfo, getDevice, _getModule, Loss
+from DeepLearning_API import DataTrain, config, MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, gpuInfo, getDevice, _getModule, Loss, logImageNormalize
 from DeepLearning_API.networks import network
 import datetime
 
@@ -79,8 +79,6 @@ class Trainer:
         self.tb = None
         
         self.model          = model.getModel().to(self.device)
-        #print(self.model)
-        #exit(0)
         self.model.init(self.model.__class__.__name__, partial(Loss, device = self.device, nb_batch_per_step = self.nb_batch_per_step, groupsInput = self.groupsInput))
         
 
@@ -261,7 +259,7 @@ class Trainer:
         images =  self.model.logImage(input, out)
         if images is not None:
             for name, image in images.items():
-                self.tb.add_image("result/Train/"+name, image, self.it, dataformats='HW' if image.ndim == 2 else 'CHW')
+                self.tb.add_image("result/Train/"+name, logImageNormalize(image), self.it, dataformats='HW' if image.ndim == 2 else 'CHW')
 
 
     def _validation_log(self, input, out):
@@ -270,4 +268,4 @@ class Trainer:
         images =  self.model.logImage(input, out)
         if images is not None:
             for name, image in images.items():
-                self.tb.add_image("result/Validation/"+name, image, self.it, dataformats='HW' if image.ndim == 2 else 'CHW')
+                self.tb.add_image("result/Validation/"+name, logImageNormalize(image), self.it, dataformats='HW' if image.ndim == 2 else 'CHW')

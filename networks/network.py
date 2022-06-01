@@ -5,6 +5,8 @@ from typing_extensions import Self
 import torch
 from abc import ABC, abstractmethod
 import numpy as np
+from enum import Enum
+import ast
 
 from DeepLearning_API import config, _getModule, Loss
 
@@ -13,12 +15,18 @@ def set_requires_grad(nets : List[torch.nn.Module], requires_grad = False):
         for param in net.parameters():
             param.requires_grad = requires_grad
 
+class NormMode(Enum):
+    NONE = 0,
+    BATCH_NORM = 1
+    INSTANCE_NORM = 2
+
 class Criterion():
 
     @config(None)
     def __init__(self, group : str = "Default", l : float = 1) -> None:
         self.l = l
         self.group = group
+        torch.nn.BatchNorm1d
 
     def getCriterion(self, classpath : str, group : str, key : str) -> torch.nn.Module:
         module, name = _getModule(classpath, "criterion")
@@ -95,8 +103,15 @@ class Network(torch.nn.Module, ABC):
         if self.criterions is not None:
             for classpath in self.criterions:
                 self.criterions[classpath] = self.criterions[classpath].getCriterions(classpath, key)
-                
         self.loss : Loss = loss(self.criterions)
+
+    def forward(self, input : torch.Tensor) -> Dict[str, torch.Tensor]:
+        raise NotImplementedError()
+
+    def backward(self, input : torch.Tensor) -> Dict[str, torch.Tensor]:
+        out = self.forward(input)
+        self.loss.update(out[self.getName()] if len(self.getSubModels()) > 1 else out, input)
+        return {}
 
     def getSubModels(self) -> List[Self]:
         return [self]
@@ -104,39 +119,28 @@ class Network(torch.nn.Module, ABC):
     def logImage(self, input : torch.Tensor, output : Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
         return None
 
-    @staticmethod
-    def _logImageNormalize(input : torch.Tensor):
-        b = -np.min(input)
-        a = 1/(np.max(input)+b)
-        return a*(input+b)
-
     def getName(self):
         return self.__class__.__name__
-
-    def backward(self, input : torch.tensor):
-        out = self.forward(input)
-        self.loss.update(out[self.getName()] if len(self.getSubModels()) > 1 else out, input)
 
 def getTorchModule(name_fonction : str, dim : int = None) -> torch.nn.Module:
     return getattr(importlib.import_module("torch.nn"), "{}".format(name_fonction) + ("{}d".format(dim) if dim is not None else ""))
 
-
 class BlockConfig():
 
     @config("BlockConfig")
-    def __init__(self, nb_conv_per_level : int = 1, kernel_size : int = 3, stride : int = 1, padding : int = 1, activation : str = "ReLU", batchNorm : bool = False) -> None:
+    def __init__(self, nb_conv_per_level : int = 1, kernel_size : int = 3, stride : int = 1, padding : int = 1, activation : str = "ReLU", normMode : str = "NONE") -> None:
         self.kernel_size = kernel_size
         self.stride = stride
         self.padding = padding
         self.nb_conv_per_level = nb_conv_per_level
         self.activation = activation
-        self.batchNorm = batchNorm
+        self.normMode = NormMode._member_map_[normMode]
 
     def getConv(self, in_channels : int, out_channels : int, dim : int) -> torch.nn.Conv3d:
         return getTorchModule("Conv", dim = dim)(in_channels = in_channels, out_channels = out_channels, kernel_size = self.kernel_size, stride = self.stride, padding = self.padding)
     
     def getActivation(self) -> torch.nn.Module:
-        return getTorchModule(self.activation)()
+        return getTorchModule(self.activation)(*[ast.literal_eval(value) for value in self.activation.split(";")[1:]], inplace=True)
         
 class ConvBlock(torch.nn.Module):
     
@@ -145,8 +149,10 @@ class ConvBlock(torch.nn.Module):
         args = []
         for _ in range(blockConfig.nb_conv_per_level):
             args.append(blockConfig.getConv(in_channels, out_channels, dim))
-            if blockConfig.batchNorm:
+            if blockConfig.normMode == NormMode.BATCH_NORM:
                 args.append(getTorchModule("BatchNorm", dim = dim)(out_channels))
+            if blockConfig.normMode == NormMode.INSTANCE_NORM:
+                args.append(getTorchModule("InstanceNorm", dim = dim)(out_channels))
             args.append(blockConfig.getActivation())
             in_channels = out_channels
         self.block = torch.nn.Sequential(*args)
@@ -163,7 +169,6 @@ class ResBlock(ConvBlock):
 
     def forward(self, x : torch.Tensor) -> torch.Tensor:
         return self.activation(self.block(x) + x)
-
 
 class AttentionBlock(torch.nn.Module):
 

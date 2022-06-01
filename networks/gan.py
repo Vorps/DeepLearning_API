@@ -12,38 +12,17 @@ class Discriminator(network.Network):
                     optimizer : network.Optimizer = network.Optimizer(),
                     scheduler : network.Scheduler = network.Scheduler(),
                     criterions: Dict[str, network.Criterions] = {"default" : network.Criterions()},
-                    dim : int = 3) -> None:
-
+                    dim : int = 3,
+                    channels : List[int] = [1, 16, 32, 64, 128, 1],
+                    blockConfig : network.BlockConfig = network.BlockConfig()) -> None:
         super().__init__(optimizer = optimizer, scheduler = scheduler, criterions = criterions, dim=dim)
-        
-        conv = network.getTorchModule("Conv", dim)
+        self.model = torch.nn.Sequential(*[network.ConvBlock(channels[i], channels[i+1], blockConfig, dim=dim) for i in range(len(channels)-1)][:-1])
+        #self.head = torch.nn.Linear(channels[-1], 1)
 
-        convs : List[torch.nn.Conv3d]= [
-            conv(in_channels = 1, out_channels = 16, kernel_size = 4, stride = 2, padding = 1),
-            conv(in_channels = 16, out_channels = 32, kernel_size = 4, stride = 2, padding = 1),
-            conv(in_channels = 32, out_channels = 64, kernel_size = 4, stride = 2, padding = 1),
-            conv(in_channels = 64, out_channels = 128, kernel_size = 4, stride = 2, padding = 1),
-            conv(in_channels = 128, out_channels = 1, kernel_size = 4, stride = 2, padding = 1)]
+    def forward(self, x : torch.Tensor) -> Dict[str, torch.Tensor]:
+        return {"is_real" : self.model(x)}
 
-        args = []
-        for conv in convs[:-1]:
-            args.append(conv)
-            args.append(torch.nn.BatchNorm3d(conv.out_channels))
-            args.append(torch.nn.LeakyReLU(0.02))
-        
-        args.append(convs[-1])
-        #args.append(torch.nn.BatchNorm3d(convs[-1].out_channels))
-        #args.append(torch.nn.Sigmoid())
-        
-        self.conv = torch.nn.Sequential(*args)
-
-    def forward(self, _ : torch.Tensor) -> Dict[str, torch.Tensor]:
-        return {}
-
-    def backward(self, x : torch.Tensor) -> Dict[str, torch.Tensor]:
-        return {"is_real" : self.conv(x)}
-
-class Generator(network.Network):
+class Generator(segmentation.UNet):
 
     @config("Generator")
     def __init__(self, 
@@ -53,47 +32,80 @@ class Generator(network.Network):
                     dim : int = 3,
                     encoder_channels : List[int] = [1, 16, 32, 64],
                     decoder_channels : List[int] = [64, 32, 16],
-                    final_channels : List[int] = [],
+                    final_channels : List[int] = [16, 1],
                     attention : bool = False,
                     blockConfig : network.BlockConfig = network.BlockConfig()) -> None:
 
-        super().__init__(optimizer = optimizer, scheduler = scheduler, criterions = criterions, dim = dim)
-        self.unet = segmentation.UNet(  optimizer=None,
-                                        scheduler=None,
-                                        criterions=None,
-                                        dim=dim,
-                                        encoder_channels=encoder_channels,
-                                        decoder_channels=decoder_channels,
-                                        final_channels=final_channels,
-                                        downSampleMode="MAXPOOL",
-                                        upSampleMode="CONV_TRANSPOSE",
-                                        attention=attention,
-                                        blockConfig=blockConfig)
-        self.model = torch.nn.Sequential(*[network.ResBlock(decoder_channels[-1], decoder_channels[-1], blockConfig, dim) for _ in range(2)], 
-            network.getTorchModule("Conv", dim)(in_channels = decoder_channels[-1], out_channels = 1, kernel_size = 3, stride = 1, padding = 1))
+        super().__init__(   optimizer = optimizer, 
+                            scheduler = scheduler,
+                            criterions = criterions,
+                            dim = dim,
+                            encoder_channels=encoder_channels,
+                            decoder_channels=decoder_channels,
+                            final_channels=final_channels,
+                            downSampleMode="MAXPOOL",
+                            upSampleMode="CONV_TRANSPOSE",
+                            attention=attention,
+                            blockConfig=blockConfig)
+        
+    def forward(self, input : torch.Tensor) -> Dict[str, torch.Tensor]:
+        return {"fake_B" : super().forward(input)["output"]}
+        
+    def logImage(self, input : torch.Tensor, output : Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
+        result = output["fake_B"][0, 0, output["fake_B"].shape[2]//2, ...].detach().cpu().numpy()
+        return {"A" : input[0, 0, input.shape[2]//2, ...].cpu().numpy(), "B" : input[0, 1, input.shape[2]//2, ...].cpu().numpy(), "fake_B" : result}
+
+class Gan(network.Network):
+
+    @config("Gan")
+    def __init__(self, generator : Generator = Generator(), discriminator : Discriminator = Discriminator()) -> None:
+        super().__init__()
+        self.generator = generator
+        self.discriminator = discriminator
+    
+    def init(self, key : str, loss : Loss) -> None:
+        self.generator.init("{}.Generator".format(key), loss)
+        self.discriminator.init("{}.Discriminator".format(key), loss)
+
+    def getSubModels(self) -> List[network.Network]:
+        return [self.generator, self.discriminator]
 
     def forward(self, x : torch.Tensor) -> Dict[str, torch.Tensor]:
-        return {"fake" : self.model(self.unet(x))}
+        return self.generator(x)
 
-    def backward(self, x : torch.Tensor, discriminator : Discriminator = None):
-        fake_image = self.model(self.unet(x))
-        result = {"fake" : fake_image}
-        if discriminator is not None:
-            result.update(discriminator.backward(fake_image))
-        return result
+    def backward(self, input : torch.Tensor) -> Dict[str, torch.Tensor]:
+        output : Dict[str, Dict[str, torch.Tensor]] = {}
+        
+        A, B = torch.unsqueeze(input[:, 0, ...], 1), torch.unsqueeze(input[:, 1, ...], 1)
+        
+        D_B = self.discriminator.forward(B)["is_real"]
+        fake_B = self.generator.forward(A)["fake_B"]
+        D_fake_B = self.discriminator.forward(fake_B.detach())["is_real"]
+        
+        output[self.discriminator.getName()] = {"D_B" : D_B, "D_fake_B" : D_fake_B}
+        self.discriminator.loss.update(output[self.discriminator.getName()], input)
+        
+        D_fake_B = self.discriminator.forward(fake_B)["is_real"]
+        output[self.generator.getName()] = {"fake_B" : fake_B, "D_fake_B" : D_fake_B}
+        self.generator.loss.update(output[self.generator.getName()], input)
+        
+        return output
 
-    def logImage(self, _ : torch.Tensor, output : Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
-        result = output["fake"][0, 0, output["fake"].shape[2]//2, ...].detach().cpu().numpy()
-        return {"fake" : self._logImageNormalize(result)}
-
-
+    def logImage(self, input : torch.Tensor, output : Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
+        return self.generator.logImage(input, output[self.generator.getName()])
 
 class CycleGanDiscriminator(network.Network):
 
     @config("CycleGanDiscriminator")
-    def __init__(self, optimizer : network.Optimizer = network.Optimizer(), scheduler : network.Scheduler = network.Scheduler(), criterions: Dict[str, network.Criterions] = {"default" : network.Criterions()}, dim : int = 3) -> None:
+    def __init__(   self, 
+                    optimizer : network.Optimizer = network.Optimizer(),
+                    scheduler : network.Scheduler = network.Scheduler(),
+                    criterions: Dict[str, network.Criterions] = {"default" : network.Criterions()},
+                    dim : int = 3,
+                    channels : List[int] = [1, 16, 32, 64, 128, 1],
+                    blockConfig : network.BlockConfig = network.BlockConfig()) -> None:
         super().__init__(optimizer = optimizer, scheduler = scheduler, criterions = criterions, dim = dim)
-        self.discriminator_1, self.discriminator_2 = [Discriminator(optimizer, scheduler, criterions, dim) for _ in range(2)]
+        self.discriminator_1, self.discriminator_2 = [Discriminator(optimizer, scheduler, criterions, dim, channels, blockConfig) for _ in range(2)]
 
     def forward(self, _ : torch.Tensor) -> Dict[str, torch.Tensor]:
         return {}
@@ -114,7 +126,7 @@ class CycleGanDiscriminator(network.Network):
 
         out = {"D_A" : D_A, "D_B" : D_B, "D_fake_A" : D_fake_A, "D_A" : D_A, "D_fake_B" : D_fake_B, "D_B" : D_B}
 
-        self.loss.update(out[self.getName()] if len(self.getSubModels()) > 1 else out, input)
+        self.loss.update(out, input)
 
         return {}
 
@@ -144,7 +156,7 @@ class CycleGanGenerator(network.Network):
                                                         blockConfig=blockConfig) for _ in range(2)]
 
     def forward(self, x : torch.Tensor) -> Dict[str, torch.Tensor]:
-        return {"fake_A" : self.generator_2(torch.unsqueeze(x[:,0,...], 1))["fake"]}
+        return {"fake_A" : self.generator_2(torch.unsqueeze(x[:,0,...], 1))["fake"], "fake_B" : self.generator_1(torch.unsqueeze(x[:,1,...], 1))["fake"]}
 
     def backward(self, input : torch.Tensor, cycleGanDiscriminator : CycleGanDiscriminator) -> Dict[str, torch.Tensor]:
         network.set_requires_grad([cycleGanDiscriminator], False)
@@ -177,14 +189,14 @@ class CycleGanGenerator(network.Network):
         cyc_A = output["cyc_A"][0,0, output["cyc_A"].shape[2]//2, ...].detach().cpu().numpy()
         cyc_B = output["cyc_B"][0,0, output["cyc_B"].shape[2]//2, ...].detach().cpu().numpy()
 
-        A_to_B = list(self.generator_2.logImage(input[:,0, ...], {"fake" : output["fake_B"]}).values())[0]
-        B_to_A = list(self.generator_1.logImage(input[:,1, ...], {"fake" : output["fake_A"]}).values())[0]
+        A_to_B = self.generator_2.logImage(input[:,0, ...], {"fake" : output["fake_B"]}).values()["fake"]
+        B_to_A = self.generator_1.logImage(input[:,1, ...], {"fake" : output["fake_A"]}).values()["fake"]
 
         diff_A = A-cyc_A
         diff_B = B-cyc_B
-        return {"B/real_B" : self._logImageNormalize(B), "B/fake_B" : A_to_B, "A/real_A" : self._logImageNormalize(A), "A/fake_A" : B_to_A, "A/cyc_A" : self._logImageNormalize(diff_A), "B/cyc_B" : self._logImageNormalize(diff_B)}
-                        
-    
+
+        return {"B/real_B" : B, "B/fake_B" : A_to_B, "A/real_A" : A, "A/fake_A" : B_to_A, "A/cyc_A" : diff_A, "B/cyc_B" : diff_B}
+
 class CycleGan(network.Network):
 
     @config("CycleGan")
@@ -204,7 +216,7 @@ class CycleGan(network.Network):
         return self.generator(x)
 
     def backward(self, x : torch.Tensor) -> Dict[str, torch.Tensor]:
-        result = {}          
+        result : Dict[str, Dict[str, torch.Tensor]] = {}          
         result[self.generator.getName()] = self.generator.backward(x, self.discriminator)
         result[self.discriminator.getName()] = self.discriminator.backward(torch.cat((x, result[self.generator.getName()]["fake_A"].detach(), result[self.generator.getName()]["fake_B"].detach()), dim=1))
         return result

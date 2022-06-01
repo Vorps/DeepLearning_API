@@ -7,7 +7,11 @@ from DeepLearning_API.networks import network
 
 class UpSampleMode(Enum):
     CONV_TRANSPOSE = 0,
-    UPSAMPLE = 1
+    UPSAMPLE_NEAREST = 1
+    UPSAMPLE_LINEAR = 2
+    UPSAMPLE_BILINEAR = 3
+    UPSAMPLE_BICUBIC = 4
+    UPSAMPLE_TRILINEAR = 5
 
 class DownSampleMode(Enum):
     MAXPOOL = 0
@@ -23,14 +27,8 @@ class Encoder(torch.nn.Module):
         if downSampleMode == DownSampleMode.AVGPOOL:
             pool           = network.getTorchModule("AvgPool", dim = dim)(2)
         if downSampleMode == DownSampleMode.CONV_STRIDE:
-            args = []
-            conv = blockConfig.getConv(in_channels = in_channels, out_channels = in_channels, dim = dim)
-            conv.stride = 2
-            args.append(conv)
-            if blockConfig.batchNorm:
-                args.append(network.getTorchModule("BatchNorm", dim = dim))
-            args.append(blockConfig.getActivation())
-            pool           = torch.nn.Sequential(*args)
+            blockConfig = network.BlockConfig(nb_conv_per_level=1, kernel_size=blockConfig.kernel_size, stride=2, padding=1, activation=blockConfig.activation, normMode=blockConfig.normMode)
+            pool = network.ConvBlock(in_channels = in_channels, out_channels = in_channels, blockConfig = blockConfig, dim = dim)
         return pool
 
     def __init__(self, channels : List[int], blockConfig : network.BlockConfig, downSampleMode : DownSampleMode, dim : int) -> None:
@@ -50,10 +48,10 @@ class Encoder(torch.nn.Module):
 class Decoder(torch.nn.Module):
     @staticmethod
     def _upsample_function(in_channels : int, out_channels : int, upSampleMode : UpSampleMode, dim : int) -> torch.nn.Module:
-        if upSampleMode == UpSampleMode.UPSAMPLE:
-            upSample = torch.nn.Upsample(scale_factor=2, mode='nearest')
         if upSampleMode == UpSampleMode.CONV_TRANSPOSE:
             upSample = network.getTorchModule("ConvTranspose", dim = dim)(in_channels = in_channels, out_channels = out_channels, kernel_size = 2, stride = 2, padding = 0)
+        else:
+            upSample = torch.nn.Upsample(scale_factor=2, mode=upSampleMode.name.replace("UPSAMPLE_", "").lower())
         return upSample
 
     def __init__(self, channels : List[int], encoder_channels : List[int], blockConfig : network.BlockConfig, upSampleMode : UpSampleMode, attention : bool, dim : int) -> None:
@@ -61,22 +59,22 @@ class Decoder(torch.nn.Module):
         self.encoder_channels = encoder_channels
         self.upsampling = torch.nn.ModuleList([Decoder._upsample_function(channels[i], channels[i+1], upSampleMode, dim = dim) for i in range(len(channels)-1)])
 
-        self.decoder_blocks = torch.nn.ModuleList([network.ConvBlock(channels[i + (0 if upSampleMode == UpSampleMode.UPSAMPLE else 1)]+encoder_channels[-i-2], channels[i+1], blockConfig, dim=dim) for i in range(len(channels)-1)]) 
+        self.decoder_blocks = torch.nn.ModuleList([network.ConvBlock(channels[i + (0 if upSampleMode.name.startswith("UPSAMPLE")  else 1)]+encoder_channels[-i-2], channels[i+1], blockConfig, dim=dim) for i in range(len(channels)-1)]) 
         self.attentionBlocks = torch.nn.ModuleList([network.AttentionBlock(channels[i], encoder_channels[-i-2], channels[i+1], dim=dim) for i in range(len(channels)-1)]) if attention else None
 
     def forward(self, x : torch.Tensor, encoder_filters : torch.nn.ModuleList) -> torch.Tensor:
         for i in range(len(encoder_filters)):
             if self.attentionBlocks is not None:
                 encoder_filters[i] = self.attentionBlocks[i](x, encoder_filters[i])
-            x        = self.upsampling[i](x)
-            x        = torch.cat([x,  encoder_filters[i]], dim=1)
-            x        = self.decoder_blocks[i](x)
+            x = self.upsampling[i](x)
+            x = torch.cat([x,  encoder_filters[i]], dim=1)
+            x = self.decoder_blocks[i](x)
         return x
 
 class UNet(network.Network):
 
     @config("UNet")
-    def __init__(self,
+    def __init__(   self,
                     optimizer : network.Optimizer = network.Optimizer(),
                     scheduler : network.Scheduler = network.Scheduler(),
                     criterions: Dict[str, network.Criterions] = {"default" : network.Criterions()},
@@ -93,15 +91,16 @@ class UNet(network.Network):
         self.encoder     = Encoder(channels = encoder_channels, blockConfig = blockConfig, downSampleMode = DownSampleMode._member_map_[downSampleMode], dim=dim)
         self.decoder     = Decoder(channels = decoder_channels, encoder_channels = encoder_channels, blockConfig = blockConfig, upSampleMode=UpSampleMode._member_map_[upSampleMode], attention = attention, dim=dim)
         self.final_conv =  torch.nn.Sequential(*[network.ConvBlock(final_channels[i], final_channels[i+1], blockConfig, dim=dim) for i in range(len(final_channels)-1)])
-    
-    def forward(self, x : torch.Tensor) -> torch.Tensor:
-        x ,encoder_filters = self.encoder(x)
-        out      = self.decoder(x, encoder_filters[::-1])
-        out      = self.final_conv(out)
-        return out
-    
-    def logImage(self, input : torch.Tensor, output : Dict[str, torch.Tensor]) -> List[np.ndarray]:
-        result = torch.argmax(torch.softmax(output[0, ...], dim = 0), dim=0).cpu().numpy()
-        if len(result.shape) == 3:
-            result = np.add.reduce(result, axis = 2)
-        return result
+        self.final_channel = final_channels[-1] if len(final_channels) else decoder_channels[-1]
+
+    def forward(self, input : torch.Tensor) -> Dict[str, torch.Tensor]:
+        x, encoder_filters = self.encoder(input)
+        x = self.decoder(x, encoder_filters[::-1])
+        return {"output" : self.final_conv(x)}
+        
+    def logImage(self, input : torch.Tensor, output : Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
+        output = torch.argmax(torch.softmax(output[0, ...], dim = 0), dim=0).cpu().numpy()
+        if len(output.shape) == 3:
+            output = np.add.reduce(output, axis=2)
+            input = np.add.reduce(input[0, 0, ...], axis=2)
+        return {"input" : input, "output" : output}

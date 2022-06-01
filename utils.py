@@ -122,7 +122,7 @@ def gpuInfo(device) -> str:
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
     else:
         return ""
-    return  "Memory GPU ({:.2f}G ({:.2f} %)) | {} | Power {}W | Temperature {}°C | Utilization {} %".format(memory.used/(10**9), memory.used/memory.total*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU), pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+    return  "Memory GPU ({:.2f}G ({:.2f} %)) | {} | Power {}W | Temperature {}°C".format(memory.used/(10**9), memory.used/memory.total*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
 
 def getAvailableDevice() -> int:
     pynvml.nvmlInit()
@@ -152,4 +152,7 @@ def getDevice(device : int) -> torch.device:
     else:
         return torch.device("cpu")
 
-
+def logImageNormalize(input : torch.Tensor):
+    b = -np.min(input)
+    a = 1/(np.max(input)+b)
+    return a*(input+b)

@@ -4,8 +4,10 @@ import argparse
 import os
 
 import numpy as np
+import torch
 
 from DeepLearning_API import Trainer, State, Predictor, CONFIG_FILE
+from criterion import GradientImages
 
 def main():
     parser = argparse.ArgumentParser(description="DeepLearing API",
@@ -47,3 +49,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+ 
