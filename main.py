@@ -1,13 +1,10 @@
-from enum import Enum
-import sys
 import argparse
 import os
 
-import numpy as np
-import torch
-
-from DeepLearning_API import Trainer, State, Predictor, CONFIG_FILE
-from criterion import GradientImages
+from DeepLearning_API import CONFIG_FILE
+from DeepLearning_API.trainer import Trainer
+from DeepLearning_API.predictor import Predictor
+from DeepLearning_API.utils import State
 
 def main():
     parser = argparse.ArgumentParser(description="DeepLearing API",
@@ -17,6 +14,7 @@ def main():
     parser.add_argument("-c", "--config", default="None", help="Configuration file location")
     parser.add_argument("-models_dir", "--MODELS_DIRECTORY", default="./Models/", help="Models location")
     parser.add_argument("-checkpoints_dir", "--CHECKPOINTS_DIRECTORY", default="./Checkpoints/", help="Checkpoints location")
+    parser.add_argument("-url", "--URL_MODEL", default="", help="URL Model")
     parser.add_argument("-predictions_dir", "--PREDICTIONS_DIRECTORY", default="./Predictions/", help="Predictions location")
     parser.add_argument("-statistics_dir", "--STATISTICS_DIRECTORY", default="./Statistics/", help="Statistics location")
     parser.add_argument("-setups_dir", "--SETUPS_DIRECTORY", default="./Setups/", help="Setups location")
@@ -28,7 +26,10 @@ def main():
     os.environ["DL_API_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]
     os.environ["DL_API_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
     os.environ["DL_API_STATISTICS_DIRECTORY"] = config["STATISTICS_DIRECTORY"]
+    os.environ["DL_API_URL_MODEL"] = config["URL_MODEL"]
+
     os.environ["DL_API_SETUPS_DIRECTORY"] = config["SETUPS_DIRECTORY"]
+
     os.environ["DL_API_OVERWRITE"] = "{}".format(config["y"])
     os.environ["DEEP_LEANING_API_CONFIG_MODE"] = "Done"
     
@@ -39,12 +40,12 @@ def main():
 
     if config["type"] is not State.PREDICTION:
         os.environ["DEEP_LEARNING_API_ROOT"] = "Trainer"
-        with Trainer(config = CONFIG_FILE()) as trainer:
+        with Trainer(config = CONFIG_FILE()) as trainer:  # type: ignore
             trainer.train(config["type"])
 
     else:
         os.environ["DEEP_LEARNING_API_ROOT"] = "Predictor"
-        with Predictor(config = CONFIG_FILE()) as predictor:
+        with Predictor(config = CONFIG_FILE()) as predictor: # type: ignore
             predictor.predict()
 
 if __name__ == "__main__":

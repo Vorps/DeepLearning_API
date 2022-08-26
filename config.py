@@ -1,14 +1,17 @@
 import os
-from typing import Dict
+from typing import Any, Dict, List, Optional, Union
+import typing
 import ruamel.yaml
 import inspect 
 import collections
 from copy import deepcopy
-import numpy as np
+
+import torch
 
 from DeepLearning_API import CONFIG_FILE
 
 yaml = ruamel.yaml.YAML()
+
 
 class ConfigError(Exception):
 
@@ -22,7 +25,7 @@ class Config():
         self.filename = filename
         self.keys = key.split(".")
 
-    def __enter__(self) -> None:
+    def __enter__(self):
         if not os.path.exists(self.filename):
             result = input("Create a new config file ? [no,yes,interactive] : ")
             if result in ["yes", "interactive"]:
@@ -96,7 +99,7 @@ class Config():
         return default.split(":")[1] if len(default.split(":")) > 1 else default
 
     @staticmethod
-    def _getInputDefault(name : str, default : str, isList : bool = False):
+    def _getInputDefault(name : str, default : Optional[str], isList : bool = False) -> Union[List[Optional[str]], Optional[str]]:
         if isinstance(default, str) and (default == "default" or (len(default.split(":")) > 1 and default.split(":")[0] == "default")):
             if os.environ["DEEP_LEANING_API_CONFIG_MODE"] == "interactive":
                 if isList:
@@ -126,8 +129,7 @@ class Config():
                 value = default
             value_config = value
         else:
-            value = default if default != inspect._empty else None
-            value = Config._getInputDefault(name, value)
+            value = Config._getInputDefault(name, default if default != inspect._empty else None)
             
             value_config = value
             if type(value_config) == tuple:
@@ -143,7 +145,7 @@ class Config():
 
             if type(value) == dict:
                 key_tmp = []
-
+                
                 value_config = {}
                 dict_value = {}
                 for key in value:
@@ -157,13 +159,16 @@ class Config():
                     value_config[key] = None
                     dict_value[key] = value_tmp
                 value = dict_value
+        if isinstance(self.config, str):
+            os.environ['DEEP_LEARNING_API_CONFIG_VARIABLE'] = "True"
+            return None
 
         self.config[name] = value_config if value_config is not None else "None"
         if value == "None":
             value = None
         return value
-
-def config(key : str = None):
+                    
+def config(key : Optional[str] = None):
     def decorator(function):
         def new_function(*args, **kwargs):
             if "config" in kwargs:
@@ -172,26 +177,34 @@ def config(key : str = None):
                     filename = os.environ['DEEP_LEARNING_API_CONFIG_FILE']
                 else:
                     os.environ['DEEP_LEARNING_API_CONFIG_FILE'] = filename
-                key_tmp =  kwargs["args"]+("."+key if key is not None else "") if "args" in kwargs else key
+                key_tmp =  kwargs["DL_args"]+("."+key if key is not None else "") if "DL_args" in kwargs else key
+                without =  kwargs["DL_without"] if "DL_without" in kwargs else []
                 with Config(filename, key_tmp) as config:
+                    os.environ['DEEP_LEARNING_API_CONFIG_VARIABLE'] = "False"
                     kwargs = {} 
                     for param in list(inspect.signature(function).parameters.values())[len(args):]:
-                        if str(param.annotation).startswith("typing.Union"):
+                        annotation = param.annotation
+                        if str(annotation).startswith("typing.Union"):
+                            if isinstance(annotation, typing._Union):
+                                for i in annotation.__args__:
+                                    annotation = i
+                                    break
+                        if param.name in without:
                             continue
-                        if not param.annotation == inspect._empty:
-                            if param.annotation not in [int, str, bool, float]:
-                                if "__extra__" in param.annotation.__dict__:
-                                    if param.annotation.__extra__ == list or param.annotation.__extra__ == tuple:
-                                        if param.annotation.__args__[0] in [int, str, bool, float]:
+                        if not annotation == inspect._empty:
+                            if annotation not in [int, str, bool, float, torch.Tensor]:
+                                if "__extra__" in annotation.__dict__:
+                                    if annotation.__extra__ == list or annotation.__extra__ == tuple:
+                                        if annotation.__args__[0] in [int, str, bool, float]:
                                             values = config.getValue(param.name, param.default)
                                             kwargs[param.name] = values
                                         else:
                                             raise ConfigError()
-                                    elif param.annotation.__extra__ == dict:
-                                        if param.annotation.__args__[0] == str:
+                                    elif annotation.__extra__ == dict:
+                                        if annotation.__args__[0] == str:
                                             values = config.getValue(param.name, param.default)
-                                            if values is not None and param.annotation.__args__[1] not in [int, str, bool, float]:
-                                                kwargs[param.name] = {value : param.annotation.__args__[1](config = filename, args = key_tmp+"."+param.name+"."+value) for value in values}
+                                            if values is not None and annotation.__args__[1] not in [int, str, bool, float]:
+                                                kwargs[param.name] = {value : annotation.__args__[1](config = filename, DL_args = key_tmp+"."+param.name+"."+value) for value in values}
                                             else:
                                                 kwargs[param.name] = values
                                         else: 
@@ -199,7 +212,9 @@ def config(key : str = None):
                                     else:
                                         raise ConfigError()
                                 else:
-                                    kwargs[param.name] = param.annotation(config = filename, args = key_tmp)
+                                    kwargs[param.name] = annotation(config = filename, DL_args = key_tmp)
+                                    if os.environ['DEEP_LEARNING_API_CONFIG_VARIABLE'] == "True":
+                                        kwargs[param.name] = None
                             else:
                                 kwargs[param.name] = config.getValue(param.name, param.default)
                         elif param.name != "self":

@@ -1,4 +1,4 @@
-from functools import partial
+"""from functools import partial
 import importlib
 import torch
 from abc import ABC, abstractmethod
@@ -113,9 +113,7 @@ class VoxelMorph(segmentation.UNet):
 
 
 class SpatialTransformer(torch.nn.Module):
-    """
-    N-D Spatial Transformer
-    """
+    
 
     def __init__(self, size : List[int]):
         super().__init__()
@@ -160,10 +158,7 @@ class VecInt(torch.nn.Module):
 
 
 class ResizeTransform(torch.nn.Module):
-    """
-    Resize a transform, which involves resizing the vector field *and* rescaling it.
-    """
-
+   
     def __init__(self, vel_resize, ndims):
         super().__init__()
         self.factor = 1.0 / vel_resize
@@ -176,4 +171,4 @@ class ResizeTransform(torch.nn.Module):
         elif self.factor > 1:
             x = self.factor * x
             x = torch.nn.functional.interpolate(x, align_corners=True, scale_factor=self.factor, mode="trilinear", recompute_scale_factor = True)
-        return x
+        return x"""

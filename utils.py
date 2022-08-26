@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import pynvml
 import psutil
 import h5py
@@ -7,42 +7,42 @@ import numpy as np
 import os
 import torch
 import datetime
+from abc import ABC
+from enum import Enum
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
 
-def dataset_to_data(dataset) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def dataset_to_data(dataset : h5py.Dataset) -> Tuple[np.ndarray, h5py.AttributeManager]:
     data = np.zeros(dataset.shape, dataset.dtype)
     dataset.read_direct(data)
-    return data, dataset.attrs['Origin'], dataset.attrs['Spacing'], dataset.attrs['Direction']
+    return data, dataset.attrs
 
-def dataset_to_image(dataset) -> sitk.Image:
-    data, origin, spacing, direction = dataset_to_data(dataset)
+def dataset_to_image(dataset : h5py.Dataset) -> sitk.Image:
+    data, attributes = dataset_to_data(dataset)
     image = sitk.GetImageFromArray(data)
-    image.SetOrigin(origin)
-    image.SetSpacing(spacing)
-    image.SetDirection(direction)
+    image.SetOrigin(attributes["Origin"])
+    image.SetSpacing(attributes["Spacing"])
+    image.SetDirection(attributes["Direction"])
     return image
 
-def data_to_dataset(h5 : h5py.File, name, data : np.ndarray, origin, spacing, direction) -> None:
+def data_to_dataset(h5 : h5py.Group, name : str, data : np.ndarray, attributes : Dict[str, object] = {}) -> None:
     if name in h5:
         del h5[name]
     dataset = h5.create_dataset(name, data=data, dtype=data.dtype, chunks=None)
-    dataset.attrs['Origin'] = origin
-    dataset.attrs['Spacing'] = spacing
-    dataset.attrs['Direction'] = direction
+    dataset.attrs.update(attributes)
 
-def image_to_dataset(h5, name, image) -> None:
-    data_to_dataset(h5, name, sitk.GetArrayFromImage(image), origin=image.GetOrigin(), spacing=image.GetSpacing(), direction=image.GetDirection())
-
+def image_to_dataset(h5 : h5py.Group, name : str, image : sitk.Image, attributes : Dict[str, object] = {}) -> None:
+    attributes.update({"Origin" : image.GetOrigin(), "Spacing" : image.GetSpacing(), "Direction" : image.GetDirection()})
+    data_to_dataset(h5, name, sitk.GetArrayFromImage(image), attributes)
 
 class DatasetUtils():
 
-    def __init__(self, filename, read = True) -> None:
+    def __init__(self, filename : str, read : bool = True) -> None:
         self.filename = filename
         self.data = {}
         self.read = read
 
-    def __enter__(self) -> None:
+    def __enter__(self):
         if self.read:
             self.h5 = h5py.File(self.filename, 'r')
         else:
@@ -55,17 +55,26 @@ class DatasetUtils():
             self.h5.attrs["Date"] = DATE()
         return self
     
-    def __exit__(self, type, value, traceback) -> None:
+    def __exit__(self, type, value, traceback):
         self.h5.close()
 
-    def writeImage(self, group, name, image) -> None:
+    def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Dict[str, object] = {}) -> None:
         if group not in self.h5:
             self.h5.create_group(group)
-        image_to_dataset(self.h5[group], name, image)
+        h5_group = self.h5[group]
+        if isinstance(h5_group, h5py.Group):
+            image_to_dataset(h5_group, name, image, attributes)
+    
+    def writeData(self, group : str, name : str, data : np.ndarray, attributes : Dict[str, object] = {}) -> None:
+        if group not in self.h5:
+            self.h5.create_group(group)
+        h5_group = self.h5[group]
+        if isinstance(h5_group, h5py.Group):
+            data_to_dataset(h5_group, name, data, attributes)
 
-    def readImages(self, path_dest) -> None:
+    def readImages(self, path_dest : str) -> None:
         def write(name, obj):
-            if isinstance(obj, h5py._hl.dataset.Dataset):
+            if isinstance(obj, h5py.Dataset):
                 if len(name.split("/")) > 1 and not os.path.exists(path_dest+"/".join(name.split("/")[:-1])):
                     os.makedirs(path_dest+"/".join(name.split("/")[:-1]))
                 if not os.path.exists(path_dest+name):
@@ -77,18 +86,20 @@ class DatasetUtils():
                 
         self.h5.visititems(write)
 
-    def directory_to_dataset(self, src_path):
+    def directory_to_dataset(self, src_path : str):
         for root, dirs, files in os.walk(src_path):
             path = root.replace(src_path, "")
             for i, file in enumerate(files):
                 if file.endswith(".mha"):
                     if path not in self.h5:
                        self.h5.create_group(path)
-                    image_to_dataset(self.h5[path], file, sitk.ReadImage("{}/{}".format(root, file)))
+                    h5_group = self.h5[path]
+                    if isinstance(h5_group, h5py.Group):
+                        image_to_dataset(h5_group, file, sitk.ReadImage("{}/{}".format(root, file)))
                 print("Compute in progress : {:.2f} %".format((i+1)/len(files)*100))
         
         
-def _getModule(classpath, type):
+def _getModule(classpath : str, type : str):
     if len(classpath.split("_")) > 1:
         module = ".".join(classpath.split("_")[:-1])
         name = classpath.split("_")[-1] 
@@ -103,15 +114,15 @@ def cpuInfo() -> str:
 def memoryInfo() -> str:
     return "Memory ({:.2f}G ({:.2f} %))".format(psutil.virtual_memory()[3]/2**30, psutil.virtual_memory()[2])
 
-def getMemory() -> str:
+def getMemory() -> float:
     return psutil.virtual_memory()[3]/2**30
 
-def memoryForecast(memory_init, i, size) -> str:
+def memoryForecast(memory_init : float, i : float, size : float) -> str:
     current_memory = getMemory()
     forecast = memory_init + ((current_memory-memory_init)*size/i) if i > 0 else 0
     return "Memory forecast ({:.2f}G ({:.2f} %))".format(forecast, forecast/(psutil.virtual_memory()[0]/2**30)*100)
 
-def gpuInfo(device) -> str:
+def gpuInfo(device : int) -> str:
     if isinstance(device, torch.device):
         if str(device).startswith("cuda:"):
             device = int(str(device).replace("cuda:", ""))
@@ -124,7 +135,7 @@ def gpuInfo(device) -> str:
         return ""
     return  "Memory GPU ({:.2f}G ({:.2f} %)) | {} | Power {}W | Temperature {}°C".format(memory.used/(10**9), memory.used/memory.total*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
 
-def getAvailableDevice() -> int:
+def getAvailableDevice() -> List[int]:
     pynvml.nvmlInit()
     available = []
     deviceCount = pynvml.nvmlDeviceGetCount()
@@ -137,7 +148,7 @@ def getAvailableDevice() -> int:
     pynvml.nvmlShutdown()
     return available
 
-def getDevice(device : int) -> torch.device:
+def getDevice(device : Optional[int]) -> torch.device:
     if torch.cuda.is_available():
         if device is None:
             availableDevice = getAvailableDevice()
@@ -156,3 +167,22 @@ def logImageNormalize(input : torch.Tensor):
     b = -np.min(input)
     a = 1/(np.max(input)+b)
     return a*(input+b)
+
+class NeedDevice(ABC):
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.device : Optional[torch.device] = None
+    
+    def setDevice(self, device : torch.device):
+        self.device = device
+
+class State(Enum):
+    TRAIN = "TRAIN"
+    RESUME = "RESUME"
+    TRANSFER_LEARNING = "TRANSFER_LEARNING"
+    FINE_TUNNING = "FINE_TUNNING"
+    PREDICTION = "PREDICTION"
+    
+    def __str__(self) -> str:
+        return self.value

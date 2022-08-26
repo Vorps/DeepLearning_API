@@ -2,23 +2,27 @@ import importlib
 from typing import List
 import torch
 
-from . import config
 import numpy as np
 import SimpleITK as sitk
-from DeepLearning_API import _getModule
+from DeepLearning_API.utils import _getModule, NeedDevice
+from DeepLearning_API.config import config
+from abc import ABC, abstractmethod
+import torch.nn.functional as F
 
-
-class Transform:
+class Transform(NeedDevice, ABC):
     
     def __init__(self, save = None) -> None:
         self.save = save
 
     def loadDataset(self, dataset) -> None:
         self.dataset = dataset
-        return self
     
-    def transformShape(self, shape) -> np.ndarray:
+    def transformShape(self, shape) -> torch.Size:
         return shape
+    
+    @abstractmethod
+    def __call__(self, input : torch.Tensor) -> torch.Tensor:
+        pass
 
 class TransformLoader:
 
@@ -26,22 +30,48 @@ class TransformLoader:
     def __init__(self) -> None:
         pass
     
-    def getTransform(self, classpath : str, args : str) -> Transform:
+    def getTransform(self, classpath : str, DL_args : str) -> Transform:
         module, name = _getModule(classpath, "transform")
-        return getattr(importlib.import_module(module), name)(config = None, args = args)
+        return getattr(importlib.import_module(module), name)(config = None, DL_args = DL_args)
 
-class Normalize(Transform):
+class Clip(Transform):
 
-    @config("Normalize")
-    def __init__(self, min_value : float = 0, max_value : float = 100) -> None:
+    @config("Clip")
+    def __init__(self, min_value : float = -1024, max_value : float = 1024) -> None:
         super().__init__()
         assert max_value > min_value
         self.min_value = min_value
         self.max_value = max_value
-        self.value_range = max_value - min_value
 
     def __call__(self, input : torch.Tensor) -> torch.Tensor:
-        return (input - self.min_value) / self.value_range
+        input[torch.where(input < self.min_value)] = self.min_value
+        input[torch.where(input > self.max_value)] = self.max_value
+        return input
+
+class Normalize(Transform):
+
+    @config("Normalize")
+    def __init__(self, lazy : bool = False, min_value : float = -1, max_value : float = 1) -> None:
+        super().__init__()
+        assert max_value > min_value
+        self.lazy = lazy
+        self.min_value = min_value
+        self.max_value = max_value
+
+    def __call__(self, input : torch.Tensor) -> torch.Tensor:
+        if "Min" not in self.dataset.cache_attribute:
+            self.dataset.cache_attribute["Min"] = torch.min(input)
+        if "Max" not in self.dataset.cache_attribute:
+            self.dataset.cache_attribute["Max"] = torch.max(input)
+
+        if self.lazy:
+            return input
+        else:
+            input_min = self.dataset.cache_attribute["Min"]
+            input_max = self.dataset.cache_attribute["Max"]
+            norm = (input_max-input_min) + self.min_value
+            assert norm != 0
+            return (self.max_value-self.min_value)*(input - input_min) / norm
 
 class Standardize(Transform):
 
@@ -51,36 +81,74 @@ class Standardize(Transform):
         self.lazy = lazy
 
     def __call__(self, input : torch.Tensor) -> torch.Tensor:
-        mean = 0
-        std = 0
-        if self.lazy:
+        if "Mean" not in self.dataset.cache_attribute:
             self.dataset.cache_attribute["Mean"] = torch.mean(input.type(torch.float32))
+        if "Std" not in self.dataset.cache_attribute:
             self.dataset.cache_attribute["Std"] = torch.std(input.type(torch.float32))
+
+        if self.lazy:
             return input
         else:
-            mean = self.dataset.cache_attribute["Mean"] if "Mean" in self.dataset.cache_attribute else torch.mean(input.type(torch.float32))
-            std = self.dataset.cache_attribute["Std"] if "Std" in self.dataset.cache_attribute else torch.std(input.type(torch.float32))
+            mean = self.dataset.cache_attribute["Mean"]
+            std = self.dataset.cache_attribute["Std"]
+            assert std > 0
             return (input - mean) / std
 
-class Unsqueeze(Transform):
+class DeNormalize(Transform):
 
-    @config("Unsqueeze")
+    @config("DeNormalize")
     def __init__(self) -> None:
         super().__init__()
 
     def __call__(self, input : torch.Tensor) -> torch.Tensor:
-        return torch.unsqueeze(input, dim=0)
+        input_min = None
+        input_max = None
+        
+        min_value = torch.min(input)
+        max_value = torch.max(input)
+
+        if "Min" in self.dataset.cache_attribute:
+            input_min = self.dataset.cache_attribute["Min"]
+        if "Max" in self.dataset.cache_attribute:
+            input_max = self.dataset.cache_attribute["Max"]
+
+        return (input - min_value)*(input_max-input_min)/(max_value-min_value)+input_min if input_min is not None and input_max is not None else input
+         
+class DeStandardize(Transform):
+
+    @config("DeStandardize")
+    def __init__(self) -> None:
+        super().__init__()
+
+    def __call__(self, input : torch.Tensor) -> torch.Tensor:
+        mean = None
+        std = None
+        if "Mean" in self.dataset.cache_attribute:
+            mean = self.dataset.cache_attribute["Mean"]
+        if "Std" in self.dataset.cache_attribute:
+            std = self.dataset.cache_attribute["Std"]
+        return input * std + mean if mean is not None and std is not None else input
 
 class TensorCast(Transform):
 
     @config("TensorCast")
     def __init__(self, dtype : str = "default:float32,int64,int16") -> None:
         super().__init__()
-        self.dtype = getattr(torch, dtype)
+        self.dtype : torch.dtype = getattr(torch, dtype)
 
     def __call__(self, input : torch.Tensor) -> torch.Tensor:
         return input.type(self.dtype)
 
+class ChannelPadding(Transform):
+
+    @config("ChannelPadding")
+    def __init__(self, pad : int, mode : str = "default:constant,reflect,replicate,circular") -> None:
+        super().__init__()
+        self.pad = pad
+        self.mode = mode
+
+    def __call__(self, input : torch.Tensor) -> torch.Tensor:
+        return F.pad(input, (0, self.pad), self.mode)
 
 class Resample(Transform):
 
@@ -132,7 +200,6 @@ class ResampleIsotropic(Resample):
         resize_factor = ([self.spacing]*len(shape))/ np.flip(dataset.getSpacing())
         
         self.reference_Size =  np.asarray([int(x) for x in (shape * 1/resize_factor)])
-        return self
 
 class ResampleResize(Resample):
 
@@ -149,7 +216,6 @@ class ResampleResizeForDataset(Resample):
     def loadDataset(self, dataset):
         super().loadDataset(dataset)
         self.reference_Size =  np.roll(dataset._dataset.shape, -1)
-        return self
         
 class NConnexeLabel(Transform):
 
@@ -169,7 +235,7 @@ class NConnexeLabel(Transform):
             connectedComponentImage = connectedComponentImageFilter.Execute(self.dataset.to_image(data))
             labelShapeStatisticsImageFilter.Execute(connectedComponentImage)
             stats = {label: labelShapeStatisticsImageFilter.GetNumberOfPixels(label) for label in labelShapeStatisticsImageFilter.GetLabels()}
-            true_label = max(stats, key=stats.get)
+            true_label = max(stats)
 
             tmp = sitk.GetArrayFromImage(connectedComponentImage)
             tmp[np.where(tmp != true_label)] = 0
@@ -189,7 +255,7 @@ class ArgMax(Transform):
 class GausianImportance(Transform):
 
     @config("GausianImportance") 
-    def __init__(self, patch_size = [128,128,128], sigma : int = 0.2, save=None) -> None:
+    def __init__(self, patch_size = [128,128,128], sigma : float = 0.2, save=None) -> None:
         super().__init__(save)
         gaussianSource = sitk.GaussianImageSource()
         gaussianSource.SetSize(tuple(patch_size))

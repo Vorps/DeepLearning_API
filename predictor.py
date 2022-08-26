@@ -1,118 +1,71 @@
 import builtins
-import importlib
 import shutil
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional
 import torch
 import tqdm
 import os
-
-from DeepLearning_API import config, DataPrediction, MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, gpuInfo, getDevice, DatasetUtils, TransformLoader, _getModule, DataSet
 import pynvml
 
-class Metric():
+from DeepLearning_API import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE
+from DeepLearning_API.config import config
+from DeepLearning_API.utils import State, gpuInfo, getDevice, NeedDevice
+from DeepLearning_API.dataset import DataPrediction
+from DeepLearning_API.networks.network import Network, ModelLoader
+from DeepLearning_API.measure import CriterionsLoader
 
-    @config(None)
-    def __init__(self, group : str = "Default", l : float = 1) -> None:
-        self.l = l
-        self.group = group
-
-    def getMetric(self, classpath : str, group : str) -> torch.nn.Module:
-        module, name = _getModule(classpath, "metric")
-        return config("Predictor.metrics."+group+".metric."+classpath)(getattr(importlib.import_module(module), name))(config = None)
-
-class Metrics():
-
-    @config(None)
-    def __init__(self, metrics : Dict[str, Metric] = {"default:Dice" : Metric()}) -> None:
-        self.metrics = metrics
-
-    def getMetrics(self, group : str) -> Dict[str, torch.nn.Module]:
-        for key in self.metrics:
-            self.metrics[key] = (self.metrics[key].group, self.metrics[key].l, self.metrics[key].getMetric(key, group))
-        return self.metrics
-
-class Predictor():
+class Predictor(NeedDevice):
 
     @config("Predictor")
     def __init__(self, 
+                    model : ModelLoader = ModelLoader(),
                     dataset : DataPrediction = DataPrediction(),
-                    groupsInput : List[str] = ["default"],
                     train_name : str = "name",
-                    device : int = None,
-                    metrics: Dict[str, Metrics] = {"default" : Metrics()},
-                    patch_transform : Dict[str, TransformLoader] = {"default:GausianImportance"},
-                    transform : Dict[str, TransformLoader] = {"default:ResampleResizeForDataset:ArgMax:NConnexeLabel:TensorCast": TransformLoader()}) -> None:
+                    device : Optional[int] = None) -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)
-        torch.backends.cudnn.benchmark = True
+
+        torch.backends.cudnn.deterministic = False  # type: ignore
+        torch.backends.cudnn.benchmark = True # type: ignore
         
-        self.device = getDevice(device)
         self.train_name = train_name
         self.dataset = dataset
-        self.groupsInput = groupsInput
-        self.metrics = metrics
-        for classpath in self.metrics:
-            self.metrics[classpath] = self.metrics[classpath].getMetrics(classpath)
+        self.model = model.getModel(train=False)
+        self.model.init(autocast=False, state = State.PREDICTION)
+        self.setDevice(getDevice(device))
 
-        self.patch_transform = patch_transform
-        self.transform = transform
-        if self.patch_transform is not None:
-            for key in self.patch_transform:
-                self.patch_transform[key] = self.patch_transform[key].getTransform(key, args = "Predictor.patch_transform."+key)
-        if self.transform is not None:
-            for key in self.transform:
-                self.transform[key] = self.transform[key].getTransform(key, args = "Predictor.transform."+key)
+    def setDevice(self, device: torch.device):
+        super().setDevice(device)
+        self.dataset.setDevice(device)
+        self.model.setDevice(device)
+        self.model.to(device)
 
-        path = MODELS_DIRECTORY()+self.train_name+"/"
-        if os.path.exists(path) and os.listdir(path):
-            name = sorted(os.listdir(path))[-1]
-            self.model = torch.load(path+name).to(self.device)
-        else:
-            raise Exception("Model : {} does not exist !".format(self.train_name))
-
-    def __enter__(self) -> None:
+    def __enter__(self):
         pynvml.nvmlInit()
         self.dataset.__enter__()
         self.dataloader_prediction = self.dataset.getData()
         return self
     
-    def __exit__(self, type, value, traceback) -> None:
+    def __exit__(self, type, value, traceback):
         self.dataset.__exit__(type, value, traceback)
         pynvml.nvmlShutdown()
-
-    def getInput(self, data_dict : Dict[str, List[torch.Tensor]]) -> torch.Tensor:    
-        input = torch.cat([data_dict[group] for group in self.groupsInput], dim=0)
-        return torch.unsqueeze(input, dim=0)
-        
-    def _metric(self, out_dict : torch.Tensor, data_dict : Dict[str, torch.Tensor]) -> Tuple[float, Dict[str, float]]:
-        value = 0
-        values = dict()
-        for group in self.metrics:
-            output = out_dict[group] if group in out_dict else None
-            for true_group, l, metric in self.metrics[group].values():
-                target = data_dict[true_group] if true_group in data_dict else None
-                result = metric(output, target)
-                values[group+":"+metric.__class__.__name__] = result.item()
-                value = value + l*result
-        return value, values
-
-    def _combine_patch(self, out_patch_accu, n_channel, x):
+    
+    """def _combine_patch(self, group, out_patch_accu, n_channel, x):
         out_dataset = DataSet.getDatasetsFromIndex(self.dataloader_prediction.dataset.data[self.groupsInput[0].replace("_0", "")], self.dataloader_prediction.dataset.mapping[x])[0]
         out_data = torch.zeros([n_channel]+list(out_dataset.getShape()))
 
         for index, patch_data in enumerate(out_patch_accu):
-            if self.patch_transform is not None:
-                for patch_transformFunction in self.patch_transform.values():
-                    patch_data = patch_transformFunction.loadDataset(out_dataset)(patch_data)
+            if group in self.groups:
+                if self.groups[group].patch_transform is not None:
+                    for patch_transformFunction in self.groups[group].patch_transform:
+                        patch_data = patch_transformFunction.loadDataset(out_dataset)(patch_data)
             src_slices = tuple([slice(n_channel)]+[slice(slice_tmp.stop-slice_tmp.start) for slice_tmp in out_dataset.patch_slices[index]])
             dest_slices = tuple([slice(n_channel)]+list(out_dataset.patch_slices[index]))
             out_data[dest_slices] += patch_data[src_slices]
-        return out_data
+        return out_data"""
 
     @torch.no_grad()
     def predict(self) -> None:
-        config_file_dest = PREDICTIONS_DIRECTORY()+self.train_name+"/"+self.dataset.dataset_filename.split("/")[-1].replace(".h5", "_")+self.groupsInput[0].replace("/", "_")+".yml"
-
+        config_file_dest = PREDICTIONS_DIRECTORY()+self.train_name+"/"+self.dataset.dataset_filename.split("/")[-1].replace(".h5", "")+".yml"
         if os.path.exists(config_file_dest):
             if os.environ["DL_API_OVERWRITE"] != "True":
                 accept = builtins.input("The prediction {} {} already exists ! Do you want to overwrite it (yes,no) : ".format(self.train_name, self.dataset.dataset_filename.split("/")[-1]))
@@ -124,51 +77,56 @@ class Predictor():
         if not os.path.exists(PREDICTIONS_DIRECTORY()+self.train_name+"/"):
             os.makedirs(PREDICTIONS_DIRECTORY()+self.train_name+"/")
         shutil.copyfile(CONFIG_FILE(), config_file_dest)
+        
+        path = MODELS_DIRECTORY()+self.train_name+"/StateDict/"
+        if os.path.exists(path) and os.listdir(path):
+            name = sorted(os.listdir(path))[-1]
+            state_dict : Dict[str, torch.Tensor] = torch.load(path+name)
+        else:
+            raise Exception("Model : {} does not exist !".format(self.train_name))
+
+        self.model.load(state_dict)
         self.dataset.load()
         self.model.eval()
-        out_patch_accu : Dict[str, List[torch.Tensor]]= {}
-        out_data : Dict[str, torch.Tensor] = {}
-        it = 0
 
-        description = lambda loss : "Prediction : (Metric {:.4f}) ".format(loss)+gpuInfo(self.device)
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), desc = description(0), total=len(self.dataloader_prediction)) as batch_iter:
+        description = lambda : "Prediction : Metric ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.model.getNetworks().items()])+") "+gpuInfo(self.device)
+
+        with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), desc = description(), total=len(self.dataloader_prediction)) as batch_iter:
             for _, data_dict in batch_iter:
-                
-                input = self.getInput(data_dict)
-                out = self.model(input.to(self.device))
-                for batch in range(input.shape[0]):
-                    for group in out:                
+                out = self.model(data_dict)
+                self.model.measureUpdate(out, data_dict)
+                """for group in out:
+                    for batch in range(out[group].shape[0]):
                         if group not in out_patch_accu:
                             out_patch_accu[group] = []
-                        out_patch_accu[group].append(self.model.getOutputModel(group, out[group][batch]).cpu())
+                        out_patch_accu[group].append(out[group][batch].cpu())
 
                         x, idx = self.dataloader_prediction.dataset.getMap(it)
                         if idx == self.dataloader_prediction.dataset.nb_patch[x]-1:
-                            out_data[group] = self._combine_patch(out_patch_accu[group], out[group].shape[1], x)               
+                            out_data[group] = self._combine_patch(group, out_patch_accu[group], out[group].shape[1], x)               
                             del out_patch_accu[group]
                     
                     if len(out_data) == len(out):
                         if self.metrics is not None:
                             value, values = self._metric(out_data, self.dataloader_prediction.dataset.getData(x))
                         
-                        """if self.transform is not None:
-                            for transformFunction in self.transform.values():
-                                out_data = transformFunction.loadDataset(out_dataset)(out_data)
-                        out_data = out_data.numpy()"""
-                        out_dataset = DataSet.getDatasetsFromIndex(self.dataloader_prediction.dataset.data[self.groupsInput[0].replace("_0", "")], self.dataloader_prediction.dataset.mapping[x])
+                        for group in out_data:
+                            if group in self.groups:
+                                if self.groups[group].transform is not None:
+                                    for transformFunction in self.groups[group].transform:
+                                        out_dataset = DataSet.getDatasetsFromIndex(self.dataloader_prediction.dataset.data[self.groupsInput[0].replace("_0", "")], self.dataloader_prediction.dataset.mapping[x])
+                                        out_data[group] = transformFunction.loadDataset(out_dataset[0])(out_data[group])
+                        
                         name_dataset = "_".join([dataset.name.split("/")[-1] for dataset in out_dataset])
                         with DatasetUtils(PREDICTIONS_DIRECTORY()+self.train_name+"/"+self.dataset.dataset_filename.split("/")[-1], read=False) as datasetUtils:
-                            for i, group in enumerate(out_data):
-                                print(out_data[group].shape)
+                            for group in out_data:
                                 out = out_data[group].numpy()
-                                datasetUtils.writeImage(group, name_dataset, out_dataset[0].to_image(out, out.dtype))
+                                datasetUtils.writeImage(group, name_dataset, out_dataset[0].to_image(out[0], out.dtype))
                                 if self.metrics is not None:
                                     datasetUtils.h5.attrs["value"] = value
                                     for name in values:
                                         datasetUtils.h5.attrs[name] = values[name]
-                        out_data.clear()
-
-                    it += 1
+                        out_data.clear()"""
                 
-                batch_iter.set_description(description(0))
+                batch_iter.set_description(description())
         
