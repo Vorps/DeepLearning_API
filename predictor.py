@@ -11,7 +11,6 @@ from DeepLearning_API.config import config
 from DeepLearning_API.utils import State, gpuInfo, getDevice, NeedDevice
 from DeepLearning_API.dataset import DataPrediction
 from DeepLearning_API.networks.network import Network, ModelLoader
-from DeepLearning_API.measure import CriterionsLoader
 
 class Predictor(NeedDevice):
 

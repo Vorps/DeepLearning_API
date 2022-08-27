@@ -1,13 +1,10 @@
-from typing import Dict, List, Tuple
-import numpy as np
+from typing import Dict, List
 import torch
 import torch.nn.functional as F
 
 from DeepLearning_API.networks import network, blocks
 from DeepLearning_API.config import config
-from DeepLearning_API.measure import TargetCriterionsLoader
 from DeepLearning_API.dataset import Patch
-from utils import getDevice
 
 """
 "convnext_tiny_1k": "https://dl.fbaipublicfiles.com/convnext/convnext_tiny_1k_224_ema.pth", depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]
@@ -92,14 +89,14 @@ class BottleNeckBlock(network.ModuleArgsDict):
                     dim: int):
         super().__init__()
         self.add_module("Conv_0", blocks.getTorchModule("Conv", dim)(features, features, kernel_size=7, padding=3, groups=features), alias=["dwconv"])
-        self.add_module("Permute_0", blocks.Permute([0, *[i+2 for i in range(dim)], 1]))
+        self.add_module("ToFeatures", blocks.ToFeatures(dim))
         self.add_module("LayerNorm", LayerNorm(features, eps=1e-6), alias=["norm"])
         self.add_module("Linear_1",  torch.nn.Linear(features, features * 4), alias=["pwconv1"])
         self.add_module("GELU", torch.nn.GELU())
         self.add_module("Linear_2", torch.nn.Linear(features * 4, features), alias=["pwconv2"])
         
         self.add_module("LayerScaler", LayerScaler(init_value=layer_scaler_init_value, dimensions=features), alias=[""])
-        self.add_module("Permute_1", blocks.Permute([0, dim+1, *[i+1 for i in range(dim)]]))
+        self.add_module("ToChannels", blocks.ToChannels(dim))
         self.add_module("StochasticDepth", DropPath(drop_p))
         self.add_module("Residual", blocks.Add(), in_branch=[0,1])
         
@@ -165,7 +162,7 @@ class ConvNeXt(network.Network):
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: Dict[str, TargetCriterionsLoader] = {"default" : TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Patch = Patch(),
                     padding : int = 0,
                     paddingMode : str = "default:constant:reflect:replicate:circular",
@@ -176,17 +173,6 @@ class ConvNeXt(network.Network):
                     drop_p: float = 0.1,
                     num_classes: int = 10):
 
-        super().__init__(optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02, padding=padding, paddingMode=paddingMode)
+        super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02, padding=padding, paddingMode=paddingMode)
         self.add_module("ConvNextEncoder", ConvNextEncoder(in_channels=in_channels, depths=depths, widths=widths, drop_p=drop_p, dim=dim))        
         self.add_module("Head", Head(in_features=widths[-1], num_classes=num_classes, dim=dim))
-
-if __name__ == "__main__":
-    convNeXt = ConvNeXt(dim = 2, in_channels=3, num_classes=1000)
-    convNeXt.setDevice(getDevice(None))
-    
-    state_dict = torch.hub.load_state_dict_from_url(url="https://dl.fbaipublicfiles.com/convnext/convnext_base_1k_224_ema.pth")
-    
-    convNeXt.load({"ConvNeXt" : state_dict["model"]})
-
-    #print(convNeXt.forward({"X" : torch.zeros((1,1,128,256,256))}))
-    

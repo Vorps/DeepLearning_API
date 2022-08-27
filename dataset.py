@@ -8,13 +8,14 @@ from sklearn.model_selection import train_test_split
 import tqdm
 import numpy as np
 from abc import ABC, abstractmethod
+from torch.utils.data import DataLoader
 
 from DeepLearning_API.HDF5 import HDF5, Patch, Dataset
 from DeepLearning_API.config import config
 from DeepLearning_API.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, NeedDevice
 from DeepLearning_API.transform import TransformLoader, Transform
 from DeepLearning_API.augmentation import DataAugmentationLoader, DataAugmentation
-from torch.utils.data import DataLoader
+
 
 class Group:
 

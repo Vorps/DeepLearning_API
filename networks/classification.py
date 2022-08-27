@@ -1,10 +1,7 @@
 from abc import ABC
-from audioop import bias
-from functools import partial
 from typing import Dict, List, Type
 import torch
 from DeepLearning_API.networks import network, blocks
-from DeepLearning_API.measure import TargetCriterionsLoader
 from DeepLearning_API.dataset import Patch
 from DeepLearning_API.config import config
 
@@ -105,7 +102,7 @@ class ResNet(network.Network):
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: Dict[str, TargetCriterionsLoader] = {"default" : TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Patch = Patch(),
                     padding : int = 0,
                     paddingMode : str = "default:constant:reflect:replicate:circular",
@@ -115,6 +112,6 @@ class ResNet(network.Network):
                     widths: List[int] = [64, 64, 128, 256, 512],
                     num_classes: int = 10, 
                     useBottleneck=False):
-        super().__init__(optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02, padding=padding, paddingMode=paddingMode)
+        super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02, padding=padding, paddingMode=paddingMode)
         self.add_module("ResNetEncoder", ResNetEncoder(in_channels=in_channels, depths=depths, widths=widths, useBottleneck=useBottleneck, dim=dim))        
         self.add_module("Head", Head(in_features=widths[-1], num_classes=num_classes, dim=dim))

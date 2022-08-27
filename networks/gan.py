@@ -1,8 +1,7 @@
-from typing import Dict, List
+from typing import Dict
 import torch
 from DeepLearning_API.config import config
 from DeepLearning_API.networks import network, blocks
-from DeepLearning_API.measure import TargetCriterionsLoader
 from DeepLearning_API.dataset import Patch
 
 import numpy as np
@@ -13,10 +12,10 @@ class Discriminator(network.Network):
     def __init__(self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: Dict[str, TargetCriterionsLoader] = {"default" : TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3,
                     in_channels : int = 1) -> None:
-        super().__init__(optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim)
+        super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim)
         
         ndf = 64
         n_layers=3
@@ -98,10 +97,10 @@ class Generator(network.Network):
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     patch : Patch = Patch(),
-                    outputsCriterions: Dict[str, TargetCriterionsLoader] = {"default" : TargetCriterionsLoader()},
-                    in_channel : int = 1,
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    in_channels : int = 1,
                     dim : int = 3) -> None:
-        super().__init__(optimizer=optimizer, schedulers=schedulers, patch=patch, outputsCriterions=outputsCriterions)
+        super().__init__(in_channels = in_channels, optimizer=optimizer, schedulers=schedulers, patch=patch, outputsCriterions=outputsCriterions)
         ngf=64
         norm_layer = blocks.getTorchModule("BatchNorm", dim)
         dropout = False

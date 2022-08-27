@@ -1,8 +1,7 @@
-from abc import ABC, abstractmethod
 import ast
 from enum import Enum
 import importlib
-from typing import Iterator, List, Optional, Tuple
+from typing import List, Optional
 import torch
 from DeepLearning_API.config import config
 from DeepLearning_API.networks import network
@@ -117,6 +116,17 @@ class Permute(torch.nn.Module):
     def extra_repr(self):
         return "dims={}".format(self.dims)
 
+class ToChannels(Permute):
+
+    def __init__(self, dim):
+        super().__init__([0, dim+1, *[i+1 for i in range(dim)]])
+        
+class ToFeatures(Permute):
+
+    def __init__(self, dim):
+        super().__init__([0, *[i+2 for i in range(dim)], 1])        
+
+
 class Add(torch.nn.Module):
 
     def __init__(self) -> None:
@@ -141,3 +151,18 @@ class Concat(torch.nn.Module):
 
     def forward(self, input : torch.Tensor, output : torch.Tensor) -> torch.Tensor:
         return torch.cat([input, output], dim=1)
+
+class LatentDistribution(network.ModuleArgsDict):
+
+    def __init__(self, out_channels: int, out_is_channel : bool, latentDim: int, modelDim: int, out_branch : List[int]) -> None:
+        super().__init__()
+        if not out_is_channel:
+            self.add_module("ToChannels", ToChannels(modelDim))
+        
+        self.add_module("AdaptiveAvgPool", getTorchModule("AdaptiveAvgPool", modelDim)(1))
+        self.add_module("Flatten", torch.nn.Flatten(1))
+        self.add_module("mu", torch.nn.Linear(out_channels, latentDim), in_branch = out_branch, out_branch = [1])
+        self.add_module("log_std", torch.nn.Linear(out_channels, latentDim), in_branch = out_branch, out_branch = [2])
+        self.add_module("Unsqueeze_mu", Unsqueeze(1), in_branch = [1], out_branch = [1])
+        self.add_module("Unsqueeze_log_std", Unsqueeze(1), in_branch = [2], out_branch = [2])
+        self.add_module("Concat", Concat(), in_branch=[1,2])

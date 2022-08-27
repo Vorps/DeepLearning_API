@@ -1,105 +1,23 @@
 from abc import ABC
 import importlib
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 import torch
-import numpy as np
 
 import torch.nn.functional as F
 import os
 
 from DeepLearning_API.config import config
 from DeepLearning_API.utils import NeedDevice, _getModule
-
-class CriterionsAttr():
-
-    @config()
-    def __init__(self, l: float = 1.0) -> None:
-        self.l = l
-
-class CriterionsLoader():
-
-    @config()
-    def __init__(self, criterionsLoader: Dict[str, CriterionsAttr] = {"default:torch_nn_CrossEntropyLoss:Dice:NCC": CriterionsAttr()}) -> None:
-        self.criterionsLoader = criterionsLoader
-
-    def getCriterions(self, model_classname : str, output_group : str, target_group : str, train : bool) -> Dict[torch.nn.Module, float]:
-        criterions = {}
-        for module_classpath, criterionsAttr in self.criterionsLoader.items():
-            module, name = _getModule(module_classpath, "measure")
-            criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format("Trainer" if train else "Predictor", model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr.l
-        return criterions
-
-class TargetCriterionsLoader():
-
-    @config()
-    def __init__(self, targetsCriterions : Dict[str, CriterionsLoader] = {"default" : CriterionsLoader()}) -> None:
-        self.targetsCriterions = targetsCriterions
-        
-    def getTargetsCriterions(self, output_group : str, model_classname : str, train : bool) -> Dict[str, Dict[torch.nn.Module, float]]:
-        targetsCriterions = {}
-        for target_group, criterionsLoader in self.targetsCriterions.items():
-            targetsCriterions[target_group] = criterionsLoader.getCriterions(model_classname, output_group, target_group, train)
-        return targetsCriterions
+from DeepLearning_API.networks.blocks import LatentDistribution
+from DeepLearning_API.networks.network import Network
 
 class Criterion(NeedDevice, torch.nn.Module, ABC):
 
     def __init__(self) -> None:
         super().__init__()
-        self.model = None
 
-    def setModel(self, model):
-        self.model = model
-
-class Measure(NeedDevice):
-
-    def __init__(self, model_classname : str, outputsCriterions: Dict[str, TargetCriterionsLoader], train : bool):
-        super().__init__()
-        self.outputsCriterions = {}
-        for output_group, targetCriterionsLoader in outputsCriterions.items():
-            self.outputsCriterions[output_group.replace("_", ".")] = targetCriterionsLoader.getTargetsCriterions(output_group, model_classname, train)
-        self.value : List[float]= []
-        self.values : Dict[str, List[float]] = dict()
-        self.loss = torch.zeros((1))
-        
-        for output_group in self.outputsCriterions:
-            for target_group in self.outputsCriterions[output_group]:
-                for criterion in self.outputsCriterions[output_group][target_group]:
-                    self.values["{}_{}_{}".format(output_group, target_group, criterion.__class__.__name__)] = []
-
-    def setDevice(self, device: torch.device):
-        super().setDevice(device)
-        for output_group in self.outputsCriterions:
-            for target_group in self.outputsCriterions[output_group]:
-                for criterion in self.outputsCriterions[output_group][target_group]:
-                    if isinstance(criterion, NeedDevice):
-                        criterion.setDevice(device)
-
-    def update(self, output_group, output : torch.Tensor, data_dict : Dict[str, torch.Tensor]):
-        self.loss = torch.zeros((1), requires_grad = True).to(self.device, non_blocking=False)
-        for target_group in self.outputsCriterions[output_group]:
-            target = data_dict[target_group].to(self.device, non_blocking=False) if target_group in data_dict else None
-            for criterion, l in self.outputsCriterions[output_group][target_group].items():
-                result = criterion(output, target)
-                self.loss += l*result
-                self.values["{}_{}_{}".format(output_group, target_group, criterion.__class__.__name__)].append(result.item())
-        self.value.append(self.loss.item())
-        
-    def getLastValue(self):
-        return self.value[-1] if self.value else 0 
-    
-    def format(self) -> Dict[str, float]:
-        result = dict()
-        for name in self.values:
-            result[name] = np.mean(self.values[name])
-        return result
-
-    def mean(self) -> float:
-        return np.mean(self.value)
-    
-    def clear(self) -> None:
-        self.value.clear()
-        for name in self.values:
-            self.values[name].clear()
+    def init(self, model : torch.nn.Module, output_group : str, target_group : str) -> str:
+        return output_group
 
 class Dice(Criterion):
     
@@ -177,8 +95,7 @@ class ModelLoader():
 
 class MedPerceptualLoss(Criterion):
     
-    
-    def __init__(self, modelLoader : ModelLoader = ModelLoader(), path_model : str = "name", module_names : List[str] = ["ConvNextEncoder.ConvNexStage_2.BottleNeckBlock_0.Conv_2", "ConvNextEncoder.ConvNexStage_3.BottleNeckBlock_0.Conv_2"], shape: List[int] = [128, 256, 256]) -> None:
+    def __init__(self, modelLoader : ModelLoader = ModelLoader(), path_model : str = "name", module_names : List[str] = ["ConvNextEncoder.ConvNexStage_2.BottleNeckBlock_0.Linear_2", "ConvNextEncoder.ConvNexStage_3.BottleNeckBlock_0.Linear_2"], shape: List[int] = [128, 256, 256]) -> None:
         super().__init__()
         self.model = modelLoader.getModel()
         state_dict = torch.load(path_model)
@@ -212,37 +129,64 @@ class MedPerceptualLoss(Criterion):
                     break
         return loss
 
-class KL_divergence(Criterion):
-
-    class Latent():
-
-        def __init__(self, dim : int = 100, mu : float = 0, sigma : float = 1) -> None:
-            self.dim = dim
-            self.mu = mu
-            self.sigma = sigma 
-
-    def __init__(self, module_names : Dict[str, Latent] = {"ConvNextEncoder.ConvNexStage_2.BottleNeckBlock_0.Linear_2": Latent()}) -> None:
+class KLDivergence(Criterion):
+    
+    def __init__(self, dim : int = 100, mu : float = 0, std : float = 1) -> None:
         super().__init__()
-        self.module_names = module_names
-
-    def setModel(self, model):
-        super().setModel(model)
+        
+        self.latentDim = dim
+        self.mu = torch.Tensor([mu])
+        self.std = torch.Tensor([std]) 
+        self.modelDim = 3
+        
+    def init(self, model : Network, output_group : str, target_group : str) -> str:
+        super().init(model, output_group, target_group)
+        model._compute_channels_trace(model, model.in_channels)
+        self.modelDim = model.dim
         last_module = model
-        for module_name, latent in self.module_names.items():
-            for name in module_name.split(".")[:-1]:
-                last_module = last_module[name]
-            modules = last_module._modules.copy()
-            last_module._modules.clear()
+        for name in output_group.split(".")[:-1]:
+            last_module = last_module[name]
+        modules = last_module._modules.copy()
+        last_module._modules.clear()
 
-            for name, value in modules.items():
-                last_module._modules[name] = value
-                if name == module_name.split(".")[-1]:
-                    module = last_module[module_name.split(".")[-1]]
-                    last_module.add_module("mu", torch.nn.Linear(module.out_features, latent.dim), in_branch = last_module._modulesArgs[name].out_branch, out_branch = [-1])
-                    last_module.add_module("sigma", torch.nn.Linear(module.out_features, latent.dim), in_branch = last_module._modulesArgs[name].out_branch, out_branch = [-2])
+        for name, value in modules.items():
+            last_module._modules[name] = value
+            if name == output_group.split(".")[-1]:
+                last_module.add_module("LatentDistribution", LatentDistribution(out_channels=last_module._modulesArgs[name].out_channels, out_is_channel=last_module._modulesArgs[name].out_is_channel , latentDim=self.latentDim, modelDim=self.modelDim, out_branch=last_module._modulesArgs[name].out_branch), out_branch = [-1])
+        return ".".join(output_group.split(".")[:-1])+".LatentDistribution.Concat"
 
+    def setDevice(self, device: torch.device):
+        super().setDevice(device)
+        self.mu = self.mu.to(self.device)
+        self.std = self.std.to(self.device)
+    
     def forward(self, input : torch.Tensor, target : torch.Tensor) -> torch.Tensor:
-        raise NotImplemented
+        mu = input[:, 0, :]
+        std = torch.exp(input[:, 1, :]/2)
+
+        q = torch.distributions.Normal(mu, std)
+        z = q.rsample()
+
+        target_mu = torch.ones((self.latentDim)).to(self.device)*self.mu
+        if target is not None:
+            log_pz_list = []
+            for i in range(target.shape[0]):
+                p = torch.distributions.Normal(target_mu*target[i], torch.ones((self.latentDim)).to(self.device)*self.std)
+                log_pz_list.append(torch.unsqueeze(p.log_prob(z[i]), dim=0))
+            log_pz = torch.cat(log_pz_list, dim=0)
+        else:
+            p = torch.distributions.Normal(target_mu, torch.ones((self.latentDim)).to(self.device)*self.std)
+            log_pz = p.log_prob(z)
+
+
+        q = torch.distributions.Normal(mu, std)
+
+        log_qzx = q.log_prob(z)
+        
+
+        kl = (log_qzx - log_pz)
+        kl = kl.sum(-1)
+        return kl
 
 class Accuracy(Criterion):
 

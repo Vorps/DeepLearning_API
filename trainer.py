@@ -7,7 +7,7 @@ import os
 from DeepLearning_API import MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, URL_MODEL
 from DeepLearning_API.dataset import DataTrain
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import gpuInfo, getDevice, logImageNormalize, State, NeedDevice
+from DeepLearning_API.utils import gpuInfo, getDevice, State, NeedDevice
 from DeepLearning_API.networks.network import Network, ModelLoader
 import datetime
 
@@ -61,7 +61,6 @@ class Trainer(NeedDevice):
         super().setDevice(device)
         self.dataset.setDevice(device)
         self.model.setDevice(device)
-        self.model.to(device)
 
     def __enter__(self):
         pynvml.nvmlInit()
@@ -94,7 +93,7 @@ class Trainer(NeedDevice):
 
         self.model.init(self.autocast, state)
         self.model.load(state_dict, init = True, ema=False)
-
+        self.model.to(self.device)
         if self.ema_decay > 0:
             ema_avg = lambda averaged_model_parameter, model_parameter, num_averaged: (1-self.ema_decay) * averaged_model_parameter + self.ema_decay * model_parameter
             assert self.device, "No device set"

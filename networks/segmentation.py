@@ -1,10 +1,6 @@
-from functools import partial
-import torch
-import numpy as np
 from typing import Dict, List
 from DeepLearning_API.config import config
 from DeepLearning_API.networks import network, blocks
-from DeepLearning_API.measure import TargetCriterionsLoader
 
 class UNetBlock(network.ModuleArgsDict):
 
@@ -27,7 +23,7 @@ class UNet(network.Network):
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: Dict[str, TargetCriterionsLoader] = {"default" : TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3,
                     channels: List[int]=[1, 64, 128, 256, 512, 1024],
                     blockConfig: blocks.BlockConfig = blocks.BlockConfig(),
@@ -35,6 +31,6 @@ class UNet(network.Network):
                     upSampleMode: str = "CONV_TRANSPOSE",
                     attention : bool = False) -> None:
 
-        super().__init__(optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim)
+        super().__init__(in_channels = channels[0], optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim)
         self.add_module("UNetBlock_0", UNetBlock(channels, blockConfig, downSampleMode=blocks.DownSampleMode._member_map_[downSampleMode], upSampleMode=blocks.UpSampleMode._member_map_[upSampleMode], attention=attention, dim=dim))
         self.add_module("Head", blocks.getTorchModule("Conv", dim)(in_channels = channels[1], out_channels = channels[0], kernel_size = 3, stride = 1, padding = 1))
