@@ -1,6 +1,6 @@
 from abc import ABC
 import importlib
-from typing import List, Tuple
+from typing import List, Tuple, Union
 import torch
 
 import torch.nn.functional as F
@@ -9,7 +9,7 @@ import os
 from DeepLearning_API.config import config
 from DeepLearning_API.utils import NeedDevice, _getModule
 from DeepLearning_API.networks.blocks import LatentDistribution
-from DeepLearning_API.networks.network import Network
+from DeepLearning_API.networks.network import ModelLoader, Network
 
 class Criterion(NeedDevice, torch.nn.Module, ABC):
 
@@ -37,44 +37,53 @@ class Dice(Criterion):
     def forward(self, input: torch.Tensor, target : torch.Tensor) -> torch.Tensor:
         input = F.one_hot(input.type(torch.int64)).permute(0, len(input.shape), *[i+1 for i in range(len(input.shape)-1)]).float()
         target = F.one_hot(target.type(torch.int64)).permute(0, len(target.shape), *[i+1 for i in range(len(target.shape)-1)]).float()
-        return 1-torch.mean(self.dice_per_channel(input, target)) if self.training else torch.mean(self.dice_per_channel(input, target))
-
+        return 1-torch.mean(self.dice_per_channel(input, target))
+        
 class GradientImages(Criterion):
 
     def __init__(self):
         super().__init__()
-        self.loss = torch.nn.MSELoss()
     
     @staticmethod
-    def _image_gradient(image : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _image_gradient2D(image : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        dx = image[:, :, 1:, :] - image[:, :, :-1, :]
+        dy = image[:, :, :, 1:] - image[:, :, :, :-1]
+        return dx, dy
+
+    @staticmethod
+    def _image_gradient3D(image : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         dx = image[:, :, 1:, :, :] - image[:, :, :-1, :, :]
         dy = image[:, :, :, 1:, :] - image[:, :, :, :-1, :]
         dz = image[:, :, :, :, 1:] - image[:, :, :, :, :-1]
-       
         return dx, dy, dz
-
+        
     def forward(self, input: torch.Tensor, target : torch.Tensor) -> torch.Tensor:
-        dx, dy, dz = GradientImages._image_gradient(input)
-        if target is not None:
-            dx_tmp, dy_tmp, dz_tmp = GradientImages._image_gradient(target)
+        if len(input.shape) == 5:
+            dx, dy, dz = GradientImages._image_gradient3D(input)
+            if target is not None:
+                dx_tmp, dy_tmp, dz_tmp = GradientImages._image_gradient3D(target)
             dx -= dx_tmp
             dy -= dy_tmp
             dz -= dz_tmp
-    
-        return dx.norm() + dy.norm() + dz.norm()
-
+            return dx.norm() + dy.norm() + dz.norm()
+        else:
+            dx, dy = GradientImages._image_gradient2D(input)
+            if target is not None:
+                dx_tmp, dy_tmp = GradientImages._image_gradient2D(target)
+                dx -= dx_tmp
+                dy -= dy_tmp
+            return dx.norm() + dy.norm()
+        
 class BCE(Criterion):
 
     def __init__(self, target : float = 0) -> None:
         super().__init__()
         self.loss = torch.nn.BCEWithLogitsLoss()
         self.register_buffer('target', torch.tensor(target).type(torch.float32))
-    
 
     def forward(self, input: torch.Tensor, _ : torch.Tensor) -> torch.Tensor:
         target = self._buffers["target"]
-        assert target
-        return self.loss(input, target.to(self.device).expand_as(input))
+        return self.loss(input, target.expand_as(input).to(self.device).expand_as(input))
 
 class WGP(Criterion):
 
@@ -84,20 +93,11 @@ class WGP(Criterion):
     def forward(self, gradient_norm: torch.Tensor, _ : torch.Tensor) -> torch.Tensor:
         return torch.mean((gradient_norm - 1)**2)
 
-class ModelLoader():
-
-        @config("Model")
-        def __init__(self, classpath : str = "default:classificationV2.ConvNeXt") -> None:
-            self.module, self.name = _getModule(classpath.split(".")[-1] if len(classpath.split(".")) > 1 else classpath, "networks" + "."+".".join(classpath.split(".")[:-1]) if len(classpath.split(".")) > 1 else "")
-            
-        def getModel(self):
-            return getattr(importlib.import_module(self.module), self.name)(config = None, DL_args=os.environ["DEEP_LEARNING_API_CONFIG_VARIABLE"], DL_without = ["optimizer", "criterions", "scheduler", "nb_batch_per_step", "init_type", "init_gain"])
-
 class MedPerceptualLoss(Criterion):
     
     def __init__(self, modelLoader : ModelLoader = ModelLoader(), path_model : str = "name", module_names : List[str] = ["ConvNextEncoder.ConvNexStage_2.BottleNeckBlock_0.Linear_2", "ConvNextEncoder.ConvNexStage_3.BottleNeckBlock_0.Linear_2"], shape: List[int] = [128, 256, 256]) -> None:
         super().__init__()
-        self.model = modelLoader.getModel()
+        self.model = modelLoader.getModel(train=False, DL_args=os.environ['DEEP_LEARNING_API_CONFIG_PATH'])
         state_dict = torch.load(path_model)
         self.model.load(state_dict)
         self.module_names = set(module_names)
@@ -197,6 +197,6 @@ class Accuracy(Criterion):
 
     def forward(self, input : torch.Tensor, target : torch.Tensor) -> torch.Tensor:
         self.n += input.shape[0]
-        self.corrects += (torch.argmax(torch.softmax(input, dim=1), dim=1) == target).sum().float()
+        self.corrects += (torch.argmax(torch.softmax(input, dim=1), dim=1) == target).sum().float().cpu()
         return self.corrects/self.n
 

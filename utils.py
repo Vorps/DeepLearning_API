@@ -12,6 +12,7 @@ from enum import Enum
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
 
+
 def dataset_to_data(dataset : h5py.Dataset) -> Tuple[np.ndarray, h5py.AttributeManager]:
     data = np.zeros(dataset.shape, dataset.dtype)
     dataset.read_direct(data)
@@ -33,7 +34,12 @@ def data_to_dataset(h5 : h5py.Group, name : str, data : np.ndarray, attributes :
 
 def image_to_dataset(h5 : h5py.Group, name : str, image : sitk.Image, attributes : Dict[str, object] = {}) -> None:
     attributes.update({"Origin" : image.GetOrigin(), "Spacing" : image.GetSpacing(), "Direction" : image.GetDirection()})
-    data_to_dataset(h5, name, sitk.GetArrayFromImage(image), attributes)
+    data = sitk.GetArrayFromImage(image)
+    if image.GetNumberOfComponentsPerPixel() == 1:
+        data = np.expand_dims(data, 0)
+    else:
+        data = np.transpose(data, (len(data.shape)-1, *[i for i in range(len(data.shape)-1)]))
+    data_to_dataset(h5, name, data, attributes)
 
 class DatasetUtils():
 
@@ -78,7 +84,7 @@ class DatasetUtils():
                 if len(name.split("/")) > 1 and not os.path.exists(path_dest+"/".join(name.split("/")[:-1])):
                     os.makedirs(path_dest+"/".join(name.split("/")[:-1]))
                 if not os.path.exists(path_dest+name):
-                    print("Write image : {}/{}".format(path_dest, name))
+                    print("Write image : {}{}".format(path_dest, name))
                     sitk.WriteImage(dataset_to_image(obj), path_dest+name)
     
         if not os.path.exists(path_dest):
@@ -163,7 +169,18 @@ def getDevice(device : Optional[int]) -> torch.device:
     else:
         return torch.device("cpu")
 
-def logImageNormalize(input : torch.Tensor):
+def logImageFormat(input : torch.Tensor):
+    input = input[0].detach().cpu().numpy()
+    nb_channel = input.shape[0]
+    if len(input.shape)-1 == 3:
+        input = input[:,input.shape[1]//2, ...]
+    if nb_channel == 1:
+        input = input[0]
+    else:
+        channel_split = np.split(input, 3, axis=0)
+        input = np.zeros((3, *list(input.shape[1:])))
+        for i, channels in enumerate(channel_split):
+            input[i] = np.mean(channels, axis=0)
     b = -np.min(input)
     a = 1/(np.max(input)+b)
     return a*(input+b)

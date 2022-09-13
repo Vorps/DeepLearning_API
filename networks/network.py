@@ -1,16 +1,18 @@
 from functools import partial, wraps
 import importlib
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+import inspect
+import os
+from posixpath import split
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 from typing_extensions import Self
 import torch
 from abc import ABC
 import numpy as np
-import torch.nn.functional as F
 from torch._jit_internal import _copy_to_script_wrapper
 
 from DeepLearning_API.config import config
 from DeepLearning_API.utils import NeedDevice, State, _getModule
-from DeepLearning_API.dataset import Patch
+from DeepLearning_API.HDF5 import ModelPatch
 from collections import OrderedDict
 
 class OptimizerLoader():
@@ -44,10 +46,13 @@ class SchedulersLoader():
 class CriterionsAttr():
 
     @config()
-    def __init__(self, l: float = 1.0) -> None:
+    def __init__(self, l: float = 1.0, isLoss: bool = True, stepStart:int = 0, stepStop:Optional[int] = None) -> None:
         self.l = l
         self.isTorchCriterion = True
-
+        self.isLoss = isLoss
+        self.stepStart = stepStart
+        self.stepStop = stepStop
+        
 class CriterionsLoader():
 
     @config()
@@ -58,7 +63,7 @@ class CriterionsLoader():
         criterions = {}
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
             module, name = _getModule(module_classpath, "measure")
-            criterionsAttr.isTorchCriterion = len(module.split(".")) > 0
+            criterionsAttr.isTorchCriterion = not module.startswith("DeepLearning_API.measure")
             criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format("Trainer" if train else "Predictor", model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
         return criterions
 
@@ -81,9 +86,10 @@ class Measure(NeedDevice):
         self.outputsCriterions = {}
         for output_group, targetCriterionsLoader in outputsCriterions.items():
             self.outputsCriterions[output_group.replace(":", ".")] = targetCriterionsLoader.getTargetsCriterions(output_group, model_classname, train)
-        self.value : List[float]= []
         self.values : Dict[str, List[float]] = dict()
-        self.loss = torch.zeros((1))
+        self.loss :Optional[torch.Tensor] = None
+        self._it = 0
+        self._nb_loss = 0
 
     def setDevice(self, device: torch.device):
         super().setDevice(device)
@@ -92,7 +98,7 @@ class Measure(NeedDevice):
                 for criterion in self.outputsCriterions[output_group][target_group]:
                     if isinstance(criterion, NeedDevice):
                         criterion.setDevice(device)
-
+        
     def init(self, model : torch.nn.Module):
         outputs_group_rename = {}
         for output_group in self.outputsCriterions.keys():
@@ -100,39 +106,58 @@ class Measure(NeedDevice):
                 for criterion in self.outputsCriterions[output_group][target_group]:
                     if not self.outputsCriterions[output_group][target_group][criterion].isTorchCriterion:
                         outputs_group_rename[output_group] = criterion.init(model, output_group, target_group)
+
         outputsCriterions_bak = self.outputsCriterions.copy()
         for old, new in outputs_group_rename.items():
             self.outputsCriterions.pop(old)
             self.outputsCriterions[new] = outputsCriterions_bak[old]
         for output_group in self.outputsCriterions:
             for target_group in self.outputsCriterions[output_group]:
-                for criterion in self.outputsCriterions[output_group][target_group]:
-                    self.values["{}_{}_{}".format(output_group, target_group, criterion.__class__.__name__)] = []
+                for criterion, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
+                    self.values["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)] = []
+                    if criterionsAttr.isLoss:
+                        self._nb_loss+=1
 
-    def update(self, output_group, output : torch.Tensor, data_dict : Dict[str, torch.Tensor]):
-        self.loss = torch.zeros((1), requires_grad = True).to(self.device, non_blocking=False)
+    def update(self, output_group, output : torch.Tensor, data_dict: Dict[str, torch.Tensor], it: int):
         for target_group in self.outputsCriterions[output_group]:
             target = data_dict[target_group].to(self.device, non_blocking=False) if target_group in data_dict else None
             for criterion, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
-                result = criterion(output, target)
-                self.loss += criterionsAttr.l*result
-                self.values["{}_{}_{}".format(output_group, target_group, criterion.__class__.__name__)].append(result.item())
-        self.value.append(self.loss.item())
-        
+                if it >= criterionsAttr.stepStart and (criterionsAttr.stepStop is None or it <= criterionsAttr.stepStop):
+                    result = criterion(output, target)
+                    if criterionsAttr.isLoss:
+                        self.loss += criterionsAttr.l*result
+                        self._it +=1 
+                    self.values["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)].append(criterionsAttr.l*result.item())
+                    
+    def isDone(self):
+        return self._it == self._nb_loss
+
+    def resetLoss(self):
+        self._it = 0
+        self.loss = torch.zeros((1), requires_grad = True).to(self.device, non_blocking=False)
+
     def getLastValue(self):
-        return self.value[-1] if self.value else 0 
+        return self.loss.item() if self.loss is not None else 0
     
-    def format(self) -> Dict[str, float]:
+    def getLastMetrics(self):
+        return {name : value[-1] if len(value) else 0 for name, value in self.values.items()}
+
+    def format(self, isLoss) -> Dict[str, float]:
         result = dict()
         for name in self.values:
-            result[name] = np.mean(self.values[name])
+            output_group, target_group = name.split(":")[:2]
+            for _, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
+                if criterionsAttr.isLoss == isLoss:
+                    result[name] = np.mean(self.values[name]) if len(self.values[name]) else 0
         return result
 
     def mean(self) -> float:
-        return np.mean(self.value)
+        value = 0
+        for name in self.values:
+            value += np.mean(self.values[name])
+        return value
     
     def clear(self) -> None:
-        self.value.clear()
         for name in self.values:
             self.values[name].clear()
 
@@ -141,7 +166,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
    
     class ModuleArgs:
 
-        def __init__(self, in_branch: List[int], out_branch: List[int], pretrained : bool, alias : List[str]) -> None:
+        def __init__(self, in_branch: List[str], out_branch: List[str], pretrained : bool, alias : List[str], requires_grad: Optional[bool]) -> None:
             super().__init__()
             self.alias : List[str] = alias
             self.pretrained = pretrained
@@ -151,6 +176,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             self.in_is_channel = True
             self.out_channels = None
             self.out_is_channel = True
+            self.requires_grad = requires_grad
 
     def __init__(self) -> None:
        super().__init__()
@@ -220,9 +246,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
     def values(self) -> Iterable[Optional[torch.nn.Module]]:
         return self._modules.values()
 
-    def add_module(self, name: str, module : torch.nn.Module, in_branch: List[int] = [0], out_branch: List[int] = [0], pretrained : bool = True, alias : List[str] = []) -> None:
+    def add_module(self, name: str, module : torch.nn.Module, in_branch: List[Union[int, str]] = [0], out_branch: List[Union[int, str]] = [0], pretrained : bool = True, alias : List[str] = [], requires_grad:Optional[bool] = None) -> None:
         super().add_module(name, module)
-        self._modulesArgs[name] = ModuleArgsDict.ModuleArgs(in_branch, out_branch, pretrained, alias)
+        self._modulesArgs[name] = ModuleArgsDict.ModuleArgs([str(value) for value in in_branch], [str(value) for value in out_branch], pretrained, alias, requires_grad)
     
     def getMap(self):
         results : Dict[str, str] = {}
@@ -268,12 +294,15 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                 torch.nn.init.normal_(module.weight, 0.0, std = init_gain)
                 torch.nn.init.constant_(module.bias, 0.0)
 
-    def named_forward(self, *inputs: torch.Tensor) -> Iterator[Tuple[str, torch.Tensor]]:
-        branchs: Dict[int, torch.Tensor] = {}
+    def named_forward(self, *inputs: torch.Tensor) -> Iterator[Tuple[str, torch.Tensor]]:    
+        branchs: Dict[str, torch.Tensor] = {}
         for i, input in enumerate(inputs):
-            branchs[i] = input
+            branchs[str(i)] = input
         out = inputs[0]
         for name, module in self.items():
+            requires_grad = self._modulesArgs[name].requires_grad
+            if requires_grad is not None and module:
+                module.requires_grad_(requires_grad)
             for ib in self._modulesArgs[name].in_branch:
                 if ib not in branchs:
                     branchs[ib] = inputs[0]
@@ -312,19 +341,24 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             
 class Network(ModuleArgsDict, NeedDevice, ABC):
 
-    def _apply_network(self, function: Callable) -> Dict[str, object]:
+    def _apply_network(self, networks: List[torch.nn.Module], key: str, function: Callable, *args, **kwargs) -> Dict[str, object]:
         results : Dict[str, object] = {}
         for module in self.values():
             if isinstance(module, Network):
-                for k, v in module._apply_network(function).items():
-                    results.update({self.getName()+"."+k : v})
-        results[self.getName()] = function()
+                if module not in networks:
+                    networks.append(module)
+                    for k, v in module._apply_network(networks, key+"."+module.getName(), function, *args, **kwargs).items():
+                        results.update({self.getName()+"."+k : v})
+
+        if len([param.name for param in list(inspect.signature(function).parameters.values()) if param.name == "key"]):
+            function = partial(function, key=key)
+
+        results[self.getName()] = function(self, *args, **kwargs)
         return results
 
     def _function_network(function : Callable): # type: ignore
-        @wraps(function)
         def new_function(self : Self, *args, **kwargs) -> Dict[str, object]:
-            return self._apply_network(partial(function, self, *args,  **kwargs))
+            return self._apply_network([], self.getName(), function, *args, **kwargs)
         return new_function
 
     def __init__(   self,
@@ -332,12 +366,10 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
                     optimizer: Optional[OptimizerLoader] = None, 
                     schedulers: Optional[SchedulersLoader] = None, 
                     outputsCriterions: Optional[Dict[str, TargetCriterionsLoader]] = None,
-                    patch : Optional[Patch] = None,
+                    patch : Optional[ModelPatch] = None,
                     nb_batch_per_step : int = 1,
                     init_type : str = "normal",
                     init_gain : float = 0.02,
-                    padding : int = 0,
-                    paddingMode : str = "constant",
                     dim : int = 3) -> None:
         super().__init__()
         self.in_channels = in_channels
@@ -355,13 +387,12 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
         self.nb_batch_per_step = nb_batch_per_step
         self.init_type  = init_type
         self.init_gain  = init_gain
-        self.padding = padding
-        self.paddingMode = paddingMode
         self.dim = dim
         
         self.scaler : Optional[torch.cuda.amp.grad_scaler.GradScaler] = None
         self._it = 0
-        
+        self.state_dict()
+    
     @_function_network
     def setDevice(self, device: torch.device):
         super().setDevice(device)
@@ -381,11 +412,11 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
                 prefix = ".".join(alias.split(".")[:-1])
                 if prefix in map.keys():
                     model_state_dict[alias.replace(prefix, map[prefix])] = model_state_dict_tmp[alias]
-                if prefix in map.values():
+                else:
                     model_state_dict[alias] = model_state_dict_tmp[alias]
             self.load_state_dict(model_state_dict, strict=True)
-            if "{}_optimizer_state_dict".format(name) in state_dict and self.optimizer:
-                self.optimizer.load_state_dict(state_dict['{}_optimizer_state_dict'.format(name)])
+        if "{}_optimizer_state_dict".format(name) in state_dict and self.optimizer:
+            self.optimizer.load_state_dict(state_dict['{}_optimizer_state_dict'.format(name)])
 
     def _compute_channels_trace(self, module : ModuleArgsDict, in_channels : int, in_is_channel = True, out_channels : Optional[int] = None, out_is_channel = True) -> Tuple[int, bool, int, bool]:
         for k, v in module.items():
@@ -424,69 +455,109 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
         return in_channels, in_is_channel, out_channels, out_is_channel
 
     @_function_network
-    def init(self, autocast : bool, state : State) -> None:
+    def init(self, autocast : bool, state : State, key: str) -> None:
         if state != State.PREDICTION:
+            self.scaler = torch.cuda.amp.grad_scaler.GradScaler(enabled=autocast)
             if self.optimizerLoader:
-                self.optimizer = self.optimizerLoader.getOptimizer(self.getName(), self.parameters(state == State.TRANSFER_LEARNING))
+                self.optimizer = self.optimizerLoader.getOptimizer(key, self.parameters(state == State.TRANSFER_LEARNING))
                 self.optimizer.zero_grad()
             if self.schedulersLoader and self.optimizer:
-                self.schedulers = self.schedulersLoader.getShedulers(self.getName(), self.optimizer)
-            self.scaler = torch.cuda.amp.grad_scaler.GradScaler(enabled=autocast)
+                self.schedulers = self.schedulersLoader.getShedulers(key, self.optimizer)
         if self.outputsCriterionsLoader:
-            self.measure = Measure(self.getName(), self.outputsCriterionsLoader, state != State.PREDICTION)
+            self.measure = Measure(key, self.outputsCriterionsLoader, state != State.PREDICTION)
             if self.device:
                 self.measure.setDevice(self.device)
                 self.measure.init(self)
         self._compute_channels_trace(self, self.in_channels)
-
-    def getInput(self, data_dict : Dict[str, torch.Tensor]) -> torch.Tensor:
-        input = torch.cat(list(data_dict.values()), dim=1)
-        if self.padding > 0:
-            input = F.pad(input, tuple([0, 0]*self.dim+[0,self.padding]), self.paddingMode)
-        return input
-        
-    def forward(self, data_dict : Dict[Tuple[str, bool], torch.Tensor]) -> torch.Tensor:
-        input = self.getInput({k[0] : torch.unsqueeze(v, dim=1) for k, v in data_dict.items() if k[1]})
-        output_layer = input
-        outputsGroup = list(self.measure.outputsCriterions.keys()).copy() if self.measure else list("None")
-        if self.patch:
-            self.patch.load(input.shape[2:])
-            output_layer_accumulator = {outputGroup : list() for outputGroup in outputsGroup}
-
-            for patch_input in self.patch.disassemble(input):
-                outputsGroup_tmp = outputsGroup.copy()
-                for (name, output_layer) in self.named_forward(patch_input):
-                    if name in outputsGroup_tmp:
-                        outputsGroup_tmp.remove(name)
-                        output_layer_accumulator[name].append(output_layer)
-                    if not len(outputsGroup_tmp):
-                        break
-
-            for outputGroup in outputsGroup:
-                if self.measure: 
-                    self.measure.update(outputGroup, self.patch.assemble(output_layer_accumulator[outputGroup]), {k[0] : v for k, v in data_dict.items()})
-        else:
-            for (name, output_layer) in self.named_forward(input):
-                if name in outputsGroup:
-                    outputsGroup.remove(name)
-                    if self.measure:
-                        self.measure.update(name, output_layer, {k[0] : v for k, v in data_dict.items()})
-                if not len(outputsGroup):
-                    break
-        return output_layer
     
-    @_function_network
-    def backward(self):
-        assert self.measure and self.scaler and self.optimizer, "Error init model with [optimizer, criterions]"
+    
+    def named_forward(self, *inputs: torch.Tensor) -> Iterator[Tuple[str, torch.Tensor]]:
+        if self.patch:
+            
+            self.patch.load(inputs[0].shape[2:])
+            patchIterator = self.patch.disassemble(*inputs)
+            for patch_input in patchIterator:
+                for (name, output_layer) in super().named_forward(*patch_input):
+                    yield "{}{}".format("accu:", name), output_layer
+                self.patch.addLayer(output_layer)
+
+            yield name, self.patch.assemble(self.device)
+        else:
+            for (name, output_layer) in super().named_forward(*inputs):
+                yield name, output_layer
+    
+    def get_layers(self, data_dict : Dict[Tuple[str, bool], torch.Tensor], layers_name: List[str]) -> Iterator[Tuple[str, torch.Tensor]]:
+        inputs = [v for k, v in data_dict.items() if k[1]]
+
+        output_layer_accumulator = {outputName : list() for outputName in layers_name}
+
+        for (nameTmp, output_layer) in self.named_forward(*inputs):
+            name = nameTmp.replace("accu:", "")
+            if name in layers_name:
+                accu = "accu:" in nameTmp
+                if accu:
+                    output_layer_accumulator[name].append(output_layer) 
+                    networkName = nameTmp.split("accu:")[-2].split(".")[-1]
+                    module = self
+                    network = None
+                    for n in name.split("."):
+                        module = module[n]
+                        if isinstance(module, Network) and n == networkName:
+                            network = module
+                            break
+
+                    if network and network.patch and output_layer_accumulator[name] == len(network.patch):
+                        output_layer = network.patch.assemble_accumulator(output_layer_accumulator[name], self.device)
+                        output_layer_accumulator[name].clear()
+
+                layers_name.remove(name)
+                yield name, output_layer
+
+            if not len(layers_name):
+                break
+            
+    def _layer_function(self, name: str, output_layer: torch.Tensor, data_dict: Dict[Tuple[str, bool], torch.Tensor]):
+        self.measure.update(name, output_layer, {k[0] : v for k, v in data_dict.items()}, self._it)
+        self._backward()
+
+    def forward(self, data_dict: Dict[Tuple[str, bool], torch.Tensor], output_layers: List[str] = []) -> List[Tuple[str, torch.Tensor]]:
+        metric_tmp = {network : network.measure.outputsCriterions.keys() for network in self.getNetworks().values() if network.measure}
+
+        outputsGroup : Dict[str, Self]= {}
+        for k, v in metric_tmp.items():
+            for a in v:
+                outputsGroup[a] = k
+
+        if not len(outputsGroup):
+            return None
         
-        self.measure.loss /= self.nb_batch_per_step
-        if self._it % self.nb_batch_per_step == 0:
-            if self.measure.loss is not None:
-                self.scaler.scale(self.measure.loss).backward()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.optimizer.zero_grad()
+        self.resetLoss()
+        results = []
+        for name, layer in self.get_layers(data_dict, list(set(list(outputsGroup.keys())+output_layers))):
+            if name in outputsGroup:
+                outputsGroup[name]._layer_function(name, layer, data_dict)
+            if name in output_layers:
+                results.append((name, layer))
+        return results 
+
+    @_function_network
+    def resetLoss(self):
+        if self.measure:
+            self.measure.resetLoss()
+
+    def _backward(self):
+        if self.measure:
+            if self.measure.isDone() and self.measure.loss is not None:
+                if self.scaler and self.optimizer:
+                    self.measure.loss /= self.nb_batch_per_step
+                    if self._it % self.nb_batch_per_step == 0:
+                        self.scaler.scale(self.measure.loss).backward()
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                        self.optimizer.zero_grad()
+                
         self._it += 1
+        
 
     @_function_network
     def update_lr(self):
@@ -513,10 +584,6 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
     def getNetworks(self) -> Self:
         return self
 
-    @_function_network
-    def logImage(self, data_dict : Dict[str, torch.Tensor], output : Dict[str, torch.Tensor]) -> Optional[Dict[str, np.ndarray]]:
-        return None
-
     def getName(self):
         return self.__class__.__name__
 
@@ -526,8 +593,10 @@ class ModelLoader():
     def __init__(self, classpath : str = "default:segmentation.UNet") -> None:
         self.module, self.name = _getModule(classpath.split(".")[-1] if len(classpath.split(".")) > 1 else classpath, "networks" + "."+".".join(classpath.split(".")[:-1]) if len(classpath.split(".")) > 1 else "")
         
-    def getModel(self, train : bool = True) -> Network:
-        model = partial(getattr(importlib.import_module(self.module), self.name), config = None, DL_args="{}.Model".format("Trainer" if train else "Predictor"))
+    def getModel(self, train : bool = True, DL_args: Optional[str] = None, DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain"]) -> Network:
+        if not DL_args:
+            DL_args="{}.Model".format(os.environ["DEEP_LEARNING_API_ROOT"])
+        model = partial(getattr(importlib.import_module(self.module), self.name), config = None, DL_args=DL_args)
         if not train: 
-            model = partial(model, DL_without = ["optimizer", "scheduler", "nb_batch_per_step", "init_type", "init_gain"])
+            model = partial(model, DL_without = DL_without)
         return model()

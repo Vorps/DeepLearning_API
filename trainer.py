@@ -1,4 +1,5 @@
 import torch
+from torch.cuda.amp.autocast_mode import autocast
 import tqdm
 from typing import Dict, List, Optional, Tuple
 import numpy as np
@@ -7,7 +8,7 @@ import os
 from DeepLearning_API import MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, URL_MODEL
 from DeepLearning_API.dataset import DataTrain
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import gpuInfo, getDevice, State, NeedDevice
+from DeepLearning_API.utils import gpuInfo, getDevice, State, NeedDevice, logImageFormat
 from DeepLearning_API.networks.network import Network, ModelLoader
 import datetime
 
@@ -32,7 +33,8 @@ class Trainer(NeedDevice):
                     epochs: int = 100,
                     it_validation : Optional[int] = None,
                     autocast : bool = False,
-                    ema_decay : float = 0) -> None:
+                    ema_decay : float = 0,
+                    images_log: Optional[List[str]] = None) -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)
         self.manual_seed = manual_seed
@@ -53,6 +55,7 @@ class Trainer(NeedDevice):
         self.model = model.getModel(train=True)
         self.ema_decay = ema_decay
         self.modelEMA : Optional[torch.optim.swa_utils.AveragedModel] = None
+        self.images_log = images_log
         
         self.setDevice(getDevice(device))
         
@@ -120,7 +123,7 @@ class Trainer(NeedDevice):
                 self._train()
                 
     def getInput(self, data_dict : Dict[str, torch.Tensor]) -> Dict[Tuple[str, bool], torch.Tensor]:
-        return {(k, k in self.groupsInput) : v.to(self.device) for k, v in data_dict.items()}
+        return {(k, k in self.groupsInput) : v[0].to(self.device) for k, v in data_dict.items()}
 
     def _train(self) -> None:
         assert self.it_validation, "it_validation is None"
@@ -129,19 +132,18 @@ class Trainer(NeedDevice):
 
         with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = description(), total=len(self.dataloader_training), leave=False) as batch_iter:
             for _, data_dict in batch_iter:
-                with torch.cuda.amp.autocast(enabled=self.autocast):
+                with autocast(enabled=self.autocast):                
                     input = self.getInput(data_dict)
                     self.model(input)
                     if self.modelEMA is not None:
                         self.modelEMA.update_parameters(self.model)
                         self.modelEMA(input)
 
-                    self.model.backward()
                     self.model.update_lr()
                     
 
                     if (self.it+1) % self.it_validation == 0:
-                        self._train_log(self.getInput(data_dict))
+                        self._train_log(data_dict)
                         if self.dataloader_validation is not None:
                             self._validate()
                             self.model.train()
@@ -168,7 +170,7 @@ class Trainer(NeedDevice):
 
                 batch_iter.set_description(description())
             assert data_dict, "No data"
-            self._validation_log(self.getInput(data_dict))
+            self._validation_log(data_dict)
 
     def checkpoint_save(self, loss) -> None:
         path = CHECKPOINTS_DIRECTORY()+self.train_name+"/"
@@ -188,11 +190,11 @@ class Trainer(NeedDevice):
             save_dict = {
                 'epoch': self.epoch,
                 'it': self.it,
-                'loss' : loss}
-            save_dict.update({name : network.state_dict() for name, network in self.model.getNetworks().items()})
+                'loss' : loss,
+                self.model.getName(): self.model.state_dict()}
 
             if self.modelEMA is not None:
-                save_dict.update({name+"_EMA" : network.state_dict() for name, network in self.modelEMA.module.getNetworks().items()})
+                save_dict.update({self.modelEMA.module.getName()+"_EMA" : self.modelEMA.state_dict()})
 
             save_dict.update({'{}_optimizer_state_dict'.format(name): network.optimizer.state_dict() for name, network in self.model.getNetworks().items() if network.optimizer is not None})
             torch.save(save_dict, path+name)
@@ -212,12 +214,12 @@ class Trainer(NeedDevice):
             os.makedirs("{}Serialized/".format(path))
             torch.save(self.model, "{}Serialized/{}".format(path, name))
             os.makedirs("{}StateDict/".format(path))
-            torch.save({name : network.state_dict() for name, network in self.model.getNetworks().items()}, "{}StateDict/{}".format(path, name))
+            torch.save({name : self.model.state_dict()}, "{}StateDict/{}".format(path, name))
             
             if self.modelEMA is not None:
                 self.modelEMA.module.load(checkpoint, init=False, ema=True)
                 torch.save(self.modelEMA.module, "{}Serialized/{}".format(path, DATE()+"_EMA.pt"))
-                torch.save({name : network.state_dict() for name, network in self.modelEMA.module.getNetworks().items()}, "{}StateDict/{}".format(path, DATE()+"_EMA.pt"))
+                torch.save({name : self.modelEMA.module.state_dict()}, "{}StateDict/{}".format(path, DATE()+"_EMA.pt"))
 
             os.rename(self.config_namefile, self.config_namefile.replace(".yml", "")+"_"+str(self.it)+".yml")
 
@@ -249,18 +251,29 @@ class Trainer(NeedDevice):
         for label, model in models.items():
             for name, network in model.getNetworks().items():
                 if network.measure is not None:
-                    self.tb.add_scalars("{}{}/Loss/Trainning".format(name, label), network.measure.format(), self.it)
+                    self.tb.add_scalars("{}{}/Loss/Trainning".format(name, label), network.measure.format(isLoss=True), self.it)
+                    self.tb.add_scalars("{}{}/Metric/Trainning".format(name, label), network.measure.format(isLoss=False), self.it)
 
-            for name, weight in model.named_parameters():
+            """for name, weight in model.named_parameters():
                 self.tb.add_histogram("{}{}".format(name, label), weight, self.it)
                 if weight.grad is not None:
-                    self.tb.add_histogram("{}{}.grad".format(name, label), weight.grad, self.it)
+                    self.tb.add_histogram("{}{}.grad".format(name, label), weight.grad, self.it)"""
+            
+            if self.images_log:
+                images_log = []
+                addImageFunction = lambda name, layer : self.tb.add_image("result/Train/{}{}".format(name, label), logImageFormat(layer), self.it, dataformats='HW' if layer.shape[1] == 1 else 'CHW')
 
-            """images = model.logImage(data_dict, output)
-            if images is not None:
-                for image_name, image in images.items():
-                    self.tb.add_image("result/Train/{}{}".format(image_name, label), logImageNormalize(image), self.it, dataformats='HW' if image.ndim == 2 else 'CHW')"""
-        
+                for name in self.images_log:
+                    if name in data_dict:
+                        addImageFunction(name, data_dict[name])
+                    else:
+                        images_log.append(name.replace(":", "."))
+                model.eval()
+                for name, layer in model.get_layers(self.getInput(data_dict), images_log):
+                    addImageFunction(name, layer)
+                model.train()
+
+
         for name, network in self.model.getNetworks().items():
             if network.optimizer is not None:
                 self.tb.add_scalar("{}/Learning Rate".format(name), network.optimizer.param_groups[0]['lr'], self.it)
@@ -274,9 +287,18 @@ class Trainer(NeedDevice):
         for label, model in models.items():
             for name, network in model.getNetworks().items():
                 if network.measure is not None:
-                    self.tb.add_scalars("{}{}/Loss/Validation".format(name, label), network.measure.format(), self.it)
+                    self.tb.add_scalars("{}{}/Loss/Validation".format(name, label), network.measure.format(isLoss=True), self.it)
+                    self.tb.add_scalars("{}{}/Metric/Validation".format(name, label), network.measure.format(isLoss=False), self.it)
             
-            """images = model.logImage(data_dict, output)
-            if images is not None:
-                for image_name, image in images.items():
-                    self.tb.add_image("result/Validation/{}{}".format(image_name, label), logImageNormalize(image), self.it, dataformats='HW' if image.ndim == 2 else 'CHW')"""
+            
+            addImageFunction = lambda name, layer: self.tb.add_image("result/Validation/{}{}".format(name, label), logImageFormat(layer), self.it, dataformats='HW' if layer.shape[1] == 1 else 'CHW')
+
+            if self.images_log:
+                images_log = []
+                for name in self.images_log:
+                    if name in data_dict:
+                        addImageFunction(name, data_dict[name])
+                    else:
+                        images_log.append(name.replace(":", "."))
+                for name, layer in model.get_layers(self.getInput(data_dict), images_log):
+                    addImageFunction(name, layer)

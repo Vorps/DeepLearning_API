@@ -2,7 +2,7 @@ from abc import ABC
 from typing import Dict, List, Type
 import torch
 from DeepLearning_API.networks import network, blocks
-from DeepLearning_API.dataset import Patch
+from DeepLearning_API.HDF5 import ModelPatch
 from DeepLearning_API.config import config
 
 """
@@ -31,22 +31,22 @@ class ResBlock(AbstractResBlock):
     def __init__(self, in_channels: int, out_channels: int, downsample: bool, dim: int):
         super().__init__(in_channels, out_channels, downsample, dim)
         if downsample:
-            self.add_module("Shortcut", blocks.ConvBlock(in_channels, out_channels, blocks.BlockConfig(kernel_size=1, stride=2, padding=0, bias=False, activation="None", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["0"], ["1"], []]), in_branch=[1], out_branch=[1], alias=["downsample"])     
+            self.add_module("Shortcut", blocks.ConvBlock(in_channels, out_channels, 1, blocks.BlockConfig(kernel_size=1, stride=2, padding=0, bias=False, activation="None", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["0"], ["1"], []]), in_branch=[1], out_branch=[1], alias=["downsample"])     
                    
-        self.add_module("ConvBlock_0", blocks.ConvBlock(in_channels, out_channels, blocks.BlockConfig(kernel_size=3, stride=2 if downsample else 1, padding=1, bias=False, activation="ReLU", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["conv1"], ["bn1"], []]))
-        self.add_module("ConvBlock_1", blocks.ConvBlock(out_channels, out_channels, blocks.BlockConfig(kernel_size=3, stride=1, padding=1, bias=False, activation="None", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["conv2"], ["bn2"], []]))
+        self.add_module("ConvBlock_0", blocks.ConvBlock(in_channels, out_channels, 1, blocks.BlockConfig(kernel_size=3, stride=2 if downsample else 1, padding=1, bias=False, activation="ReLU", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["conv1"], ["bn1"], []]))
+        self.add_module("ConvBlock_1", blocks.ConvBlock(out_channels, out_channels, 1, blocks.BlockConfig(kernel_size=3, stride=1, padding=1, bias=False, activation="None", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["conv2"], ["bn2"], []]))
         self.add_module("Residual", blocks.Add(), in_branch=[0,1])
         self.add_module("ReLU", torch.nn.ReLU())
 
 class ResBottleneckBlock(AbstractResBlock):
     def __init__(self, in_channels: int, out_channels: int, downsample: bool, dim: int):
         super().__init__(in_channels, out_channels, downsample, dim)
-        self.add_module("ConvBlock_0", blocks.ConvBlock(in_channels, out_channels//4, blocks.BlockConfig(kernel_size=1, stride=1, padding=0, bias=False, activation="ReLU", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["conv1"], ["bn1"], []]))
-        self.add_module("ConvBlock_1", blocks.ConvBlock(out_channels//4, out_channels//4, blocks.BlockConfig(kernel_size=3, stride=2 if downsample else 1, padding=1, bias=False, activation="ReLU", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["conv2"], ["bn2"], []]))
-        self.add_module("ConvBlock_2", blocks.ConvBlock(out_channels//4, out_channels, blocks.BlockConfig(kernel_size=1, stride=1, padding=0, bias=False, activation="ReLU", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["conv3"], ["bn3"], []]))
+        self.add_module("ConvBlock_0", blocks.ConvBlock(in_channels, out_channels//4, 1, blocks.BlockConfig(kernel_size=1, stride=1, padding=0, bias=False, activation="ReLU", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["conv1"], ["bn1"], []]))
+        self.add_module("ConvBlock_1", blocks.ConvBlock(out_channels//4, out_channels//4, 1, blocks.BlockConfig(kernel_size=3, stride=2 if downsample else 1, padding=1, bias=False, activation="ReLU", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["conv2"], ["bn2"], []]))
+        self.add_module("ConvBlock_2", blocks.ConvBlock(out_channels//4, out_channels, 1, blocks.BlockConfig(kernel_size=1, stride=1, padding=0, bias=False, activation="ReLU", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["conv3"], ["bn3"], []]))
         
         if downsample or in_channels != out_channels:
-            self.add_module("Shortcut", blocks.ConvBlock(in_channels, out_channels, blocks.BlockConfig(kernel_size=1, stride=2 if downsample else 1, padding=0, bias=False, activation="None", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["0"], ["1"], []]), in_branch=[1], out_branch=[1], alias=["downsample"])
+            self.add_module("Shortcut", blocks.ConvBlock(in_channels, out_channels, 1, blocks.BlockConfig(kernel_size=1, stride=2 if downsample else 1, padding=0, bias=False, activation="None", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["0"], ["1"], []]), in_branch=[1], out_branch=[1], alias=["downsample"])
         
         self.add_module("Residual", blocks.Add(), in_branch=[0,1])
         self.add_module("ReLU", torch.nn.ReLU())
@@ -69,7 +69,7 @@ class ResNetStem(network.ModuleArgsDict):
 
     def __init__(self, in_channels: int, out_features: int, dim: int):
         super().__init__()
-        self.add_module("ConvBlock", blocks.ConvBlock(in_channels, out_features, blocks.BlockConfig(kernel_size=7, stride=2, padding=3, bias=False, activation="ReLU", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["conv1"], ["bn1"], []]))
+        self.add_module("ConvBlock", blocks.ConvBlock(in_channels, out_features, 1, blocks.BlockConfig(kernel_size=7, stride=2, padding=3, bias=False, activation="ReLU", normMode=blocks.NormMode.BATCH.name), dim=dim, alias=[["conv1"], ["bn1"], []]))
         self.add_module("MaxPool", blocks.getTorchModule("MaxPool", dim)(kernel_size=3, stride=2, padding=1)) 
 
 class ResNetEncoder(network.ModuleArgsDict):
@@ -103,15 +103,13 @@ class ResNet(network.Network):
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
-                    patch : Patch = Patch(),
-                    padding : int = 0,
-                    paddingMode : str = "default:constant:reflect:replicate:circular",
+                    patch : ModelPatch = ModelPatch(),
                     dim : int = 3,
                     in_channels: int = 1,
                     depths: List[int] = [2, 2, 2, 2],
                     widths: List[int] = [64, 64, 128, 256, 512],
                     num_classes: int = 10, 
                     useBottleneck=False):
-        super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02, padding=padding, paddingMode=paddingMode)
+        super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02)
         self.add_module("ResNetEncoder", ResNetEncoder(in_channels=in_channels, depths=depths, widths=widths, useBottleneck=useBottleneck, dim=dim))        
         self.add_module("Head", Head(in_features=widths[-1], num_classes=num_classes, dim=dim))

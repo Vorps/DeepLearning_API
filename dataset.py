@@ -10,16 +10,16 @@ import numpy as np
 from abc import ABC, abstractmethod
 from torch.utils.data import DataLoader
 
-from DeepLearning_API.HDF5 import HDF5, Patch, Dataset
+from DeepLearning_API.HDF5 import HDF5, DatasetPatch, Dataset
 from DeepLearning_API.config import config
 from DeepLearning_API.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, NeedDevice
 from DeepLearning_API.transform import TransformLoader, Transform
-from DeepLearning_API.augmentation import DataAugmentationLoader, DataAugmentation
+from DeepLearning_API.augmentation import DataAugmentationsList
 
 
 class Group:
 
-    @config(None)
+    @config()
     def __init__(self,  pre_transforms : Dict[str, TransformLoader] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
                         post_transforms : Dict[str, TransformLoader] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()}) -> None:
         self._pre_transforms = pre_transforms
@@ -42,21 +42,26 @@ class Group:
 
 class DataSet(data.Dataset):
 
-    def __init__(self, hdf5 : HDF5, index : List[int], groups : Dict[str, Group], dataAugmentations : List[DataAugmentation], patch : Patch, use_cache = True) -> None:
+    def __init__(self, hdf5 : HDF5, index : List[int], groups : Dict[str, Group], dataAugmentationsList : List[DataAugmentationsList], patch : Optional[DatasetPatch], use_cache = True) -> None:
         self.data : dict[str, List[Dataset]] = {}
-        self.dataAugmentations = dataAugmentations
+        
+        self.dataAugmentationsList = dataAugmentationsList
         self.groups = groups
 
         nb_dataset_list = []
         nb_patch_list = []
+        self.mapping: Dict[int, List[int]]= {}
         for group in self.groups:
-            _, self.mapping, self.data[group] = hdf5.getDatasets(group, index, patch, self.groups[group].pre_transforms, [], 0, {})
+            datasets, mapping, _, _= hdf5.getDatasets(group, index)
+            self.data[group] = [Dataset(group, dataset, patch = patch, pre_transforms = self.groups[group].pre_transforms) for dataset in datasets]
+            self.mapping = {i : l for i, l in enumerate(mapping)}
             nb_dataset_list.append(len(self.mapping))
-            nb_patch_list.append(np.array([[len(dataset) for dataset in DataSet.getDatasetsFromIndex(self.data[group], index)] for index in self.mapping.values()]).flatten())
+            nb_patch_list.append([len(dataset) for dataset in self.data[group]])
         
         self.nb_dataset = nb_dataset_list[0]
         self.nb_patch = nb_patch_list[0]
-        self.nb_augmentation = np.max([int(np.sum([data_augmentation.nb for data_augmentation in self.dataAugmentations])), 1])
+        
+        self.nb_augmentation = np.max([int(np.sum([data_augmentation.nb for data_augmentation in self.dataAugmentationsList])), 1])
         
         self.use_cache = use_cache
 
@@ -68,16 +73,11 @@ class DataSet(data.Dataset):
                     self.map[i] = (x,y,z)
                     i += 1
 
-    @staticmethod
-    def getDatasetsFromIndex(data, indexs) -> List[Dataset]:
+    def getDatasetsFromIndex(self, group: str, indexs: List[int]) -> List[Dataset]:
+        data = self.data[group]
         result : List[Dataset] = []
-        last_index = None
         for index in indexs:
-            if last_index is not None:
-                data = data[last_index]
-
             result.append(data[index])
-            last_index = index + 1
         return result
 
     def load(self):
@@ -93,12 +93,10 @@ class DataSet(data.Dataset):
 
                     progressbar.set_description(description(memory_init, index))
 
-
     def loadData(self, group : str, index : int) -> None:
-        datasets = DataSet.getDatasetsFromIndex(self.data[group], self.mapping[index])
+        datasets = self.getDatasetsFromIndex(group, self.mapping[index])
         for dataset in datasets:
-            dataset.load(index, self.groups[group].pre_transforms, self.dataAugmentations)
-        
+            dataset.load(index, self.groups[group].pre_transforms, self.dataAugmentationsList)
 
     def unloadData(self, group : str, index : int) -> None:
         return self.data[group][index].unload()
@@ -109,25 +107,14 @@ class DataSet(data.Dataset):
     def __len__(self) -> int:
         return len(self.map)
 
-    def getData(self, x):
-        data = {}
-        for group in self.groups:
-            datasets = DataSet.getDatasetsFromIndex(self.data[group], self.mapping[x])
-            for i, dataset in enumerate(datasets):
-                if not dataset.loaded:
-                    self.loadData(group, x)
-                data["{}".format(group) if len(datasets) == 1 else "{}_{}".format(group, i)] = dataset.data
-        return data
-
-    def __getitem__(self, index : int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, index : int) -> Dict[str, Tuple[torch.Tensor, int, int, int]]:
         data = {}
         for group in self.groups:
             x, p, a = self.getMap(index)
-            datasets = DataSet.getDatasetsFromIndex(self.data[group], self.mapping[x])
+            self.loadData(group, x)
+            datasets = self.getDatasetsFromIndex(group, self.mapping[x])
             for i, dataset in enumerate(datasets):
-                if not dataset.loaded:
-                    self.loadData(group, x)
-                data["{}".format(group) if len(datasets) == 1 else "{}_{}".format(group, i)] = dataset.getData(p, a, self.groups[group].post_transforms)
+                data["{}".format(group) if len(datasets) == 1 else "{}_{}".format(group, i)] = (dataset.getData(p, a, self.groups[group].post_transforms), x, p, a)
         return data
 
 class Data(NeedDevice, ABC):
@@ -135,7 +122,7 @@ class Data(NeedDevice, ABC):
     @config("Dataset")
     def __init__(self,  dataset_filename : str = "default", 
                         groups : Dict[str, Group] = {"default" : Group()},
-                        patch : Patch = Patch(),
+                        patch : Optional[DatasetPatch] = None,
                         use_cache : bool = True,
                         subset : Optional[List[int]] = None,
                         num_workers : int = 4,
@@ -145,8 +132,9 @@ class Data(NeedDevice, ABC):
         self.dataset_filename = dataset_filename
         self.subset = subset
         self.groups = groups
+        self.dataAugmentationsList: Dict[str, DataAugmentationsList] = {}
 
-        self.dataSet_args = dict(groups=self.groups, dataAugmentations = [], patch=patch, use_cache = use_cache)
+        self.dataSet_args = dict(groups=self.groups, dataAugmentationsList = list(self.dataAugmentationsList.values()), patch=patch, use_cache = use_cache)
         self.dataLoader_args = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory, shuffle=shuffle)
 
     def __enter__(self):
@@ -167,10 +155,12 @@ class Data(NeedDevice, ABC):
         return sizes[0]
 
     @abstractmethod
-    def getData(self) -> Union[Tuple[DataLoader, DataLoader], DataLoader]:
-        for group in self.groups:
-            assert self.device, "No device set"
-            self.groups[group].load(group, self.device)
+    def getData(self) -> Union[Tuple[DataLoader, Optional[DataLoader]], DataLoader]:
+        assert self.device, "No device set"
+        for key, group in self.groups.items():
+            group.load(key, self.device)
+        for key, dataAugmentations in self.dataAugmentationsList.items():
+            dataAugmentations.load(key, self.device)
 
     @abstractmethod
     def load(self) -> None:
@@ -181,8 +171,8 @@ class DataTrain(Data):
     @config("Dataset")
     def __init__(self,  dataset_filename : str = "default", 
                         groups : Dict[str, Group] = {"default" : Group()},
-                        augmentations : Dict[str, DataAugmentationLoader] = {"default:RandomGeometricTransform" : DataAugmentationLoader()},
-                        patch : Patch = Patch(),
+                        augmentations : Dict[str, DataAugmentationsList] = {"DataAugmentation_0" : DataAugmentationsList()},
+                        patch : Optional[DatasetPatch] = DatasetPatch(),
                         use_cache : bool = True,
                         subset : Optional[List[int]] = None,
                         num_workers : int = 4,
@@ -191,22 +181,14 @@ class DataTrain(Data):
                         shuffle : bool = True,
                         train_size : float = 0.8) -> None:
         super().__init__(dataset_filename, groups, patch, use_cache, subset, num_workers, pin_memory, batch_size, shuffle)
-        self.augmentations = augmentations
+        self.dataAugmentationsList = augmentations if augmentations else {}
         self.train_test_split_args = dict(train_size=train_size, shuffle=shuffle)
 
-    def getData(self, random_state : Optional[int]) -> Union[Tuple[DataLoader, DataLoader], DataLoader]:
+    def getData(self, random_state : Optional[int]) -> Union[Tuple[DataLoader, Optional[DataLoader]], DataLoader]:
         super().getData()
         assert self.subset
-        self.dataAugmentations : List[DataAugmentation] = []
-        if self.augmentations is not None:
-            for name, data_augmentation in self.augmentations.items():
-                self.dataAugmentations.append(data_augmentation.getDataAugmentation(name))
-        self.dataSet_args.update(dataAugmentations=self.dataAugmentations)
+        self.dataSet_args.update(dataAugmentationsList=list(self.dataAugmentationsList.values()))
         
-        for dataAugmentation in self.dataAugmentations:
-            assert self.device, "No device set"
-            dataAugmentation.setDevice(self.device)
-
         if self.train_test_split_args["train_size"] < 1:
             if self.train_test_split_args["shuffle"]:
                 index_train, index_valid = train_test_split(range(0, len(self)), random_state=random_state, **self.train_test_split_args)
@@ -215,7 +197,6 @@ class DataTrain(Data):
                 index_valid = index_valid[:int(math.ceil(nb*(1-self.train_test_split_args["train_size"])))]
             else:
                 index_train, index_valid = train_test_split(range(self.subset[0], self.subset[1]), random_state=random_state, **self.train_test_split_args)
-
             self.dataset_train = DataSet(self.hdf5, index = index_train, **self.dataSet_args) # type: ignore
             self.dataset_validation = DataSet(self.hdf5, index = index_valid, **self.dataSet_args) # type: ignore
             return DataLoader(dataset=self.dataset_train, **self.dataLoader_args), DataLoader(dataset=self.dataset_validation, **self.dataLoader_args)
@@ -225,7 +206,7 @@ class DataTrain(Data):
             else:
                 self.dataset_train = DataSet(self.hdf5, index = list(range(self.subset[0], self.subset[1])), **self.dataSet_args) # type: ignore
             self.dataset_validation = None
-            return DataLoader(dataset=self.dataset_train, **self.dataLoader_args)
+            return DataLoader(dataset=self.dataset_train, **self.dataLoader_args), None
 
     def load(self) -> None:
         if self.dataset_train is not None:
@@ -238,7 +219,7 @@ class DataPrediction(Data):
     @config("Dataset")
     def __init__(self,  dataset_filename : str = "Dataset.h5", 
                         groups : Dict[str, Group] = {"default" : Group()},
-                        patch : Patch = Patch(),
+                        patch : Optional[DatasetPatch] = DatasetPatch(),
                         use_cache : bool = True,
                         subset : Optional[List[int]] = None,
                         num_workers : int = 4,
@@ -247,7 +228,7 @@ class DataPrediction(Data):
 
         super().__init__(dataset_filename, groups, patch, use_cache, subset, num_workers, pin_memory, batch_size, False)
         
-    def getData(self) -> Union[Tuple[DataLoader, DataLoader], DataLoader]:
+    def getData(self) -> Union[Tuple[DataLoader, Optional[DataLoader]], DataLoader]:
         super().getData()
         assert self.subset
         self.dataset_prediction = DataSet(self.hdf5, index = list(range(self.subset[0], self.subset[1])), **self.dataSet_args)  # type: ignore

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from DeepLearning_API.networks import network, blocks
 from DeepLearning_API.config import config
-from DeepLearning_API.dataset import Patch
+from DeepLearning_API.HDF5 import ModelPatch
 
 """
 "convnext_tiny_1k": "https://dl.fbaipublicfiles.com/convnext/convnext_tiny_1k_224_ema.pth", depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]
@@ -94,7 +94,6 @@ class BottleNeckBlock(network.ModuleArgsDict):
         self.add_module("Linear_1",  torch.nn.Linear(features, features * 4), alias=["pwconv1"])
         self.add_module("GELU", torch.nn.GELU())
         self.add_module("Linear_2", torch.nn.Linear(features * 4, features), alias=["pwconv2"])
-        
         self.add_module("LayerScaler", LayerScaler(init_value=layer_scaler_init_value, dimensions=features), alias=[""])
         self.add_module("ToChannels", blocks.ToChannels(dim))
         self.add_module("StochasticDepth", DropPath(drop_p))
@@ -148,13 +147,15 @@ class ConvNextEncoder(network.ModuleArgsDict):
 
 class Head(network.ModuleArgsDict):
 
-    def __init__(self, in_features : int, num_classes : int, dim : int) -> None:
+    def __init__(self, in_features : int, num_classes : List[int], dim : int) -> None:
         super().__init__()
         self.add_module("AdaptiveAvgPool", blocks.getTorchModule("AdaptiveAvgPool", dim)(tuple([1]*dim)))
         self.add_module("Flatten", torch.nn.Flatten(1))
         self.add_module("LayerNorm", torch.nn.LayerNorm(in_features, eps=1e-6), alias=["norm"])
-        self.add_module("Linear", torch.nn.Linear(in_features, num_classes), pretrained=False, alias=["head"])
-        self.add_module("Unsqueeze", blocks.Unsqueeze(2))
+        
+        for i, nb_classe in enumerate(num_classes):
+            self.add_module("Linear_{}".format(i), torch.nn.Linear(in_features, nb_classe), pretrained=False, alias=["head"], out_branch=[i+1])
+            self.add_module("Unsqueeze_{}".format(i), blocks.Unsqueeze(2), in_branch=[i+1], out_branch=[-1])
 
 class ConvNeXt(network.Network):
     
@@ -163,16 +164,14 @@ class ConvNeXt(network.Network):
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
-                    patch : Patch = Patch(),
-                    padding : int = 0,
-                    paddingMode : str = "default:constant:reflect:replicate:circular",
+                    patch : ModelPatch = ModelPatch(),
                     dim : int = 3,
                     in_channels: int = 1,
                     depths: List[int] = [3,3,27,3],
                     widths: List[int] = [128, 256, 512, 1024],
                     drop_p: float = 0.1,
-                    num_classes: int = 10):
+                    num_classes: List[int] = [4, 7]):
 
-        super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02, padding=padding, paddingMode=paddingMode)
+        super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02)
         self.add_module("ConvNextEncoder", ConvNextEncoder(in_channels=in_channels, depths=depths, widths=widths, drop_p=drop_p, dim=dim))        
         self.add_module("Head", Head(in_features=widths[-1], num_classes=num_classes, dim=dim))

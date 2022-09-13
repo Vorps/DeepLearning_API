@@ -82,9 +82,7 @@ class Config():
                 data = {}
         with open(self.filename, 'w') as yml:
             yaml.dump(self.merge(data, self.createDictionary(self.config, self.keys, len(self.keys)-1)), yml)
-
-        
-        
+  
     @staticmethod
     def _getInput(name : str, default : str) ->  str:
         try:
@@ -179,6 +177,8 @@ def config(key : Optional[str] = None):
                     os.environ['DEEP_LEARNING_API_CONFIG_FILE'] = filename
                 key_tmp =  kwargs["DL_args"]+("."+key if key is not None else "") if "DL_args" in kwargs else key
                 without =  kwargs["DL_without"] if "DL_without" in kwargs else []
+                os.environ['DEEP_LEARNING_API_CONFIG_PATH'] = key_tmp
+                    
                 with Config(filename, key_tmp) as config:
                     os.environ['DEEP_LEARNING_API_CONFIG_VARIABLE'] = "False"
                     kwargs = {} 
@@ -214,6 +214,7 @@ def config(key : Optional[str] = None):
                                 else:
                                     kwargs[param.name] = annotation(config = filename, DL_args = key_tmp)
                                     if os.environ['DEEP_LEARNING_API_CONFIG_VARIABLE'] == "True":
+                                        os.environ['DEEP_LEARNING_API_CONFIG_VARIABLE'] = "False"
                                         kwargs[param.name] = None
                             else:
                                 kwargs[param.name] = config.getValue(param.name, param.default)

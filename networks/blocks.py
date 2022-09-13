@@ -1,7 +1,7 @@
 import ast
 from enum import Enum
 import importlib
-from typing import List, Optional
+from typing import Callable, List, Optional
 import torch
 from DeepLearning_API.config import config
 from DeepLearning_API.networks import network
@@ -59,11 +59,13 @@ class BlockConfig():
 
 class ConvBlock(network.ModuleArgsDict):
     
-    def __init__(self, in_channels : int, out_channels : int, blockConfig : BlockConfig, dim : int, alias : List[List[str]]=[[], [], []]) -> None:
+    def __init__(self, in_channels : int, out_channels : int, nb_conv: int, blockConfig : BlockConfig, dim : int, alias : List[List[str]]=[[], [], []]) -> None:
         super().__init__()
-        self.add_module("Conv", blockConfig.getConv(in_channels, out_channels, dim), alias=alias[0])
-        self.add_module("Norm", blockConfig.getNorm(out_channels, dim), alias=alias[1])
-        self.add_module("Activation", blockConfig.getActivation(), alias=alias[2])
+        for i in range(nb_conv):
+            self.add_module("Conv_{}".format(i), blockConfig.getConv(in_channels, out_channels, dim), alias=alias[0])
+            self.add_module("Norm_{}".format(i), blockConfig.getNorm(out_channels, dim), alias=alias[1])
+            self.add_module("Activation_{}".format(i), blockConfig.getActivation(), alias=alias[2])
+            in_channels = out_channels
 
 class Attention(network.ModuleArgsDict):
 
@@ -92,26 +94,30 @@ def upSample(in_channels: int, out_channels: int, upSampleMode: UpSampleMode, di
     else:
         return torch.nn.Upsample(scale_factor=2, mode=upSampleMode.name.replace("UPSAMPLE_", "").lower(), align_corners=False)
 
-class Unsqueeze(torch.nn.Module):
+
+class ApplyFunction(torch.nn.Module):
+
+    def __init__(self, function: Callable[[torch.Tensor], torch.Tensor]) -> None:
+        super().__init__()
+        self.function = function
+
+    def forward(self, *input : torch.Tensor) -> torch.Tensor:
+        return self.function(*input)
+
+class Unsqueeze(ApplyFunction):
 
     def __init__(self, dim: int = 0):
-        super().__init__()
+        super().__init__(lambda input : torch.unsqueeze(input, dim))
         self.dim = dim
-    
-    def forward(self, x):
-        return torch.unsqueeze(x, self.dim)
     
     def extra_repr(self):
         return "dim={}".format(self.dim)
 
-class Permute(torch.nn.Module):
+class Permute(ApplyFunction):
 
     def __init__(self, dims : List[int]):
-        super().__init__()
+        super().__init__(lambda input : torch.permute(input, self.dims))
         self.dims = dims
-
-    def forward(self, x : torch.Tensor) -> torch.Tensor:
-        return torch.permute(x, self.dims)
 
     def extra_repr(self):
         return "dims={}".format(self.dims)
@@ -127,30 +133,25 @@ class ToFeatures(Permute):
         super().__init__([0, *[i+2 for i in range(dim)], 1])        
 
 
-class Add(torch.nn.Module):
+class Add(ApplyFunction):
 
     def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, input : torch.Tensor, output : torch.Tensor) -> torch.Tensor:
-        return input+output
+        super().__init__(lambda *input : torch.sum(torch.stack(input), dim=0))
         
-
-class Multiply(torch.nn.Module):
-
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, input : torch.Tensor, output : torch.Tensor) -> torch.Tensor:
-        return input*output
-
-class Concat(torch.nn.Module):
+class Multiply(ApplyFunction):
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(lambda *input : torch.mul(*input))
 
-    def forward(self, input : torch.Tensor, output : torch.Tensor) -> torch.Tensor:
-        return torch.cat([input, output], dim=1)
+class Concat(ApplyFunction):
+
+    def __init__(self) -> None:
+        super().__init__(lambda *input : torch.cat(*input, dim=1))
+
+class Detach(ApplyFunction):
+
+    def __init__(self) -> None:
+        super().__init__(lambda input : input.detach())
 
 class LatentDistribution(network.ModuleArgsDict):
 

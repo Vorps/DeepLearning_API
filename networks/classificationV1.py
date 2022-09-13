@@ -4,7 +4,7 @@ from torchvision.ops import StochasticDepth
 
 from DeepLearning_API.networks import network, blocks
 from DeepLearning_API.config import config
-from DeepLearning_API.dataset import Patch
+from DeepLearning_API.HDF5 import ModelPatch
 
 class LayerScaler(torch.nn.Module):
     
@@ -83,9 +83,7 @@ class ConvNeXt(network.Network):
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
-                    patch : Patch = Patch(),
-                    padding : int = 0,
-                    paddingMode : str = "default:constant:reflect:replicate:circular",
+                    patch : ModelPatch = ModelPatch(),
                     dim : int = 3,
                     in_channels: int = 1,
                     stem_features: int = 64,
@@ -93,6 +91,6 @@ class ConvNeXt(network.Network):
                     widths: List[int] = [256, 512, 1024, 2048],
                     drop_p: float = 0.1,
                     num_classes: int = 10):
-        super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02, padding=padding, paddingMode=paddingMode)
+        super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02)
         self.add_module("ConvNextEncoder", ConvNextEncoder(in_channels=in_channels, stem_features=stem_features, depths=depths, widths=widths, drop_p=drop_p, dim=dim), alias=["stages"])
         self.add_module("Head", Head(in_features=widths[-1], num_classes=num_classes, dim=dim), alias=["head"])
