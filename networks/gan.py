@@ -59,7 +59,6 @@ class Discriminator(network.Network):
         self.add_module("Layers", Discriminator.DiscriminatorNLayers(channels, norm_layer, bias, dim))
         self.add_module("Head", Discriminator.DiscriminatorHead(channels=channels[-1], dim=dim))
 
-print(Discriminator())
 class Generator(network.Network):
 
     class GeneratorStem(network.ModuleArgsDict):
@@ -172,7 +171,7 @@ class Generator(network.Network):
         self.add_module("AutoEncoder", Generator.GeneratorAutoEncoder(ngf, norm_layer, bias, dim))
         
         self.add_module("Head", Generator.GeneratorHead(channels=ngf, dim=dim))
-        
+
 class Gan(network.Network):
 
     @config("Gan")
