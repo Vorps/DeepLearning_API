@@ -11,7 +11,19 @@ class NormMode(Enum):
     BATCH = 1
     INSTANCE = 2
     GROUP = 3
-    LAYER = 3
+    LAYER = 4
+
+def getNorm(normMode: Enum, channels : int, dim: int) -> torch.nn.Module:
+    if normMode == NormMode.BATCH:
+        return getTorchModule("BatchNorm", dim = dim)(channels, affine=True, track_running_stats=True)
+    if normMode == NormMode.INSTANCE:
+        return getTorchModule("InstanceNorm", dim = dim)(channels, affine=False, track_running_stats=False)
+        
+    if normMode == NormMode.GROUP:
+        return torch.nn.GroupNorm(num_groups=32, num_channels=channels)
+    if normMode == NormMode.LAYER:
+        return torch.nn.GroupNorm(num_groups=1, num_channels=channels)
+    return torch.nn.Identity()
 
 class UpSampleMode(Enum):
     CONV_TRANSPOSE = 0,

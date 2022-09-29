@@ -1,12 +1,19 @@
 import copy
-from typing import Dict
+from functools import partial
+from typing import Callable, Dict, List
 import torch
 from DeepLearning_API.config import config
 from DeepLearning_API.networks import network, blocks
 from DeepLearning_API.HDF5 import ModelPatch
-from networks.segmentation import UNet
 
 class Discriminator(network.Network):
+
+    class DiscriminatorStem(network.ModuleArgsDict):
+
+        def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
+            super().__init__()
+            self.add_module("Conv", blocks.getTorchModule("Conv", dim)(in_channels=in_channels, out_channels=out_channels, kernel_size=4, stride=2, padding=1))
+            self.add_module("LeakyReLU", torch.nn.LeakyReLU(0.2, True))
 
     class DiscriminatorHead(network.ModuleArgsDict):
 
@@ -15,39 +22,49 @@ class Discriminator(network.Network):
             self.add_module("Conv", blocks.getTorchModule("Conv", dim)(in_channels=channels, out_channels=1, kernel_size=4, stride=1, padding=1))
             self.add_module("AdaptiveAvgPool", blocks.getTorchModule("AdaptiveAvgPool", dim)(tuple([1]*dim)))
             self.add_module("Flatten", torch.nn.Flatten(1))
-            
+    
+    class DiscriminatorLayers(network.ModuleArgsDict):
+
+        def __init__(self, in_channels: int, out_channels: int, stride: int, norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
+            super().__init__()
+            self.add_module("Conv", blocks.getTorchModule("Conv", dim)(in_channels=in_channels, out_channels=out_channels, kernel_size=4, stride=stride, padding=1, bias=bias))
+            self.add_module("Norm", norm_layer(out_channels))
+            self.add_module("LeakyReLU", torch.nn.LeakyReLU(0.2, True))
+
+    class DiscriminatorNLayers(network.ModuleArgsDict):
+
+        def __init__(self, channels: List[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
+            super().__init__()
+            for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], [2]*(len(channels)-2)+[1])):
+                self.add_module("Layer_{}".format(i), Discriminator.DiscriminatorLayers(in_channels, out_channels, stride, norm_layer, bias, dim))
+
+
     @config("Discriminator")
     def __init__(self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3,
+                    nb_batch_per_step: int = 64,
+                    normMode: str = "INSTANCE",
                     in_channels : int = 1) -> None:
-        super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim)
+        super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim, nb_batch_per_step=nb_batch_per_step)
         
-        ndf = 64
+        ndf = 32
         n_layers=3
-        norm_layer = blocks.getTorchModule("BatchNorm", dim)
-        kernel_size = 4
-        padding = 1
-        bias = False
-        
-        self.add_module("Conv_0", blocks.getTorchModule("Conv", dim)(in_channels=in_channels, out_channels=ndf, kernel_size=kernel_size, stride=2, padding=padding))
-        self.add_module("LeakyReLU_0", torch.nn.LeakyReLU(0.2, True))
-        
+        norm_layer = partial(blocks.getNorm, blocks.NormMode._member_map_[normMode], dim=dim)
+        bias = True
         channels = [ndf*min(2 ** i, 8) for i in range(n_layers+1)]
-        for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], [2]*(len(channels)-2)+[1])):
-            self.add_module("Conv_{}".format(i+1), blocks.getTorchModule("Conv", dim)(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=bias))
-            self.add_module("Norm_{}".format(i+i), norm_layer(out_channels))
-            self.add_module("LeakyReLU_{}".format(i+i), torch.nn.LeakyReLU(0.2, True))
-        
+        self.add_module("Stem", Discriminator.DiscriminatorStem(in_channels, ndf, dim))
+        self.add_module("Layers", Discriminator.DiscriminatorNLayers(channels, norm_layer, bias, dim))
         self.add_module("Head", Discriminator.DiscriminatorHead(channels=channels[-1], dim=dim))
-        
+
+print(Discriminator())
 class Generator(network.Network):
 
     class GeneratorStem(network.ModuleArgsDict):
 
-        def __init__(self, in_channels: int, out_channels: int, norm_layer : torch.nn.Module, bias: bool, dim: int) -> None:
+        def __init__(self, in_channels: int, out_channels: int, norm_layer : Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
             super().__init__()
             self.add_module("Reflection", blocks.getTorchModule("ReflectionPad", dim)(3))
             self.add_module("Conv", blocks.getTorchModule("Conv", dim)(in_channels, out_channels, kernel_size=7, padding=0, bias=bias))
@@ -64,7 +81,7 @@ class Generator(network.Network):
 
     class GeneratorDownSample(network.ModuleArgsDict):
 
-        def __init__(self, in_channels: int, out_channels: int, norm_layer: torch.nn.Module, bias: bool, dim: int) -> None:
+        def __init__(self, in_channels: int, out_channels: int, norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
             super().__init__()
             self.add_module("Conv", blocks.getTorchModule("Conv", dim)(in_channels, out_channels, kernel_size=3, stride=2, padding=1, bias=bias))
             self.add_module("Norm", norm_layer(out_channels))
@@ -72,7 +89,7 @@ class Generator(network.Network):
 
     class GeneratorResnetBlock(network.ModuleArgsDict):
 
-        def __init__(self, channels : int, padding_type : str, norm_layer : torch.nn.Module, dropout : bool, bias : bool, dim : int):
+        def __init__(self, channels : int, padding_type : str, norm_layer : Callable[[int], torch.nn.Module], dropout : bool, bias : bool, dim : int):
             super().__init__()
             padding = 0 if padding_type != 'zero' else 1
             if padding == 0:
@@ -94,12 +111,45 @@ class Generator(network.Network):
 
     class GeneratorUpSample(network.ModuleArgsDict):
 
-        def __init__(self, in_channels: int, out_channels: int, norm_layer: torch.nn.Module, bias: bool, dim: int) -> None:
+        def __init__(self, in_channels: int, out_channels: int, norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
             super().__init__()
             self.add_module("ConvTranspose", blocks.getTorchModule("ConvTranspose", dim)(in_channels, out_channels, kernel_size=3, stride=2, padding=1, output_padding=1, bias=bias))
             self.add_module("Norm", norm_layer(out_channels))
             self.add_module("Relu", torch.nn.ReLU(True))
+    
+    class GeneratorEncoder(network.ModuleArgsDict):
+        def __init__(self, channels: List[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
+            super().__init__()
+            for i, (in_channels, out_channels) in enumerate(zip(channels, channels[1:])):
+                self.add_module("DownSample_{}".format(i), Generator.GeneratorDownSample(in_channels=in_channels, out_channels=out_channels, norm_layer=norm_layer, bias=bias, dim=dim))
+    
+    class GeneratorDecoder(network.ModuleArgsDict):
+        def __init__(self, channels: List[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
+            super().__init__()
+            for i, (in_channels, out_channels) in enumerate(zip(reversed(channels), reversed(channels[:-1]))):
+                self.add_module("UpSample_{}".format(i), Generator.GeneratorUpSample(in_channels=in_channels, out_channels=out_channels, norm_layer=norm_layer, bias=bias, dim=dim))
+    
+    class GeneratorNResnetBlock(network.ModuleArgsDict):
 
+        def __init__(self, channels: int, norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
+            super().__init__()
+            dropout = False
+            n_blocks=6
+            padding_type="Reflection"
+            for i in range(n_blocks):
+                self.add_module("ResnetBlock_{}".format(i), Generator.GeneratorResnetBlock(channels=channels, padding_type=padding_type, norm_layer=norm_layer, dropout=dropout, bias=bias, dim=dim))
+
+    class GeneratorAutoEncoder(network.ModuleArgsDict):
+
+        def __init__(self, ngf: int, norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
+            super().__init__()
+            channels = [ngf*2**i for i in range(3)]
+            
+            self.add_module("Encoder", Generator.GeneratorEncoder(channels, norm_layer, bias, dim))
+            self.add_module("NResnetBlock", Generator.GeneratorNResnetBlock(channels[-1], norm_layer, bias, dim))
+            self.add_module("Decoder", Generator.GeneratorDecoder(channels, norm_layer, bias, dim))
+            
+            
     @config("Generator")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
@@ -107,31 +157,22 @@ class Generator(network.Network):
                     patch : ModelPatch = ModelPatch(),
                     outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     in_channels : int = 1,
+                    nb_batch_per_step: int = 64,
+                    normMode: str = "INSTANCE",
                     dim : int = 3) -> None:
         #super().__init__(optimizer=optimizer, schedulers=schedulers, outputsCriterions=outputsCriterions, dim=dim, channels=[1,64,128], nb_conv_per_stage=2)
         #self.add_module("Tanh", torch.nn.Tanh())
-        super().__init__(optimizer=optimizer, in_channels=in_channels, schedulers=schedulers, patch=patch, outputsCriterions=outputsCriterions, dim=dim)
-        ngf=64
-        norm_layer = blocks.getTorchModule("BatchNorm", dim)
-        dropout = False
-        n_blocks=6
-        padding_type="Reflection"
-        bias = False
-        channels = [ngf*2**i for i in range(3)]
+        super().__init__(optimizer=optimizer, in_channels=in_channels, schedulers=schedulers, patch=patch, outputsCriterions=outputsCriterions, dim=dim, nb_batch_per_step=nb_batch_per_step)
+        ngf=32
+        norm_layer = partial(blocks.getNorm, blocks.NormMode._member_map_[normMode], dim=dim)
+        bias = True
         
         self.add_module("Stem", Generator.GeneratorStem(in_channels=in_channels, out_channels=ngf, norm_layer=norm_layer, bias=bias, dim=dim))
-
-        for i, (in_channels, out_channels) in enumerate(zip(channels, channels[1:])):
-            self.add_module("DownSample_{}".format(i), Generator.GeneratorDownSample(in_channels=in_channels, out_channels=out_channels, norm_layer=norm_layer, bias=bias, dim=dim))
-
-        for i in range(n_blocks):
-            self.add_module("ResnetBlock_{}".format(i), Generator.GeneratorResnetBlock(channels=channels[-1], padding_type=padding_type, norm_layer=norm_layer, dropout=dropout, bias=bias, dim=dim))
-
-        for i, (in_channels, out_channels) in enumerate(zip(reversed(channels), reversed(channels[:-1]))):
-            self.add_module("UpSample_{}".format(i), Generator.GeneratorUpSample(in_channels=in_channels, out_channels=out_channels, norm_layer=norm_layer, bias=bias, dim=dim))
-
+        
+        self.add_module("AutoEncoder", Generator.GeneratorAutoEncoder(ngf, norm_layer, bias, dim))
+        
         self.add_module("Head", Generator.GeneratorHead(channels=ngf, dim=dim))
-
+        
 class Gan(network.Network):
 
     @config("Gan")
@@ -144,7 +185,6 @@ class Gan(network.Network):
         self.add_module("Discriminator_pB_detach", discriminator, in_branch=["pB_detach"], out_branch=[-1])
           
         self.add_module("Discriminator_pB", discriminator, in_branch=["pB"], out_branch=[-1], requires_grad=False)
-        
 
 class CycleGan(network.Network):
 

@@ -1,6 +1,7 @@
 from abc import ABC
 import importlib
 from typing import List, Tuple, Union
+import numpy as np
 import torch
 
 import torch.nn.functional as F
@@ -10,6 +11,7 @@ from DeepLearning_API.config import config
 from DeepLearning_API.utils import NeedDevice, _getModule
 from DeepLearning_API.networks.blocks import LatentDistribution
 from DeepLearning_API.networks.network import ModelLoader, Network
+from torch.cuda.amp.autocast_mode import autocast
 
 class Criterion(NeedDevice, torch.nn.Module, ABC):
 
@@ -93,17 +95,29 @@ class WGP(Criterion):
     def forward(self, gradient_norm: torch.Tensor, _ : torch.Tensor) -> torch.Tensor:
         return torch.mean((gradient_norm - 1)**2)
 
+class Gram(Criterion):
+    
+    def __init__(self) -> None:
+        super().__init__()
+        
+    def forward(self, input : torch.Tensor, target : torch.Tensor) -> torch.Tensor:
+        return F.mse_loss(torch.mm(input, input.t()).div(np.prod(input.shape)), torch.mm(target, target.t()).div(np.prod(target.shape)))
+
 class MedPerceptualLoss(Criterion):
     
-    def __init__(self, modelLoader : ModelLoader = ModelLoader(), path_model : str = "name", module_names : List[str] = ["ConvNextEncoder.ConvNexStage_2.BottleNeckBlock_0.Linear_2", "ConvNextEncoder.ConvNexStage_3.BottleNeckBlock_0.Linear_2"], shape: List[int] = [128, 256, 256]) -> None:
+    def __init__(self, modelLoader : ModelLoader = ModelLoader(), path_model : str = "name", module_names : List[str] = ["ConvNextEncoder.ConvNexStage_2.BottleNeckBlock_0.Linear_2", "ConvNextEncoder.ConvNexStage_3.BottleNeckBlock_0.Linear_2"], shape: List[int] = [128, 256, 256], loss: str = "Gram") -> None:
         super().__init__()
-        self.model = modelLoader.getModel(train=False, DL_args=os.environ['DEEP_LEARNING_API_CONFIG_PATH'])
+        DEEP_LEARNING_API_CONFIG_PATH = ".".join(os.environ['DEEP_LEARNING_API_CONFIG_PATH'].split(".")[:-1])
+        self.model = modelLoader.getModel(train=False, DL_args=os.environ['DEEP_LEARNING_API_CONFIG_PATH'], DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain", "outputsCriterions", "drop_p"])
         state_dict = torch.load(path_model)
         self.model.load(state_dict)
-        self.module_names = set(module_names)
+        self.module_names = list(set(module_names))
         self.shape = shape
         self.mode = "trilinear" if  len(shape) == 3 else "bilinear"
-
+        
+        module, name = _getModule(loss, "measure")
+        self.loss = config(DEEP_LEARNING_API_CONFIG_PATH)(getattr(importlib.import_module(module), name))(config = None)
+    
     def setDevice(self, device: torch.device):
         super().setDevice(device)
         self.model.setDevice(self.device)
@@ -119,14 +133,16 @@ class MedPerceptualLoss(Criterion):
         if not good_size(target.shape):
             target = F.interpolate(target, mode=self.mode, size=tuple(self.shape), align_corners=False)
 
-        loss = torch.zeros((1), requires_grad = True).to(self.device, non_blocking=False)
-        module_names = self.module_names.copy()
-        for (name, input_layer), (_, target_layer) in zip(self.model.named_forward(input), self.model.named_forward(target)):
-            if name in self.module_names:
-                module_names.remove(name)
-                loss += F.l1_loss(input_layer, target_layer)
-                if not len(module_names):
-                    break
+        input = input.type(torch.float32)
+        target = target.type(torch.float32)
+
+        loss = torch.zeros((1), requires_grad = True).to(self.device, non_blocking=False).type(torch.float32)
+        
+        for (_, input_layer), (_, target_layer) in zip(self.model.get_layers([input], self.module_names.copy()), self.model.get_layers([target], self.module_names.copy())):
+            with autocast(False):
+                input_layer = input_layer.view(int(np.prod(input_layer.shape[:2])), int(np.prod(input_layer.shape[2:]))).type(torch.float32)
+                target_layer = target_layer.view(int(np.prod(target_layer.shape[:2])), int(np.prod(target_layer.shape[2:]))).type(torch.float32)
+                loss = loss+self.loss(input_layer, target_layer)
         return loss
 
 class KLDivergence(Criterion):

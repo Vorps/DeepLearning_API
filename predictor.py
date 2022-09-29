@@ -1,7 +1,6 @@
-from abc import ABC
+from abc import ABC, abstractmethod
 import builtins
 import importlib
-from itertools import accumulate
 import shutil
 from typing import Dict, List, Optional, Tuple
 import torch
@@ -11,52 +10,122 @@ import pynvml
 
 from DeepLearning_API import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import DatasetUtils, State, gpuInfo, getDevice, NeedDevice, logImageFormat
+from DeepLearning_API.utils import DatasetUtils, State, gpuInfo, getDevice, NeedDevice, logImageFormat, Attribute, get_patch_slices_from_nb_patch_per_dim
 from DeepLearning_API.dataset import DataPrediction, DataSet
-from DeepLearning_API.HDF5 import HDF5, ModelPatch, Patch
-from DeepLearning_API.networks.network import ModelLoader
+from DeepLearning_API.HDF5 import Accumulator
+from DeepLearning_API.networks.network import Measure, ModelLoader
 from DeepLearning_API.transform import Transform, TransformLoader
 
 from torch.utils.tensorboard.writer import SummaryWriter
 
+class OutDataset(DatasetUtils, NeedDevice, ABC):
 
-class OutDataset(DatasetUtils):
-
-    def __init__(self, filename: str = "Dataset.h5", group: str = "default", pre_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}) -> None:
+    def __init__(self, filename: str, group: str, pre_transforms : Dict[str, TransformLoader], post_transforms : Dict[str, TransformLoader], patchCombine:Optional[str]) -> None:
         super().__init__(filename, read=False)
         self.group = group
         self._pre_transforms = pre_transforms
         self._post_transforms = post_transforms
+        self.patchCombine = patchCombine
         self.pre_transforms : List[Transform] = []
         self.post_transforms : List[Transform] = []
+        self.output_layer_accumulator: Dict[int, Accumulator] = {}
+        self.attributes: Dict[int, Attribute] = {}
 
-    def load(self, name_layer: str, device: torch.device):
+    def load(self, name_layer: str):
         if self._pre_transforms is not None:
             for classpath, transform in self._pre_transforms.items():
                 transform = transform.getTransform(classpath, DL_args =  "{}.outsDataset.{}.OutDataset.pre_transforms".format(os.environ["DEEP_LEARNING_API_ROOT"], name_layer))
-                transform.setDevice(device)
                 self.pre_transforms.append(transform)
 
         if self._post_transforms is not None:
             for classpath, transform in self._post_transforms.items():
                 transform = transform.getTransform(classpath, DL_args =  "{}.outsDataset.{}.OutDataset.post_transforms".format(os.environ["DEEP_LEARNING_API_ROOT"], name_layer))
-                transform.setDevice(device)
                 self.post_transforms.append(transform)
-        
+
+    def setDevice(self, device: torch.device):
+        super().setDevice(device)
+        if self.pre_transforms is not None:
+            for transform in self.pre_transforms:
+                transform.setDevice(device)
+                
+        if self.post_transforms is not None:
+            for transform in self.post_transforms:
+                transform.setDevice(device)
+
+    @abstractmethod
+    def addLayer(self, index: int, index_patch: int, layer: torch.Tensor, dataset: DataSet):
+        pass
+
+    def isDone(self, index: int) -> bool:
+        return self.output_layer_accumulator[index].isFull()
+
+    @abstractmethod
+    def getOutput(self, index: int, dataset: DataSet) -> torch.Tensor:
+        pass
+
+    def write(self, index: int, name: str, layer: torch.Tensor, measure: Dict[str, float]):
+        self.attributes[index].update({k : v for k, v in measure.items()})
+        self.writeData(self.group, name, layer.numpy(), self.attributes[index])
+        self.attributes.pop(index)
 
 class OutSameAsGroupDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", sameAsGroup: str = "default" , patchCombine:Optional[str] = None, pre_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}) -> None:
-        super().__init__(dataset_filename, group, pre_transforms, post_transforms)
+    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine:Optional[str] = None) -> None:
+        super().__init__(dataset_filename, group, pre_transforms, post_transforms, patchCombine)
         self.sameAsGroup = sameAsGroup
+        self.patchCombine = patchCombine
+
+    def addLayer(self, index: int, index_patch: int, layer: torch.Tensor, dataset: DataSet):
+        if index not in self.output_layer_accumulator:
+            input_dataset = dataset.getDatasetsFromIndex(self.sameAsGroup, [index])[0]
+            self.output_layer_accumulator[index] = Accumulator(input_dataset.patch.patch_slices, self.patchCombine)
+            self.attributes[index] = Attribute({k : v for k, v in input_dataset.cache_attribute.items()})
+
+        for transform in self.pre_transforms:
+            layer = transform(layer, self.attributes[index])
+
+        for transform in reversed(dataset.groups[self.sameAsGroup].post_transforms):
+            layer = transform.inverse(layer, self.attributes[index])
+
+        self.output_layer_accumulator[index].addLayer(index_patch, layer)
+    
+    def getOutput(self, index: int, dataset: DataSet) -> torch.Tensor:
+        layer = self.output_layer_accumulator[index].assemble(device=self.device)
+        for transform in reversed(dataset.groups[self.sameAsGroup].pre_transforms):
+            layer = transform.inverse(layer, self.attributes[index])
+        for transform in self.post_transforms:
+            layer = transform(layer, self.attributes[index])
+
+        self.output_layer_accumulator.pop(index)
+        return layer
 
 class OutLayerDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", patch: ModelPatch = ModelPatch(), pre_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}) -> None:
-        super().__init__(dataset_filename, group, pre_transforms, post_transforms)
-        self.patch = patch
+    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", overlap : Optional[List[int]] = None, pre_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine:Optional[str] = None) -> None:
+        super().__init__(dataset_filename, group, pre_transforms, post_transforms, patchCombine)
+        self.overlap = overlap
+        
+    def addLayer(self, index: int, index_patch: int, layer: torch.Tensor, dataset: DataSet):
+        if index not in self.output_layer_accumulator:
+            group = list(dataset.groups.keys())[0]
+            patch_slices = get_patch_slices_from_nb_patch_per_dim(list(layer.shape[1:]), dataset.getDatasetsFromIndex(group, [index])[0].patch.nb_patch_per_dim, self.overlap)
+            self.output_layer_accumulator[index] = Accumulator(patch_slices, self.patchCombine)
+            self.attributes[index] = Attribute()
+
+        for transform in self.pre_transforms:
+            layer = transform(layer, self.attributes[index])
+        self.output_layer_accumulator[index].addLayer(index_patch, layer)
+
+    def getOutput(self, index: int, dataset: DataSet) -> torch.Tensor:
+        layer = self.output_layer_accumulator[index].assemble(device=self.device)
+        
+        for transform in self.post_transforms:
+            layer = transform(layer,  self.attributes[index])
+
+        self.output_layer_accumulator.pop(index)
+        return layer
 
 class OutDatasetLoader():
 
@@ -76,7 +145,8 @@ class Predictor(NeedDevice):
                     train_name: str = "name",
                     groupsInput: List[str] = ["default"],
                     device: Optional[int] = None,
-                    outsDataset: Dict[str, OutDatasetLoader] = {"default:Default" : OutDatasetLoader()}) -> None:
+                    outsDataset: Dict[str, OutDatasetLoader] = {"default:Default" : OutDatasetLoader()},
+                    images_log: List[str] = []) -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)
 
@@ -92,17 +162,21 @@ class Predictor(NeedDevice):
         self.tb = None
         self.outsDatasetLoader = outsDataset
         self.outsDataset: Dict[str, OutDataset]
-
-        self.setDevice(getDevice(device))
         self.outsDataset = {name.replace(":", ".") : value.getOutDataset(name) for name, value in self.outsDatasetLoader.items()}
+        self.predict_path = PREDICTIONS_DIRECTORY()+self.train_name+"/"+self.dataset.dataset_filename.split("/")[-1].replace(".h5", "")+"/"
+        self.images_log = images_log
         for name, outDataset in self.outsDataset.items():
-            outDataset.load(name.replace(".", ":"), self.device)
+            outDataset.filename = self.predict_path+outDataset.filename
+            outDataset.load(name.replace(".", ":"))
+        self.setDevice(getDevice(device))
         
     def setDevice(self, device: torch.device):
         super().setDevice(device)
         self.dataset.setDevice(device)
         self.model.setDevice(device)
-        
+        for outDataset in self.outsDataset.values():
+            outDataset.setDevice(device)
+
     def __enter__(self):
         pynvml.nvmlInit()
         self.dataset.__enter__()
@@ -111,140 +185,97 @@ class Predictor(NeedDevice):
     
     def __exit__(self, type, value, traceback):
         self.dataset.__exit__(type, value, traceback)
+        for outDataset in self.outsDataset.values():
+            outDataset.__exit__(type, value, traceback)
         if self.tb is not None:
             self.tb.close()
         pynvml.nvmlShutdown()
-    
-    """def _combine_patch(self, group, out_patch_accu, n_channel, x):
-        out_dataset = DataSet.getDatasetsFromIndex(self.dataloader_prediction.dataset.data[self.groupsInput[0].replace("_0", "")], self.dataloader_prediction.dataset.mapping[x])[0]
-        out_data = torch.zeros([n_channel]+list(out_dataset.getShape()))
-
-        for index, patch_data in enumerate(out_patch_accu):
-            if group in self.groups:
-                if self.groups[group].patch_transform is not None:
-                    for patch_transformFunction in self.groups[group].patch_transform:
-                        patch_data = patch_transformFunction.loadDataset(out_dataset)(patch_data)
-            src_slices = tuple([slice(n_channel)]+[slice(slice_tmp.stop-slice_tmp.start) for slice_tmp in out_dataset.patch_slices[index]])
-            dest_slices = tuple([slice(n_channel)]+list(out_dataset.patch_slices[index]))
-            out_data[dest_slices] += patch_data[src_slices]
-        return out_data"""
 
     def getInput(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]) -> Dict[Tuple[str, bool], torch.Tensor]:
         return {(k, k in self.groupsInput) : v[0].to(self.device) for k, v in data_dict.items()}
 
     @torch.no_grad()
     def predict(self) -> None:
-        predict_path = PREDICTIONS_DIRECTORY()+self.train_name+"/"+self.dataset.dataset_filename.split("/")[-1].replace(".h5", "")+"/"
-        if os.path.exists(predict_path):
+        if os.path.exists(self.predict_path):
             if os.environ["DL_API_OVERWRITE"] != "True":
                 accept = builtins.input("The prediction {} {} already exists ! Do you want to overwrite it (yes,no) : ".format(self.train_name, self.dataset.dataset_filename.split("/")[-1]))
                 if accept != "yes":
                     return
            
-            if os.path.exists(predict_path):
-                shutil.rmtree(predict_path)
+            if os.path.exists(self.predict_path):
+                shutil.rmtree(self.predict_path)
 
-        if not os.path.exists(predict_path):
-            os.makedirs(predict_path)
-        shutil.copyfile(CONFIG_FILE(), predict_path+"Prediction.yml")
+        if not os.path.exists(self.predict_path):
+            os.makedirs(self.predict_path)
+        shutil.copyfile(CONFIG_FILE(), self.predict_path+"Prediction.yml")
         
         path = MODELS_DIRECTORY()+self.train_name+"/StateDict/"
         if os.path.exists(path) and os.listdir(path):
             name = sorted(os.listdir(path))[-1]
-            state_dict : Dict[str, torch.Tensor] = torch.load(path+name)
+            state_dict = torch.load(path+name)
         else:
             raise Exception("Model : {} does not exist !".format(self.train_name))
 
+        for outDataset in self.outsDataset.values():    
+            outDataset.__enter__()
+
         self.model.init(autocast=False, state = State.PREDICTION)
-        print(state_dict.keys())
-        exit(0)
         self.model.load(state_dict)
         self.model.to(self.device)
         self.dataset.load()
         self.model.eval()
 
-        self.tb = SummaryWriter(log_dir = predict_path+"/Metric/")
+        if len(list(self.outsDataset.keys())) or len([network for network in self.model.getNetworks().values() if network.measure is not None]):
+            self.tb = SummaryWriter(log_dir = self.predict_path+"/Metric/")
         
         description = lambda : "Prediction : Metric ("+" ".join(["{} : ".format(name)+" ".join(["{} : {:.4f}".format(nameMetric, value) for nameMetric, value in network.measure.getLastMetrics().items()]) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+gpuInfo(self.device)
-        dataset: DataSet = self.dataloader_prediction.dataset 
 
+        measures : List[Measure] = [network.measure for name, network in self.model.getNetworks().items() if network.measure is not None]
+        
+        dataset: DataSet = self.dataloader_prediction.dataset
+        it_image = 0
         with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), desc = description(), total=len(self.dataloader_prediction)) as batch_iter:
             for _, data_dict in batch_iter:
                 input = self.getInput(data_dict)
-                for name, output in self.model(input, list(self.outsDataset.keys())):
+                for name, output in self.model.forward(input, list(self.outsDataset.keys())):
+                    self._predict_log(data_dict)
                     outDataset = self.outsDataset[name]
-                    if isinstance(outDataset, OutSameAsGroupDataset):
-                        group = outDataset.sameAsGroup
-                        if outDataset.sameAsGroup in data_dict:
-                            for value in data_dict[group][1]:
-                                input_dataset = dataset.getDatasetsFromIndex(group, [int(value)])[0]
-                                input_dataset.patch.addLayer(output)
-                                if input_dataset.patch.isFull():
-                                    outDataset.writeData(group, input_dataset.name, input_dataset.patch.assemble(device=self.device).cpu().numpy(), dict(input_dataset._dataset.attrs))
-                    else:
-                        
-                        pass
-                exit(0)
-                #self._predict_log(data_dict)
-                
-                for data in data_dict:
-                    print()
-                    exit(0)
-                """for group in out:
-                    for batch in range(out[group].shape[0]):
-                        if group not in out_patch_accu:
-                            out_patch_accu[group] = []
-                        out_patch_accu[group].append(out[group][batch].cpu())
+                    for i, (index, patch_index) in enumerate([(int(index), int(patch_index)) for index, patch_index in zip(list(data_dict.values())[0][1], list(data_dict.values())[0][2])]):    
+                        outDataset.addLayer(index, patch_index, output[i].cpu(), dataset)
+                        if outDataset.isDone(index):
+                            name_data = dataset.getDatasetsFromIndex(list(data_dict.keys())[0], [index])[0].name
+                            layer_output = outDataset.getOutput(index, dataset)
+                            measure_result = {}
+                            for measure in [measure for measure in measures if name in measure.outputsCriterions.keys()]:
+                                measure.resetLoss()
+                                target_data_dict = {target_group : dataset.getDatasetsFromIndex(target_group, [index])[0].data[0] for target_group in measure.outputsCriterions[name]}
+                                measure.update(name, layer_output, target_data_dict, 0)
+                                measure_result.update(measure.getLastMetrics())
+                                self.tb.add_scalars("{}_Prediction/Loss".format(name), measure.format(isLoss=True), it_image)
+                                self.tb.add_scalars("{}_Prediction/Metric".format(name), measure.format(isLoss=False), it_image)
+                            
+                            outDataset.write(index, name_data, layer_output, measure_result)
+                            it_image+=1
 
-                        x, idx = self.dataloader_prediction.dataset.getMap(it)
-                        if idx == self.dataloader_prediction.dataset.nb_patch[x]-1:
-                            out_data[group] = self._combine_patch(group, out_patch_accu[group], out[group].shape[1], x)               
-                            del out_patch_accu[group]
-                    
-                    if len(out_data) == len(out):
-                        if self.metrics is not None:
-                            value, values = self._metric(out_data, self.dataloader_prediction.dataset.getData(x))
-                        
-                        for group in out_data:
-                            if group in self.groups:
-                                if self.groups[group].transform is not None:
-                                    for transformFunction in self.groups[group].transform:
-                                        out_dataset = DataSet.getDatasetsFromIndex(self.dataloader_prediction.dataset.data[self.groupsInput[0].replace("_0", "")], self.dataloader_prediction.dataset.mapping[x])
-                                        out_data[group] = transformFunction.loadDataset(out_dataset[0])(out_data[group])
-                        
-                        name_dataset = "_".join([dataset.name.split("/")[-1] for dataset in out_dataset])
-                        with DatasetUtils(PREDICTIONS_DIRECTORY()+self.train_name+"/"+self.dataset.dataset_filename.split("/")[-1], read=False) as datasetUtils:
-                            for group in out_data:
-                                out = out_data[group].numpy()
-                                datasetUtils.writeImage(group, name_dataset, out_dataset[0].to_image(out[0], out.dtype))
-                                if self.metrics is not None:
-                                    datasetUtils.h5.attrs["value"] = value
-                                    for name in values:
-                                        datasetUtils.h5.attrs[name] = values[name]
-                        out_data.clear()"""
-                
                 batch_iter.set_description(description())
                 self.it += 1
 
-    def _predict_log(self, data_dict : Dict[Tuple[str, bool], torch.Tensor]):
+    def _predict_log(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]):
         assert self.tb, "SummaryWriter is None"
-        models = {"" : self.model}
+        for name, network in self.model.getNetworks().items():
+            if network.measure is not None:
+                self.tb.add_scalars("{}/Loss".format(name), network.measure.format(isLoss=True), self.it)
+                self.tb.add_scalars("{}/Metric".format(name), network.measure.format(isLoss=False), self.it)
+        
+        if self.images_log:
+            addImageFunction = lambda name, output_layer: self.tb.add_image("Images/{}".format(name), logImageFormat(output_layer), self.it, dataformats='HW' if output_layer.shape[1] == 1 else 'CHW')
 
-        for label, model in models.items():
-            for name, network in model.getNetworks().items():
-                if network.measure is not None:
-                    self.tb.add_scalars("{}{}/Loss".format(name, label), network.measure.format(isLoss=True), self.it)
-                    self.tb.add_scalars("{}{}/Metric".format(name, label), network.measure.format(isLoss=False), self.it)
-
-            if self.images_log:
-                addImageFunction = lambda name, output_layer: self.tb.add_image("result/Train/{}{}".format(name, label), logImageFormat(output_layer), self.it, dataformats='HW' if output_layer.shape[1] == 1 else 'CHW')
-
-                images_log = []
-                
-                data_dict_format = {k[0] : v for k, v in data_dict.values()}
-                for name in self.images_log:
-                    if name in data_dict_format:
-                        addImageFunction(name, data_dict[name])
-                    else:
-                        images_log.append(name.replace(":", "."))
-                model.apply_layers_function(data_dict, images_log, addImageFunction)
+            images_log = []
+            
+            for name in self.images_log:
+                if name in data_dict:
+                    addImageFunction(name, data_dict[name][0])
+                else:
+                    images_log.append(name.replace(":", "."))
+            for name, layer in self.model.get_layers([v for k, v in self.getInput(data_dict).items() if k[1]], images_log):
+                    addImageFunction(name, layer)

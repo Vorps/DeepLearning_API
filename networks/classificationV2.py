@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from DeepLearning_API.networks import network, blocks
 from DeepLearning_API.config import config
 from DeepLearning_API.HDF5 import ModelPatch
+from utils import getDevice
 
 """
 "convnext_tiny_1k": "https://dl.fbaipublicfiles.com/convnext/convnext_tiny_1k_224_ema.pth", depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]
@@ -175,3 +176,28 @@ class ConvNeXt(network.Network):
         super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02)
         self.add_module("ConvNextEncoder", ConvNextEncoder(in_channels=in_channels, depths=depths, widths=widths, drop_p=drop_p, dim=dim))        
         self.add_module("Head", Head(in_features=widths[-1], num_classes=num_classes, dim=dim))
+
+device = getDevice(None)
+
+model = ConvNeXt()
+model.setDevice(device)
+model.to(device)
+model.eval()
+model.requires_grad_(False)
+
+input = torch.zeros((1,1,128,256,256)).to(device)
+
+layers_name = ["ConvNextEncoder.ConvNexStage_0.BottleNeckBlock_0.ToFeatures"]
+
+"""for name, layer in model.named_forward(input):
+    if name in layers_name:
+        print(name)
+        print(layer.shape)
+        layers_name.remove(name)
+    if not len(layers_name):
+        break"""
+
+for name, layer in model.get_layers([input], layers_name):
+    print(name)
+    print(layer.shape)
+    

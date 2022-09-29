@@ -1,5 +1,6 @@
 import torch
 from torch.cuda.amp.autocast_mode import autocast
+from torch.functional import Tensor
 import tqdm
 from typing import Dict, List, Optional, Tuple
 import numpy as np
@@ -11,7 +12,7 @@ from DeepLearning_API.config import config
 from DeepLearning_API.utils import gpuInfo, getDevice, State, NeedDevice, logImageFormat
 from DeepLearning_API.networks.network import Network, ModelLoader
 import datetime
-
+import dill
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
@@ -33,6 +34,7 @@ class Trainer(NeedDevice):
                     epochs: int = 100,
                     it_validation : Optional[int] = None,
                     autocast : bool = False,
+                    gradient_checkpoints: Optional[List[str]] = None,
                     ema_decay : float = 0,
                     images_log: Optional[List[str]] = None) -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
@@ -56,10 +58,9 @@ class Trainer(NeedDevice):
         self.ema_decay = ema_decay
         self.modelEMA : Optional[torch.optim.swa_utils.AveragedModel] = None
         self.images_log = images_log
-        
+        self.gradient_checkpoints = gradient_checkpoints
         self.setDevice(getDevice(device))
-        
-    
+
     def setDevice(self, device: torch.device):
         super().setDevice(device)
         self.dataset.setDevice(device)
@@ -94,7 +95,8 @@ class Trainer(NeedDevice):
         if state != State.TRAIN:
             state_dict = self._load()
 
-        self.model.init(self.autocast, state)
+        self.model.init(self.autocast, state, self.gradient_checkpoints)
+        self.model._compute_channels_trace(self.model, self.model.in_channels, self.gradient_checkpoints)
         self.model.load(state_dict, init = True, ema=False)
         self.model.to(self.device)
         if self.ema_decay > 0:
@@ -122,7 +124,7 @@ class Trainer(NeedDevice):
             for self.epoch in epoch:
                 self._train()
                 
-    def getInput(self, data_dict : Dict[str, torch.Tensor]) -> Dict[Tuple[str, bool], torch.Tensor]:
+    def getInput(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]) -> Dict[Tuple[str, bool], torch.Tensor]:
         return {(k, k in self.groupsInput) : v[0].to(self.device) for k, v in data_dict.items()}
 
     def _train(self) -> None:
@@ -186,15 +188,15 @@ class Trainer(NeedDevice):
             name = DATE()+".pt"
             if not os.path.exists(path):
                 os.makedirs(path)
-
+            
             save_dict = {
-                'epoch': self.epoch,
-                'it': self.it,
-                'loss' : loss,
-                self.model.getName(): self.model.state_dict()}
+                "epoch": self.epoch,
+                "it": self.it,
+                "loss": loss,
+                "Model": self.model.state_dict()}
 
             if self.modelEMA is not None:
-                save_dict.update({self.modelEMA.module.getName()+"_EMA" : self.modelEMA.state_dict()})
+                save_dict.update({"Model_EMA" : self.modelEMA.state_dict()})
 
             save_dict.update({'{}_optimizer_state_dict'.format(name): network.optimizer.state_dict() for name, network in self.model.getNetworks().items() if network.optimizer is not None})
             torch.save(save_dict, path+name)
@@ -204,22 +206,23 @@ class Trainer(NeedDevice):
         if os.path.exists(path) and os.listdir(path):
             name = sorted(os.listdir(path))[-1]
             checkpoint = torch.load(path+name)
-
             path = MODELS_DIRECTORY()+self.train_name+"/"
             name = DATE()+".pt"
             if not os.path.exists(path):
                 os.makedirs(path)
             
             self.model.load(checkpoint, init=False, ema=False)
+
             os.makedirs("{}Serialized/".format(path))
-            torch.save(self.model, "{}Serialized/{}".format(path, name))
+            torch.save(self.model, "{}Serialized/{}".format(path, name), pickle_module=dill)
             os.makedirs("{}StateDict/".format(path))
-            torch.save({name : self.model.state_dict()}, "{}StateDict/{}".format(path, name))
+            
+            torch.save({"Model" : self.model.state_dict()}, "{}StateDict/{}".format(path, name))
             
             if self.modelEMA is not None:
                 self.modelEMA.module.load(checkpoint, init=False, ema=True)
                 torch.save(self.modelEMA.module, "{}Serialized/{}".format(path, DATE()+"_EMA.pt"))
-                torch.save({name : self.modelEMA.module.state_dict()}, "{}StateDict/{}".format(path, DATE()+"_EMA.pt"))
+                torch.save({"Model_EMA" : self.modelEMA.module.state_dict()}, "{}StateDict/{}".format(path, DATE()+"_EMA.pt"))
 
             os.rename(self.config_namefile, self.config_namefile.replace(".yml", "")+"_"+str(self.it)+".yml")
 
@@ -242,7 +245,7 @@ class Trainer(NeedDevice):
             self.it = state_dict['it']
         return state_dict
         
-    def _train_log(self, data_dict : Dict[str, torch.Tensor]):
+    def _train_log(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]):
         assert self.tb, "SummaryWriter is None"
         models = {"" : self.model}
         if self.modelEMA is not None:
@@ -265,11 +268,12 @@ class Trainer(NeedDevice):
 
                 for name in self.images_log:
                     if name in data_dict:
-                        addImageFunction(name, data_dict[name])
+                        addImageFunction(name, data_dict[name][0])
                     else:
                         images_log.append(name.replace(":", "."))
                 model.eval()
-                for name, layer in model.get_layers(self.getInput(data_dict), images_log):
+                
+                for name, layer in model.get_layers([v for k, v in self.getInput(data_dict).items() if k[1]], images_log):
                     addImageFunction(name, layer)
                 model.train()
 
@@ -278,7 +282,7 @@ class Trainer(NeedDevice):
             if network.optimizer is not None:
                 self.tb.add_scalar("{}/Learning Rate".format(name), network.optimizer.param_groups[0]['lr'], self.it)
 
-    def _validation_log(self, data_dict : Dict[str, torch.Tensor]):
+    def _validation_log(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]):
         assert self.tb, "SummaryWriter is None"
         models = {"" : self.model}
         if self.modelEMA is not None:
@@ -291,14 +295,15 @@ class Trainer(NeedDevice):
                     self.tb.add_scalars("{}{}/Metric/Validation".format(name, label), network.measure.format(isLoss=False), self.it)
             
             
-            addImageFunction = lambda name, layer: self.tb.add_image("result/Validation/{}{}".format(name, label), logImageFormat(layer), self.it, dataformats='HW' if layer.shape[1] == 1 else 'CHW')
+            addImageFunction = lambda name, layer : self.tb.add_image("result/Validation/{}{}".format(name, label), logImageFormat(layer), self.it, dataformats='HW' if layer.shape[1] == 1 else 'CHW')
 
             if self.images_log:
                 images_log = []
                 for name in self.images_log:
                     if name in data_dict:
-                        addImageFunction(name, data_dict[name])
+                        addImageFunction(name, data_dict[name][0])
                     else:
                         images_log.append(name.replace(":", "."))
-                for name, layer in model.get_layers(self.getInput(data_dict), images_log):
+                        
+                for name, layer in model.get_layers([v for k, v in self.getInput(data_dict).items() if k[1]], images_log):
                     addImageFunction(name, layer)

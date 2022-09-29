@@ -113,6 +113,7 @@ class DataSet(data.Dataset):
             x, p, a = self.getMap(index)
             self.loadData(group, x)
             datasets = self.getDatasetsFromIndex(group, self.mapping[x])
+            
             for i, dataset in enumerate(datasets):
                 data["{}".format(group) if len(datasets) == 1 else "{}_{}".format(group, i)] = (dataset.getData(p, a, self.groups[group].post_transforms), x, p, a)
         return data
