@@ -27,33 +27,16 @@ class PathCombine(NeedDevice, ABC):
     def __call__(self, input: torch.Tensor) -> torch.Tensor:
         pass
 
-class Reconstruction(PathCombine):
-
-    def __init__(self) -> None:
-        super().__init__()
-
-class GausianImportance(PathCombine):
-
-    def __init__(self, patch_size = [128,128,128], sigma : float = 0.2) -> None:
-        super().__init__()
-        gaussianSource = sitk.GaussianImageSource()
-        gaussianSource.SetSize(tuple(patch_size))
-        gaussianSource.SetMean([x // 2 for x in patch_size])
-        gaussianSource.SetSigma([sigma * x for x in patch_size])
-        gaussianSource.SetScale(1)
-        gaussianSource.NormalizedOn()
-        self.data = torch.from_numpy(sitk.GetArrayFromImage(gaussianSource.Execute())).unsqueeze(0)
-
-    def __call__(self, input : torch.Tensor) -> torch.Tensor:
-        return self.data.repeat([input.shape[0]]+[1]*(len(input.shape)-1))*input
 
 class Accumulator():
 
-    def __init__(self, patch_slices: List[Tuple[slice]], patchCombine:Optional[str] = None) -> None:
+    def __init__(self, patch_slices: List[Tuple[slice]], patchCombine:Optional[str] = None, batch: bool = True) -> None:
         self._layer_accumulator: List[Optional[torch.Tensor]] = [None for i in range(len(patch_slices))]
         self.patch_slices = patch_slices
         self.shape = max([[v.stop for v in patch] for patch in patch_slices])
+
         self.patchCombine = patchCombine
+        self.batch = batch
 
     def addLayer(self, index: int, layer: torch.Tensor) -> None:
         self._layer_accumulator[index] = layer
@@ -61,16 +44,20 @@ class Accumulator():
     def isFull(self) -> bool:
         return len(self.patch_slices) == len([v for v in self._layer_accumulator if v is not None])
 
+
     def assemble(self, device: torch.device) -> torch.Tensor:
-        if len(self._layer_accumulator) == 1:
-            return self._layer_accumulator[0]
-        result = torch.empty((list(self._layer_accumulator[0].shape[:2])+list(self.shape)), dtype=self._layer_accumulator[0].dtype)
-        for patch_slice, data in zip(self.patch_slices, self._layer_accumulator):
-            slices = tuple([slice(result.shape[0])] + list(patch_slice))
-            for dim, s in enumerate(patch_slice):
-                if s.stop-s.start == 1:
-                    data = data.unsqueeze(dim=dim+1)
-            result[slices] = data
+        patch_size = [sl.stop-sl.start for sl in self.patch_slices[0]]
+        if all([self._layer_accumulator[0].shape[i-len(patch_size)] == size for i, size in enumerate(patch_size)]): 
+            N = 2 if self.batch else 1
+            result = torch.empty((list(self._layer_accumulator[0].shape[:N])+list(self.shape)), dtype=self._layer_accumulator[0].dtype).to(device)
+            for patch_slice, data in zip(self.patch_slices, self._layer_accumulator):
+                slices = tuple([slice(result.shape[i]) for i in range(N)] + list(patch_slice))
+                for dim, s in enumerate(patch_slice):
+                    if s.stop-s.start == 1:
+                        data = data.unsqueeze(dim=dim+1)
+                result[slices] = data
+        else:
+            result = torch.cat(tuple(self._layer_accumulator), dim=0)
         self._layer_accumulator.clear()
         return result
 
@@ -109,6 +96,10 @@ class Patch(ABC):
 
     def __len__(self) -> int:
         return len(self.patch_slices) if self.patch_slices is not None else 1
+    
+    def disassemble(self, *dataList: torch.Tensor) -> Iterator[List[torch.Tensor]]:
+        for i in range(len(self)):
+            yield [self.getData(data, i) for data in dataList]
 
 class DatasetPatch(Patch):
 
@@ -116,17 +107,12 @@ class DatasetPatch(Patch):
     def __init__(self, patch_size : List[int] = [128, 256, 256], overlap : Optional[List[int]] = None) -> None:
         super().__init__(patch_size, overlap)
 
-    
 class ModelPatch(Patch):
 
     @config("Patch")
     def __init__(self, patch_size : List[int] = [128, 256, 256], overlap : Optional[List[int]] = None, patchCombine:Optional[str] = None) -> None:
         super().__init__(patch_size, overlap)
         self.patchCombine = patchCombine
-
-    def disassemble(self, *dataList: torch.Tensor) -> Iterator[List[torch.Tensor]]:
-        for i in range(len(self)):
-            yield [self.getData(data, i) for data in dataList]
 
 class Dataset():
 
@@ -176,7 +162,6 @@ class Dataset():
                 if transformFunction.save is not None:
                     with DatasetUtils(transformFunction.save, read=False) as datasetUtils:
                         datasetUtils.writeData(self.group, self.name, data.numpy(), self.cache_attribute)
-
         self.data : List[torch.Tensor] = list()
         if not dataAugmentationsList:
             self.data.append(data)
@@ -186,7 +171,6 @@ class Dataset():
                 dataAugmentation.state_init(index, self._shape, self.cache_attribute)
                 for d in dataAugmentation(data.unsqueeze(dim=0).repeat(dataAugmentations.nb, *[1 for _ in range(len(data.shape))])):
                     self.data.append(d)
-
         self.loaded = True
              
     def unload(self) -> None:

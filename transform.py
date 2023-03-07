@@ -1,6 +1,6 @@
 import importlib
 from operator import le
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 import numpy as np
@@ -61,63 +61,79 @@ class Clip(Transform):
 class Normalize(Transform):
 
     @config("Normalize")
-    def __init__(self, lazy : bool = False, min_value : float = -1, max_value : float = 1) -> None:
+    def __init__(self, lazy : bool = False, channels: Optional[List[int]] = None, min_value : float = -1, max_value : float = 1) -> None:
         super().__init__()
         assert max_value > min_value
         self.lazy = lazy
         self.min_value = min_value
         self.max_value = max_value
+        self.channels = channels
 
     def __call__(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Min" not in cache_attribute:
-            cache_attribute["Min"] = torch.min(input)
+            if self.channels:
+                cache_attribute["Min"] = torch.min(input[self.channels])
+            else:
+                cache_attribute["Min"] = torch.min(input)
         if "Max" not in cache_attribute:
-            cache_attribute["Max"] = torch.max(input)
+            if self.channels:
+                cache_attribute["Max"] = torch.max(input[self.channels])
+            else:
+                cache_attribute["Max"] = torch.max(input)
 
-        if self.lazy:
-            result = input
-        else:
+        if not self.lazy:
             input_min = cache_attribute["Min"]
             input_max = cache_attribute["Max"]
 
             norm = input_max-input_min
             assert norm != 0
-            result = (self.max_value-self.min_value)*(input - input_min) / norm + self.min_value
-        return result
+            if self.channels:
+                for channel in self.channels:
+                    input[channel] = (self.max_value-self.min_value)*(input[channel] - input_min) / norm + self.min_value
+            else:
+                input = (self.max_value-self.min_value)*(input - input_min) / norm + self.min_value
+        return input
     
     def inverse(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        min_value = torch.min(input)
-        max_value = torch.max(input)
-        input_min = cache_attribute.pop("Min")
-        input_max = cache_attribute.pop("Max")
-        return (input - min_value)*(input_max-input_min)/(max_value-min_value)+input_min
+        if self.lazy:
+            return input
+        else:
+            min_value = torch.min(input)
+            max_value = torch.max(input)
+            input_min = cache_attribute.pop("Min")
+            input_max = cache_attribute.pop("Max")
+            return (input - min_value)*(input_max-input_min)/(max_value-min_value)+input_min
 
 class Standardize(Transform):
 
     @config("Standardize")
-    def __init__(self, lazy : bool = False) -> None:
+    def __init__(self, lazy : bool = False, mean: Optional[List[float]]= None, std: Optional[List[float]]= None) -> None:
         super().__init__()
         self.lazy = lazy
+        self.mean = mean
+        self.std = std
 
     def __call__(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Mean" not in cache_attribute:
-            cache_attribute["Mean"] = torch.mean(input.type(torch.float32))
+            cache_attribute["Mean"] = torch.mean(input.type(torch.float32), dim=[i + 1 for i in range(len(input.shape)-1)]) if self.mean is None else torch.tensor(self.mean)
         if "Std" not in cache_attribute:
-            cache_attribute["Std"] = torch.std(input.type(torch.float32))
+            cache_attribute["Std"] = torch.std(input.type(torch.float32), dim=[i + 1 for i in range(len(input.shape)-1)]) if self.std is None else torch.tensor(self.std)
 
         if self.lazy:
             return input
         else:
-            mean = cache_attribute["Mean"]
-            std = cache_attribute["Std"]
-            assert std > 0
+            mean = cache_attribute["Mean"].view(-1, *[1 for _ in range(len(input.shape)-1)])
+            std = cache_attribute["Std"].view(-1, *[1 for _ in range(len(input.shape)-1)])
             return (input - mean) / std
         
     def inverse(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        mean = cache_attribute.pop("Mean")
-        std = cache_attribute.pop("Std")
-        return input * std + mean
-
+        if self.lazy:
+            return input
+        else:
+            mean = cache_attribute.pop("Mean")
+            std = cache_attribute.pop("Std")
+            return input * std + mean
+        
 class TensorCast(Transform):
 
     @config("TensorCast")
@@ -148,8 +164,7 @@ class Padding(Transform):
             origin = origin.dot(matrix)
             origin[-self.dim+1] -= self.padding[0]*cache_attribute["Spacing"][-self.dim+1]
             cache_attribute["Origin"] = origin.dot(np.linalg.inv(matrix))
-
-        return F.pad(input, tuple([0, 0]*(len(input.shape)-self.dim-1)+self.padding+[0, 0]*(self.dim)), self.mode.split(":")[0], float(self.mode.split(":")[1]) if len(self.mode.split(":")) == 2 else 0)
+        return F.pad(input.unsqueeze(0), tuple([0, 0]*(len(input.shape)-self.dim-1)+self.padding+[0, 0]*(self.dim)), self.mode.split(":")[0], float(self.mode.split(":")[1]) if len(self.mode.split(":")) == 2 else 0).squeeze()
 
     def transformShape(self, shape: List[int]) -> List[int]:
         if self.dim > 0:
@@ -235,6 +250,9 @@ class ResampleResize(Resample):
         super().__init__(save)
         self.size = size
 
+    def transformShape(self, shape: List[int]) -> List[int]:
+        return self.size
+    
     def __call__(self, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Spacing" in cache_attribute:
             cache_attribute["Spacing"] = torch.flip(torch.tensor(list(input.shape[1:]))/torch.tensor(self.size)*torch.flip(cache_attribute["Spacing"], dims=[0]), dims=[0])
@@ -244,16 +262,63 @@ class ResampleResize(Resample):
 class Mask(Transform):
     
     @config("Mask")
-    def __init__(self, path : str = "default:./default.mha") -> None:
+    def __init__(self, path : str = "default:./default.mha", value_outside: int = 0) -> None:
         super().__init__()
         self.mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(path))).unsqueeze(0)
+        self.value_outside = value_outside
+        
+    def setDevice(self, device: torch.device):
+        self.mask = self.mask.to(device)
+        return super().setDevice(device)
         
     def __call__(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        input[torch.where(self.mask != 1)] = self.mask[torch.where(self.mask != 1)].type(input.dtype)
+        input[torch.where(self.mask != 1)] = self.value_outside
         return input
 
     def inverse(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return input
+    
+class Gradient(Transform):
+
+    @config("Gradient")
+    def __init__(self, per_dim: bool = False):
+        super().__init__()
+        self.per_dim = per_dim
+    
+    @staticmethod
+    def _image_gradient2D(image : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        dx = image[:, 1:, :] - image[:, :-1, :]
+        dy = image[:, :, 1:] - image[:, :, :-1]
+        return torch.nn.ConstantPad2d((0,0,0,1), 0)(dx), torch.nn.ConstantPad2d((0,1,0,0), 0)(dy)
+
+    @staticmethod
+    def _image_gradient3D(image : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        dx = image[:, 1:, :, :] - image[:, :-1, :, :]
+        dy = image[:, :, 1:, :] - image[:, :, :-1, :]
+        dz = image[:, :, :, 1:] - image[:, :, :, :-1]
+        return torch.nn.ConstantPad3d((0,0,0,0,0,1), 0)(dx), torch.nn.ConstantPad3d((0,0,0,1,0,0), 0)(dy), torch.nn.ConstantPad3d((0,1,0,0,0,0), 0)(dz)
+        
+    def __call__(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        result = torch.stack(Gradient._image_gradient3D(input) if len(input.shape) == 4 else Gradient._image_gradient2D(input), dim=1).squeeze(0)
+        if not self.per_dim:
+            result = torch.sigmoid(result*3)
+            result = result.norm(dim=0)
+            result = torch.unsqueeze(result, 0)
+            
+        return result
+
+    def inverse(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return input
+
+class ArgMax(Transform):
+
+    @config("ArgMax") 
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.dim = dim
+    
+    def __call__(self, input : torch.Tensor) -> torch.Tensor:
+        return torch.argmax(input, dim=self.dim).unsqueeze(self.dim)
 
 """class NConnexeLabel(Transform):
 
@@ -280,17 +345,6 @@ class Mask(Transform):
             tmp[np.where(tmp == true_label)] = i+1
             result = result + torch.from_numpy(tmp.astype(np.uint8)).type(torch.uint8)
         return result
-
-class ArgMax(Transform):
-
-    @config("ArgMax") 
-    def __init__(self, save=None) -> None:
-        super().__init__(save)
-    
-    def __call__(self, input : torch.Tensor) -> torch.Tensor:
-        return torch.argmax(input, dim=0).type(torch.uint8)
-
-
 
 class MorphologicalClosing(Transform):
 

@@ -36,7 +36,8 @@ class Trainer(NeedDevice):
                     autocast : bool = False,
                     gradient_checkpoints: Optional[List[str]] = None,
                     ema_decay : float = 0,
-                    images_log: Optional[List[str]] = None) -> None:
+                    images_log: Optional[List[str]] = None,
+                    save_checkpoint_mode: str= "BEST") -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)
         self.manual_seed = manual_seed
@@ -45,6 +46,7 @@ class Trainer(NeedDevice):
         
         torch.backends.cudnn.deterministic = self.manual_seed is not None
         torch.backends.cudnn.benchmark = self.manual_seed is None
+        
         self.train_name = train_name
         self.dataset = dataset
         self.groupsInput = groupsInput
@@ -59,6 +61,7 @@ class Trainer(NeedDevice):
         self.modelEMA : Optional[torch.optim.swa_utils.AveragedModel] = None
         self.images_log = images_log
         self.gradient_checkpoints = gradient_checkpoints
+        self.save_checkpoint_mode = save_checkpoint_mode
         self.setDevice(getDevice(device))
 
     def setDevice(self, device: torch.device):
@@ -95,7 +98,7 @@ class Trainer(NeedDevice):
         if state != State.TRAIN:
             state_dict = self._load()
 
-        self.model.init(self.autocast, state, self.gradient_checkpoints)
+        self.model.init(self.autocast, state)
         self.model._compute_channels_trace(self.model, self.model.in_channels, self.gradient_checkpoints)
         self.model.load(state_dict, init = True, ema=False)
         self.model.to(self.device)
@@ -125,16 +128,19 @@ class Trainer(NeedDevice):
                 self._train()
                 
     def getInput(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]) -> Dict[Tuple[str, bool], torch.Tensor]:
-        return {(k, k in self.groupsInput) : v[0].to(self.device) for k, v in data_dict.items()}
+        inputs = {(k, True) : data_dict[k][0].to(self.device) for k in self.groupsInput}
+        inputs.update({(k, False) : v[0].to(self.device) for k, v in data_dict.items() if k not in self.groupsInput})
+        return inputs
+
 
     def _train(self) -> None:
         assert self.it_validation, "it_validation is None"
         self.model.train()
+                
         description = lambda : "Training : Loss ("+" ".join(["{}({:.6f}) : {:.4f}".format(name, network.optimizer.param_groups[0]['lr'], network.measure.getLastValue()) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.device)
-
         with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = description(), total=len(self.dataloader_training), leave=False) as batch_iter:
             for _, data_dict in batch_iter:
-                with autocast(enabled=self.autocast):                
+                with autocast(enabled=self.autocast):            
                     input = self.getInput(data_dict)
                     self.model(input)
                     if self.modelEMA is not None:
@@ -181,10 +187,11 @@ class Trainer(NeedDevice):
             name = sorted(os.listdir(path))[-1]
             state_dict = torch.load(path+name)
             last_loss = state_dict["loss"]
-            if last_loss >= loss:
-                os.remove(path+name)
+            if self.save_checkpoint_mode == "BEST":
+                if last_loss >= loss:
+                    os.remove(path+name)
 
-        if last_loss is None or last_loss >= loss:
+        if self.save_checkpoint_mode != "BEST" or (last_loss is None or last_loss >= loss):
             name = DATE()+".pt"
             if not os.path.exists(path):
                 os.makedirs(path)
@@ -202,27 +209,24 @@ class Trainer(NeedDevice):
             torch.save(save_dict, path+name)
 
     def save(self) -> None:
-        path = CHECKPOINTS_DIRECTORY()+self.train_name+"/"
-        if os.path.exists(path) and os.listdir(path):
-            name = sorted(os.listdir(path))[-1]
-            checkpoint = torch.load(path+name)
-            path = MODELS_DIRECTORY()+self.train_name+"/"
-            name = DATE()+".pt"
-            if not os.path.exists(path):
-                os.makedirs(path)
-            
-            self.model.load(checkpoint, init=False, ema=False)
+        path_checkpoint = CHECKPOINTS_DIRECTORY()+self.train_name+"/"
+        path_model = MODELS_DIRECTORY()+self.train_name+"/"
+        if os.path.exists(path_checkpoint) and os.listdir(path_checkpoint):
+            for dir in [path_model, "{}Serialized/".format(path_model), "{}StateDict/".format(path_model)]:
+                if not os.path.exists(dir):
+                    os.makedirs(dir)
 
-            os.makedirs("{}Serialized/".format(path))
-            torch.save(self.model, "{}Serialized/{}".format(path, name), pickle_module=dill)
-            os.makedirs("{}StateDict/".format(path))
-            
-            torch.save({"Model" : self.model.state_dict()}, "{}StateDict/{}".format(path, name))
-            
-            if self.modelEMA is not None:
-                self.modelEMA.module.load(checkpoint, init=False, ema=True)
-                torch.save(self.modelEMA.module, "{}Serialized/{}".format(path, DATE()+"_EMA.pt"))
-                torch.save({"Model_EMA" : self.modelEMA.module.state_dict()}, "{}StateDict/{}".format(path, DATE()+"_EMA.pt"))
+            for name in sorted(os.listdir(path_checkpoint)):
+                checkpoint = torch.load(path_checkpoint+name)
+                self.model.load(checkpoint, init=False, ema=False)
+
+                torch.save(self.model, "{}Serialized/{}".format(path_model, name), pickle_module=dill)
+                torch.save({"Model" : self.model.state_dict()}, "{}StateDict/{}".format(path_model, name))
+                
+                if self.modelEMA is not None:
+                    self.modelEMA.module.load(checkpoint, init=False, ema=True)
+                    torch.save(self.modelEMA.module, "{}Serialized/{}".format(path_model, DATE()+"_EMA.pt"))
+                    torch.save({"Model_EMA" : self.modelEMA.module.state_dict()}, "{}StateDict/{}".format(path_model, DATE()+"_EMA.pt"))
 
             os.rename(self.config_namefile, self.config_namefile.replace(".yml", "")+"_"+str(self.it)+".yml")
 

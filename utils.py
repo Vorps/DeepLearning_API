@@ -1,5 +1,5 @@
 import itertools
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from typing_extensions import Self
 import pynvml
 import psutil
@@ -50,13 +50,13 @@ def dataset_to_data(dataset : h5py.Dataset) -> Tuple[np.ndarray, Attribute]:
     attrs.update(dataset.attrs)
     return data, attrs
 
-def dataset_to_image(dataset : h5py.Dataset) -> sitk.Image:
-    data, attributes = dataset_to_data(dataset)
+def data_to_image(data : np.ndarray, attributes: Attribute) -> sitk.Image:
     if data.shape[0] == 1:
         image = sitk.GetImageFromArray(data[0])
     else:
+        data = data.transpose(tuple([i+1 for i in range(len(data.shape)-1)]+[0]))
         image = sitk.GetImageFromArray(data, isVector=True)
-    
+
     if "Origin" in attributes:
         image.SetOrigin(attributes["Origin"])
     if "Spacing" in attributes:
@@ -65,13 +65,23 @@ def dataset_to_image(dataset : h5py.Dataset) -> sitk.Image:
         image.SetDirection(attributes["Direction"])
     return image
 
-def data_to_dataset(h5 : h5py.Group, name : str, data : np.ndarray, attributes : Attribute = Attribute()) -> None:
+def dataset_to_image(dataset : h5py.Dataset) -> sitk.Image:
+    data, attributes = dataset_to_data(dataset)
+    return data_to_image(data, attributes)
+
+
+
+def data_to_dataset(h5 : h5py.Group, name : str, data : np.ndarray, attributes : Optional[Attribute] = None) -> None:
     if name in h5:
         del h5[name]
+    if attributes is None:
+        attributes = Attribute()
     dataset = h5.create_dataset(name, data=data, dtype=data.dtype, chunks=None)
     dataset.attrs.update({k : v for k, v in attributes.items()})
 
-def image_to_dataset(h5 : h5py.Group, name : str, image : sitk.Image, attributes : Attribute = Attribute()) -> None:
+def image_to_dataset(h5 : h5py.Group, name : str, image : sitk.Image, attributes : Optional[Attribute] = None) -> None:
+    if attributes is None:
+        attributes = Attribute()
     attributes["Origin"] = image.GetOrigin()
     attributes["Spacing"] = image.GetSpacing()
     attributes["Direction"] = image.GetDirection()
@@ -108,7 +118,7 @@ class DatasetUtils():
         if self.h5 is not None:
             self.h5.close()
 
-    def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Attribute = Attribute()) -> None:
+    def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Optional[Attribute] = None) -> None:
         assert self.h5
         if group not in self.h5:
             self.h5.create_group(group)
@@ -116,7 +126,7 @@ class DatasetUtils():
         if isinstance(h5_group, h5py.Group):
             image_to_dataset(h5_group, name, image, attributes)
     
-    def writeData(self, group : str, name : str, data : np.ndarray, attributes : Attribute = Attribute()) -> None:
+    def writeData(self, group : str, name : str, data : np.ndarray, attributes : Optional[Attribute] = None) -> None:
         assert self.h5
         if group not in self.h5:
             self.h5.create_group(group)
@@ -124,25 +134,18 @@ class DatasetUtils():
         if isinstance(h5_group, h5py.Group):
             data_to_dataset(h5_group, name, data, attributes)
 
-    def readImages(self, path_dest : str) -> None:
+    def readImages(self, path_dest : str, function: Callable[[np.ndarray, Attribute, str], np.ndarray] = lambda x, y, z: x) -> None:
         assert self.h5
         def write(name, obj):
             if isinstance(obj, h5py.Dataset):
                 if len(name.split("/")) > 1 and not os.path.exists(path_dest+"/".join(name.split("/")[:-1])):
                     os.makedirs(path_dest+"/".join(name.split("/")[:-1]))
                 if not os.path.exists(path_dest+name):
+                    data, attrs = dataset_to_data(obj)
+                    data = function(data, attrs, name)
+                    im = data_to_image(data, attrs)
+                    sitk.WriteImage(im, path_dest+name, useCompression=True)
                     print("Write image : {}{}".format(path_dest, name))
-                    im = dataset_to_image(obj)
-                    data = sitk.GetArrayFromImage(im)
-                    shape = data.shape[0]
-
-                    #data = np.delete(data, slice(-shape//2+5, shape), 0)
-                    #data = np.delete(data, slice(0, shape//2-5), 0)
-                    a = sitk.GetImageFromArray(data)
-                    a.SetOrigin(im.GetOrigin())
-                    a.SetSpacing(im.GetSpacing())
-                    a.SetDirection(im.GetDirection())
-                    sitk.WriteImage(a, path_dest+name)
     
         if not os.path.exists(path_dest):
             os.makedirs(path_dest)
@@ -262,7 +265,7 @@ class NeedDevice(ABC):
 
     def __init__(self) -> None:
         super().__init__()
-        self.device : Optional[torch.device] = None
+        self.device : torch.device
     
     def setDevice(self, device : torch.device):
         self.device = device
@@ -371,3 +374,14 @@ def resampleITK(path, image_reference : sitk.Image, image : sitk.Image, transfor
             transforms.append(transform)
     result_transform = sitk.CompositeTransform(transforms)
     return sitk.Resample(image, image_reference, result_transform, sitk.sitkNearestNeighbor if mask else sitk.sitkBSpline, defaultPixelValue = 0 if mask else -1024)
+
+def formatMaskLabel(mask: sitk.Image, labels: List[Tuple[int, int]]) -> sitk.Image:
+    data = sitk.GetArrayFromImage(mask)
+    result_data = np.zeros_like(data, np.uint8)
+
+    for label_old, label_new in labels:
+        result_data[np.where(data == label_old)] = label_new
+
+    result = sitk.GetImageFromArray(result_data)
+    result.CopyInformation(mask)        
+    return result

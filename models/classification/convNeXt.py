@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from DeepLearning_API.networks import network, blocks
 from DeepLearning_API.config import config
 from DeepLearning_API.HDF5 import ModelPatch
-from utils import getDevice
 
 """
 "convnext_tiny_1k": "https://dl.fbaipublicfiles.com/convnext/convnext_tiny_1k_224_ema.pth", depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]

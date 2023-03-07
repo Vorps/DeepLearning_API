@@ -1,9 +1,7 @@
-from functools import partial, wraps
-from genericpath import isfile
+from functools import partial
 import importlib
 import inspect
 import os
-from posixpath import split
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 from typing_extensions import Self
 import torch
@@ -12,7 +10,7 @@ import numpy as np
 from torch._jit_internal import _copy_to_script_wrapper
 
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import NeedDevice, State, _getModule, getMemory, gpuInfo, gpuMemory
+from DeepLearning_API.utils import NeedDevice, State, _getModule
 from DeepLearning_API.HDF5 import Accumulator, ModelPatch
 from collections import OrderedDict
 from torch.utils.checkpoint import checkpoint
@@ -120,17 +118,20 @@ class Measure(NeedDevice):
                     if criterionsAttr.isLoss:
                         self._nb_loss+=1
 
-    def update(self, output_group, output : torch.Tensor, data_dict: Dict[str, torch.Tensor], it: int) -> None:
+    def update(self, output_group: str, output : torch.Tensor, data_dict: Dict[str, torch.Tensor], it: int) -> None:
         for target_group in self.outputsCriterions[output_group]:
-            target = data_dict[target_group].to(self.device, non_blocking=False) if target_group in data_dict else None
+            target = [data_dict[group].to(self.device, non_blocking=False) for group in target_group.split("/") if group in data_dict]
             for criterion, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
+                
                 if it >= criterionsAttr.stepStart and (criterionsAttr.stepStop is None or it <= criterionsAttr.stepStop):
-                    result = criterion(output, target)
+                    result = criterion(output, *target)
                     if criterionsAttr.isLoss:
                         self.loss = self.loss+criterionsAttr.l*result
                         self._it +=1
                     self.values["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)].append(criterionsAttr.l*result.item())
-                    
+                elif criterionsAttr.isLoss:
+                    self._it +=1
+
     def isDone(self) -> bool:
         return self._it == self._nb_loss
     
@@ -207,6 +208,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
         is_simple_branch = lambda x : len(x) > 1 or x[0] != 0 
         for key, module in self._modules.items():
             mod_str = repr(module)
+
             mod_str = self._addindent(mod_str, 2)
             desc = ""
             if is_simple_branch(self._modulesArgs[key].in_branch) or is_simple_branch(self._modulesArgs[key].out_branch):
@@ -305,8 +307,8 @@ class ModuleArgsDict(torch.nn.Module, ABC):
 
     def named_forward(self, *inputs: torch.Tensor) -> Iterator[Tuple[str, torch.Tensor]]:    
         branchs: Dict[str, torch.Tensor] = {}
-        for i, input in enumerate(inputs):
-            branchs[str(i)] = input
+        for i, sinput in enumerate(inputs):
+            branchs[str(i)] = sinput
         out = inputs[0]
         for name, module in self.items():
             requires_grad = self._modulesArgs[name].requires_grad
@@ -322,7 +324,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                 if isinstance(module, ModuleArgsDict):
                     for k, out in module.named_forward(*[branchs[i] for i in self._modulesArgs[name].in_branch]):
                         yield name+"."+k, out
-                elif isinstance(module, torch.nn.Module):  
+                elif isinstance(module, torch.nn.Module):
                     out = module(*[branchs[i] for i in self._modulesArgs[name].in_branch])
                     yield name, out
             for ob in self._modulesArgs[name].out_branch:
@@ -468,15 +470,18 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
         name = "Model" + ("_EMA" if ema else "")
         if name in state_dict:
             model_state_dict_tmp = {k.split(".")[-1] : v for k, v in state_dict[name].items()}[self.getName()]
+
             map = self.getMap()
             model_state_dict : OrderedDict[str, torch.Tensor] = OrderedDict()
             
             for alias in model_state_dict_tmp.keys():
                 prefix = ".".join(alias.split(".")[:-1])
                 alias_list = [(".".join(prefix.split(".")[:len(i.split("."))]), v) for i, v in map.items() if prefix.startswith(i)]
+
                 if len(alias_list):
                     for a, b in alias_list:
                         model_state_dict[alias.replace(a, b)] = model_state_dict_tmp[alias]
+                        break
                 else:
                     model_state_dict[alias] = model_state_dict_tmp[alias]
             self.load_state_dict(model_state_dict)
@@ -525,7 +530,7 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
         return in_channels, in_is_channel, out_channels, out_is_channel
 
     @_function_network
-    def init(self, autocast : bool, state : State, gradient_checkpoints: Optional[List[str]], key: str) -> None:
+    def init(self, autocast : bool, state : State, key: str) -> None:
         if state != State.PREDICTION:
             self.scaler = torch.cuda.amp.grad_scaler.GradScaler(enabled=autocast)
             if self.optimizerLoader:
@@ -558,6 +563,8 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
     def get_layers(self, inputs : List[torch.Tensor], layers_name: List[str]) -> Iterator[Tuple[str, torch.Tensor]]:
         layers_name = layers_name.copy()
         output_layer_accumulator : Dict[str, Accumulator] = {}
+        output_layer_index : Dict[str, int] = {}
+        
         for (nameTmp, output_layer) in self.named_forward(*inputs):
             name = nameTmp.replace("accu:", "")
             
@@ -579,14 +586,15 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
                                     break
                         if network and network.patch:
                             output_layer_accumulator[name] = Accumulator(network.patch.patch_slices, network.patch.patchCombine)
-                        i = 0
+                            output_layer_index[name] = 0
                     
-                    output_layer_accumulator[name].addLayer(i, output_layer.cpu())
+                    output_layer_accumulator[name].addLayer(output_layer_index[name], output_layer)
                     del output_layer
-                    i+= 1
-                    if output_layer_accumulator[name].isFull():   
+                    output_layer_index[name] += 1
+                    if output_layer_accumulator[name].isFull():
                         output_layer = output_layer_accumulator[name].assemble(self.device)
                         output_layer_accumulator.pop(name)
+                        output_layer_index.pop(name)
                         layers_name.remove(name)
                         yield name, output_layer
                 else:
@@ -636,7 +644,6 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
                         self.scaler.update()
                         self.optimizer.zero_grad()
                 self._it += 1
-        
 
     @_function_network
     def update_lr(self):
@@ -650,7 +657,7 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
         if scheduler:
             if scheduler.__class__.__name__ == 'ReduceLROnPlateau':
                 if self.measure:
-                    scheduler.step(np.mean(self.measure.value))
+                    scheduler.step(self.measure.mean())
             else:
                 scheduler.step()     
 
@@ -670,7 +677,7 @@ class ModelLoader():
 
     @config("Model")
     def __init__(self, classpath : str = "default:segmentation.UNet") -> None:
-        self.module, self.name = _getModule(classpath.split(".")[-1] if len(classpath.split(".")) > 1 else classpath, "networks" + "."+".".join(classpath.split(".")[:-1]) if len(classpath.split(".")) > 1 else "")
+        self.module, self.name = _getModule(classpath.split(".")[-1] if len(classpath.split(".")) > 1 else classpath, "models" + "."+".".join(classpath.split(".")[:-1]) if len(classpath.split(".")) > 1 else "")
         
     def getModel(self, train : bool = True, DL_args: Optional[str] = None, DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain"]) -> Network:
         if not DL_args:

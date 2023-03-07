@@ -17,46 +17,65 @@ from DeepLearning_API.transform import TransformLoader, Transform
 from DeepLearning_API.augmentation import DataAugmentationsList
 
 
-class Group:
+class GroupTransform:
 
     @config()
-    def __init__(self,  pre_transforms : Dict[str, TransformLoader] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
-                        post_transforms : Dict[str, TransformLoader] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()}) -> None:
+    def __init__(self,  pre_transforms : Union[Dict[str, TransformLoader], List[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
+                        post_transforms : Union[Dict[str, TransformLoader], List[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()}) -> None:
         self._pre_transforms = pre_transforms
         self._post_transforms = post_transforms
         self.pre_transforms : List[Transform] = []
         self.post_transforms : List[Transform] = []
         
-    def load(self, name : str, device : torch.device):
+    def load(self, group_src : str, group_dest : str, device : torch.device):
         if self._pre_transforms is not None:
-            for classpath, transform in self._pre_transforms.items():
-                transform = transform.getTransform(classpath, DL_args =  "{}.Dataset.groups.{}.pre_transforms".format(os.environ["DEEP_LEARNING_API_ROOT"], name))
-                transform.setDevice(device)
-                self.pre_transforms.append(transform)
+            if isinstance(self._pre_transforms, Dict):
+                for classpath, transform in self._pre_transforms.items():
+                    transform = transform.getTransform(classpath, DL_args =  "{}.Dataset.groups_src.{}.groups_dest.{}.pre_transforms".format(os.environ["DEEP_LEARNING_API_ROOT"], group_src, group_dest))
+                    transform.setDevice(device)
+                    self.pre_transforms.append(transform)
+            else:
+                for transform in self._pre_transforms:
+                    transform.setDevice(device)
+                    self.pre_transforms.append(transform)
 
         if self._post_transforms is not None:
-            for classpath, transform in self._post_transforms.items():
-                transform = transform.getTransform(classpath, DL_args = "{}.Dataset.groups.{}.post_transforms".format(os.environ["DEEP_LEARNING_API_ROOT"], name))
-                transform.setDevice(device)
-                self.post_transforms.append(transform)
+            if isinstance(self._post_transforms, Dict):
+                for classpath, transform in self._post_transforms.items():
+                    transform = transform.getTransform(classpath, DL_args = "{}.Dataset.groups_src.{}.groups_dest.{}.post_transforms".format(os.environ["DEEP_LEARNING_API_ROOT"], group_src, group_dest))
+                    transform.setDevice(device)
+                    self.post_transforms.append(transform)
+            else:
+                for transform in self._post_transforms:
+                    transform.setDevice(device)
+                    self.post_transforms.append(transform)
+
+class Group(dict):
+
+    @config()
+    def __init__(self, groups_dest: Dict[str, GroupTransform] = {"default": GroupTransform()}):
+        super().__init__(groups_dest)
+
 
 class DataSet(data.Dataset):
 
-    def __init__(self, hdf5 : HDF5, index : List[int], groups : Dict[str, Group], dataAugmentationsList : List[DataAugmentationsList], patch : Optional[DatasetPatch], use_cache = True) -> None:
+    def __init__(self, hdf5 : HDF5, index : List[int], groups_src : Dict[str, Group], dataAugmentationsList : List[DataAugmentationsList], patch : Optional[DatasetPatch], use_cache = True) -> None:
         self.data : dict[str, List[Dataset]] = {}
         
         self.dataAugmentationsList = dataAugmentationsList
-        self.groups = groups
+        self.groups_src = groups_src
 
         nb_dataset_list = []
         nb_patch_list = []
         self.mapping: Dict[int, List[int]]= {}
-        for group in self.groups:
-            datasets, mapping, _, _= hdf5.getDatasets(group, index)
-            self.data[group] = [Dataset(group, dataset, patch = patch, pre_transforms = self.groups[group].pre_transforms) for dataset in datasets]
+        for group_src in self.groups_src:
+            datasets, mapping, _, _= hdf5.getDatasets(group_src, index)
             self.mapping = {i : l for i, l in enumerate(mapping)}
             nb_dataset_list.append(len(self.mapping))
-            nb_patch_list.append([len(dataset) for dataset in self.data[group]])
+            
+            for group_dest in self.groups_src[group_src]:
+                self.data[group_dest] = [Dataset(group_dest, dataset, patch = patch, pre_transforms = self.groups_src[group_src][group_dest].pre_transforms) for dataset in datasets]
+                nb_patch_list.append([len(dataset) for dataset in self.data[group_dest]])
         
         self.nb_dataset = nb_dataset_list[0]
         self.nb_patch = nb_patch_list[0]
@@ -73,8 +92,8 @@ class DataSet(data.Dataset):
                     self.map[i] = (x,y,z)
                     i += 1
 
-    def getDatasetsFromIndex(self, group: str, indexs: List[int]) -> List[Dataset]:
-        data = self.data[group]
+    def getDatasetsFromIndex(self, group_dest: str, indexs: List[int]) -> List[Dataset]:
+        data = self.data[group_dest]
         result : List[Dataset] = []
         for index in indexs:
             result.append(data[index])
@@ -88,15 +107,16 @@ class DataSet(data.Dataset):
             desc = description(memory_init, 0)
             with tqdm.tqdm(range(self.nb_dataset), desc=desc) as progressbar:
                 for index in progressbar:
-                    for group in self.groups:
-                        self.loadData(group, index)
+                    for group_src in self.groups_src:
+                        for group_dest in self.groups_src[group_src]:
+                            self.loadData(group_src, group_dest, index)
 
                     progressbar.set_description(description(memory_init, index))
 
-    def loadData(self, group : str, index : int) -> None:
-        datasets = self.getDatasetsFromIndex(group, self.mapping[index])
+    def loadData(self, group_src: str, group_dest : str, index : int) -> None:
+        datasets = self.getDatasetsFromIndex(group_dest, self.mapping[index])
         for dataset in datasets:
-            dataset.load(index, self.groups[group].pre_transforms, self.dataAugmentationsList)
+            dataset.load(index, self.groups_src[group_src][group_dest].pre_transforms, self.dataAugmentationsList)
 
     def unloadData(self, group : str, index : int) -> None:
         return self.data[group][index].unload()
@@ -109,20 +129,21 @@ class DataSet(data.Dataset):
 
     def __getitem__(self, index : int) -> Dict[str, Tuple[torch.Tensor, int, int, int]]:
         data = {}
-        for group in self.groups:
-            x, p, a = self.getMap(index)
-            self.loadData(group, x)
-            datasets = self.getDatasetsFromIndex(group, self.mapping[x])
-            
-            for i, dataset in enumerate(datasets):
-                data["{}".format(group) if len(datasets) == 1 else "{}_{}".format(group, i)] = (dataset.getData(p, a, self.groups[group].post_transforms), x, p, a)
+        for group_src in self.groups_src:
+            for group_dest in self.groups_src[group_src]:
+                x, p, a = self.getMap(index)
+                self.loadData(group_src, group_dest, x)
+                datasets = self.getDatasetsFromIndex(group_dest, self.mapping[x])
+                
+                for i, dataset in enumerate(datasets):
+                    data["{}".format(group_dest) if len(datasets) == 1 else "{}_{}".format(group_dest, i)] = (dataset.getData(p, a, self.groups_src[group_src][group_dest].post_transforms), x, p, a)
         return data
 
 class Data(NeedDevice, ABC):
     
     @config("Dataset")
     def __init__(self,  dataset_filename : str = "default", 
-                        groups : Dict[str, Group] = {"default" : Group()},
+                        groups_src : Dict[str, Group] = {"default" : Group()},
                         patch : Optional[DatasetPatch] = None,
                         use_cache : bool = True,
                         subset : Optional[List[int]] = None,
@@ -132,10 +153,10 @@ class Data(NeedDevice, ABC):
                         shuffle : bool = True) -> None:
         self.dataset_filename = dataset_filename
         self.subset = subset
-        self.groups = groups
+        self.groups_src = groups_src
         self.dataAugmentationsList: Dict[str, DataAugmentationsList] = {}
 
-        self.dataSet_args = dict(groups=self.groups, dataAugmentationsList = list(self.dataAugmentationsList.values()), patch=patch, use_cache = use_cache)
+        self.dataSet_args = dict(groups_src=self.groups_src, dataAugmentationsList = list(self.dataAugmentationsList.values()), patch=patch, use_cache = use_cache)
         self.dataLoader_args = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory, shuffle=shuffle)
 
     def __enter__(self):
@@ -150,7 +171,7 @@ class Data(NeedDevice, ABC):
     
     def __len__(self) -> int:
         sizes = []
-        for group in self.groups:
+        for group in self.groups_src:
             sizes.append(self.hdf5.getSize(group))
         assert len(np.unique(sizes)) == 1
         return sizes[0]
@@ -158,8 +179,10 @@ class Data(NeedDevice, ABC):
     @abstractmethod
     def getData(self) -> Union[Tuple[DataLoader, Optional[DataLoader]], DataLoader]:
         assert self.device, "No device set"
-        for key, group in self.groups.items():
-            group.load(key, self.device)
+        for group_src in self.groups_src:
+            for group_dest in self.groups_src[group_src]:
+                self.groups_src[group_src][group_dest].load(group_src, group_dest, self.device)
+
         for key, dataAugmentations in self.dataAugmentationsList.items():
             dataAugmentations.load(key, self.device)
 
@@ -171,8 +194,8 @@ class DataTrain(Data):
 
     @config("Dataset")
     def __init__(self,  dataset_filename : str = "default", 
-                        groups : Dict[str, Group] = {"default" : Group()},
-                        augmentations : Dict[str, DataAugmentationsList] = {"DataAugmentation_0" : DataAugmentationsList()},
+                        groups_src : Dict[str, Group] = {"default" : Group()},
+                        augmentations : Optional[Dict[str, DataAugmentationsList]] = {"DataAugmentation_0" : DataAugmentationsList()},
                         patch : Optional[DatasetPatch] = DatasetPatch(),
                         use_cache : bool = True,
                         subset : Optional[List[int]] = None,
@@ -181,7 +204,7 @@ class DataTrain(Data):
                         batch_size : int = 1,
                         shuffle : bool = True,
                         train_size : float = 0.8) -> None:
-        super().__init__(dataset_filename, groups, patch, use_cache, subset, num_workers, pin_memory, batch_size, shuffle)
+        super().__init__(dataset_filename, groups_src, patch, use_cache, subset, num_workers, pin_memory, batch_size, shuffle)
         self.dataAugmentationsList = augmentations if augmentations else {}
         self.train_test_split_args = dict(train_size=train_size, shuffle=shuffle)
 
@@ -203,7 +226,7 @@ class DataTrain(Data):
             return DataLoader(dataset=self.dataset_train, **self.dataLoader_args), DataLoader(dataset=self.dataset_validation, **self.dataLoader_args)
         else:
             if self.train_test_split_args["shuffle"]:
-                self.dataset_train = DataSet(self.hdf5, index = random.choices(list(range(0, len(self))), k=self.subset[1]-self.subset[0]), **self.dataSet_args) # type: ignore
+                self.dataset_train = DataSet(self.hdf5, index = random.sample(list(range(self.subset[0], self.subset[1])), self.subset[1]-self.subset[0]), **self.dataSet_args) # type: ignore
             else:
                 self.dataset_train = DataSet(self.hdf5, index = list(range(self.subset[0], self.subset[1])), **self.dataSet_args) # type: ignore
             self.dataset_validation = None
@@ -219,7 +242,7 @@ class DataPrediction(Data):
 
     @config("Dataset")
     def __init__(self,  dataset_filename : str = "Dataset.h5", 
-                        groups : Dict[str, Group] = {"default" : Group()},
+                        groups_src : Dict[str, Group] = {"default" : Group()},
                         patch : Optional[DatasetPatch] = DatasetPatch(),
                         use_cache : bool = True,
                         subset : Optional[List[int]] = None,
@@ -227,7 +250,7 @@ class DataPrediction(Data):
                         pin_memory : bool = True,
                         batch_size : int = 1) -> None:
 
-        super().__init__(dataset_filename, groups, patch, use_cache, subset, num_workers, pin_memory, batch_size, False)
+        super().__init__(dataset_filename, groups_src, patch, use_cache, subset, num_workers, pin_memory, batch_size, False)
         
     def getData(self) -> Union[Tuple[DataLoader, Optional[DataLoader]], DataLoader]:
         super().getData()

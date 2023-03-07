@@ -1,10 +1,12 @@
 import ast
 from enum import Enum
 import importlib
-from typing import Callable, List, Optional
+from typing import Callable, Iterator, List, Optional, Tuple
 import torch
 from DeepLearning_API.config import config
 from DeepLearning_API.networks import network
+from scipy.interpolate import interp1d
+import numpy as np
 
 class NormMode(Enum):
     NONE = 0,
@@ -27,15 +29,15 @@ def getNorm(normMode: Enum, channels : int, dim: int) -> torch.nn.Module:
 
 class UpSampleMode(Enum):
     CONV_TRANSPOSE = 0,
-    UPSAMPLE_NEAREST = 1
-    UPSAMPLE_LINEAR = 2
-    UPSAMPLE_BILINEAR = 3
-    UPSAMPLE_BICUBIC = 4
+    UPSAMPLE_NEAREST = 1,
+    UPSAMPLE_LINEAR = 2,
+    UPSAMPLE_BILINEAR = 3,
+    UPSAMPLE_BICUBIC = 4,
     UPSAMPLE_TRILINEAR = 5
 
 class DownSampleMode(Enum):
-    MAXPOOL = 0
-    AVGPOOL = 1
+    MAXPOOL = 0,
+    AVGPOOL = 1,
     CONV_STRIDE = 2
 
 def getTorchModule(name_fonction : str, dim : Optional[int] = None) -> torch.nn.Module:
@@ -92,7 +94,7 @@ class Attention(network.ModuleArgsDict):
         self.add_module("Upsample", torch.nn.Upsample(scale_factor=2))
         self.add_module("Multiply", Multiply(), in_branch=[2,0])
     
-def downSample(in_channels: int, out_channels: int, downSampleMode: DownSampleMode, dim: int):
+def downSample(in_channels: int, out_channels: int, downSampleMode: DownSampleMode, dim: int) -> torch.nn.Module:
     if downSampleMode == DownSampleMode.MAXPOOL:
         return getTorchModule("MaxPool", dim = dim)(2)
     if downSampleMode == DownSampleMode.AVGPOOL:
@@ -158,24 +160,149 @@ class Multiply(ApplyFunction):
 class Concat(ApplyFunction):
 
     def __init__(self) -> None:
-        super().__init__(lambda *input : torch.cat(*input, dim=1))
+        super().__init__(lambda *input : torch.cat(input, dim=1))
 
+class Print(torch.nn.Module):
+
+    def __init__(self) -> None:
+        super().__init__()
+    
+    def forward(self, *input: torch.Tensor) -> torch.Tensor:
+        print(input)
+        return input[0]
+    
 class Detach(ApplyFunction):
 
     def __init__(self) -> None:
         super().__init__(lambda input : input.detach())
 
+class GetShape(ApplyFunction):
+
+    def __init__(self) -> None:
+        super().__init__(lambda input : torch.tensor(input.shape))
+
+class ArgMax(torch.nn.Module):
+
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        print(torch.max(input))
+        print(input.shape)
+        result = torch.argmax(input, dim=self.dim).unsqueeze(self.dim)
+        print(torch.max(result))
+        return result
+
+class NormalSample(torch.nn.Module):
+
+    def __init__(self) -> None:
+        super().__init__()
+    
+    def forward(self, mu: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+        q = torch.distributions.Normal(mu, torch.exp(std/2))
+        z = q.rsample().to(mu.device)
+        return z
+
+class AddNoiseImage(torch.nn.Module):
+
+    def __init__(self, std: float) -> None:
+        super().__init__()
+        self.std = std
+        
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return input+torch.randn_like(input).to(input.device)*self.std
+    
+class Const(torch.nn.Module):
+
+    def __init__(self, shape: List[int], std: float) -> None:
+        super().__init__()
+        self.noise = torch.nn.parameter.Parameter(torch.randn(shape)*std)
+        
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self.noise.to(input.device)
+
+class Noise(torch.nn.Module):
+
+    def __init__(self, std: float) -> None:
+        super().__init__()
+        self.std = std
+        
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return torch.randn_like(input).to(input.device)*self.std
+
+
+class HistogramNoise(torch.nn.Module):
+
+    def __init__(self, n: int, sigma: float) -> None:
+        super().__init__()
+        self.x = np.linspace(0, 1, num=n, endpoint=True)
+        self.sigma = sigma
+    
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        self.function = interp1d(self.x, self.x+np.random.normal(0, self.sigma, self.x.shape[0]), kind='cubic')
+        result = torch.empty_like(input)
+
+        for value in torch.unique(input):
+            x = self.function(value.cpu())
+            result[torch.where(input == value)] = torch.tensor(x, device=input.device).float()
+        return result
+
+class View(torch.nn.Module):
+	def __init__(self, size: List[int]):
+		super().__init__()
+		self.size = size
+
+	def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+		return tensor.view(self.size)
+
 class LatentDistribution(network.ModuleArgsDict):
 
+    class LatentDistribution_Linear(torch.nn.Module):
+
+        def __init__(self, latentDim: int) -> None:
+            super().__init__()
+            self.latentDim = latentDim
+
+        def forward(self, input: torch.Tensor, shape: torch.Tensor) -> torch.Tensor:
+            linear = torch.nn.Linear(torch.prod(shape[1:]), self.latentDim).to(input.device)
+            return linear(input)
+
+    class LatentDistribution_DecoderInput(torch.nn.Module):
+        
+        def __init__(self, latentDim: int) -> None:
+            super().__init__()
+            self.latentDim = latentDim
+        
+        def forward(self, input: torch.Tensor, shape: torch.Tensor) -> torch.Tensor:
+            linear = torch.nn.Linear(self.latentDim, torch.prod(shape[1:])).to(input.device)
+            return linear(input).view(-1, *[int(i) for i in shape[1:]])
+            
     def __init__(self, out_channels: int, out_is_channel : bool, latentDim: int, modelDim: int, out_branch : List[int]) -> None:
         super().__init__()
         if not out_is_channel:
             self.add_module("ToChannels", ToChannels(modelDim))
-        
-        self.add_module("AdaptiveAvgPool", getTorchModule("AdaptiveAvgPool", modelDim)(1))
+        self.add_module("GetShape", GetShape(), out_branch=["Shape"])
+
         self.add_module("Flatten", torch.nn.Flatten(1))
-        self.add_module("mu", torch.nn.Linear(out_channels, latentDim), in_branch = out_branch, out_branch = [1])
-        self.add_module("log_std", torch.nn.Linear(out_channels, latentDim), in_branch = out_branch, out_branch = [2])
+        self.add_module("mu", LatentDistribution.LatentDistribution_Linear(latentDim), in_branch = [*out_branch, "Shape"], out_branch = [1])
+        self.add_module("log_std", LatentDistribution.LatentDistribution_Linear(latentDim), in_branch =  [*out_branch, "Shape"], out_branch = [2])
         self.add_module("Unsqueeze_mu", Unsqueeze(1), in_branch = [1], out_branch = [1])
         self.add_module("Unsqueeze_log_std", Unsqueeze(1), in_branch = [2], out_branch = [2])
-        self.add_module("Concat", Concat(), in_branch=[1,2])
+        self.add_module("NormalSample", NormalSample(), in_branch=[1,2], out_branch=[3])
+        self.add_module("Concat", Concat(), in_branch=[1,2,3])
+        self.add_module("DecoderInput", LatentDistribution.LatentDistribution_DecoderInput(latentDim), in_branch=[3, "Shape"])
+
+class AdaIN(torch.nn.Module):
+
+    def __init__(self) -> None:
+        super().__init__()
+    
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        mean = torch.mean(input, dim=[2+i for i in range(len(input.shape)-2)])
+        sigma = torch.std(input, dim=[2+i for i in range(len(input.shape)-2)])
+        
+        print(mean)
+        print(sigma)
+        
+
