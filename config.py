@@ -1,6 +1,5 @@
 import os
-from typing import Dict, List, Optional, Union
-import typing
+import types
 import ruamel.yaml
 import inspect 
 import collections
@@ -49,7 +48,7 @@ class Config():
             self.config = self.config[key]
         return self
 
-    def createDictionary(self, data, keys, i) -> Dict:
+    def createDictionary(self, data, keys, i) -> dict:
         if keys[i] not in data:
             data = {keys[i]: data}
         if i == 0:
@@ -58,11 +57,11 @@ class Config():
             i -= 1
             return self.createDictionary(data, keys, i)
     
-    def merge(self, dict1, dict2) -> Dict:
+    def merge(self, dict1, dict2) -> dict:
         result = deepcopy(dict1)
 
         for key, value in dict2.items():
-            if isinstance(value, collections.Mapping):
+            if isinstance(value, collections.abc.Mapping):
                 result[key] = self.merge(result.get(key, {}), value)
             else:
                 if not dict2[key] == None:
@@ -97,7 +96,7 @@ class Config():
         return default.split(":")[1] if len(default.split(":")) > 1 else default
 
     @staticmethod
-    def _getInputDefault(name : str, default : Optional[str], isList : bool = False) -> Union[List[Optional[str]], Optional[str]]:
+    def _getInputDefault(name : str, default : str | None, isList : bool = False) -> list[str | None] | str | None:
         if isinstance(default, str) and (default == "default" or (len(default.split(":")) > 1 and default.split(":")[0] == "default")):
             if os.environ["DEEP_LEANING_API_CONFIG_MODE"] == "interactive":
                 if isList:
@@ -166,7 +165,7 @@ class Config():
             value = None
         return value
                     
-def config(key : Optional[str] = None):
+def config(key : str | None = None):
     def decorator(function):
         def new_function(*args, **kwargs):
             if "config" in kwargs:
@@ -184,32 +183,28 @@ def config(key : Optional[str] = None):
                     kwargs = {} 
                     for param in list(inspect.signature(function).parameters.values())[len(args):]:
                         annotation = param.annotation
-                        if str(annotation).startswith("typing.Union"):
-                            if isinstance(annotation, typing._Union):
-                                for i in annotation.__args__:
-                                    annotation = i
-                                    break
+                        if isinstance(annotation, types.UnionType):
+                            for i in annotation.__args__:
+                                annotation = i
+                                break
                         if param.name in without:
                             continue
                         if not annotation == inspect._empty:
                             if annotation not in [int, str, bool, float, torch.Tensor]:
-                                if "__extra__" in annotation.__dict__:
-                                    if annotation.__extra__ == list or annotation.__extra__ == tuple:
-                                        if annotation.__args__[0] in [int, str, bool, float]:
-                                            values = config.getValue(param.name, param.default)
-                                            kwargs[param.name] = values
-                                        else:
-                                            raise ConfigError()
-                                    elif annotation.__extra__ == dict:
-                                        if annotation.__args__[0] == str:
-                                            values = config.getValue(param.name, param.default)
-                                            if values is not None and annotation.__args__[1] not in [int, str, bool, float]:
-                                                kwargs[param.name] = {value : annotation.__args__[1](config = filename, DL_args = key_tmp+"."+param.name+"."+value) for value in values}
-                                            else:
-                                                kwargs[param.name] = values
-                                        else: 
-                                            raise ConfigError()
+                                if str(annotation).startswith("list") or str(annotation).startswith("tuple"):
+                                    if annotation.__args__[0] in [int, str, bool, float]:
+                                        values = config.getValue(param.name, param.default)
+                                        kwargs[param.name] = values
                                     else:
+                                        raise ConfigError()
+                                elif str(annotation).startswith("dict"):
+                                    if annotation.__args__[0] == str:
+                                        values = config.getValue(param.name, param.default)
+                                        if values is not None and annotation.__args__[1] not in [int, str, bool, float]:
+                                            kwargs[param.name] = {value : annotation.__args__[1](config = filename, DL_args = key_tmp+"."+param.name+"."+value) for value in values}
+                                        else:
+                                            kwargs[param.name] = values
+                                    else: 
                                         raise ConfigError()
                                 else:
                                     kwargs[param.name] = annotation(config = filename, DL_args = key_tmp)

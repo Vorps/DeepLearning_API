@@ -1,8 +1,7 @@
 import torch
 from torch.cuda.amp.autocast_mode import autocast
-from torch.functional import Tensor
+from torch.backends import cudnn
 import tqdm
-from typing import Dict, List, Optional, Tuple
 import numpy as np
 import datetime
 import os
@@ -27,16 +26,16 @@ class Trainer(NeedDevice):
     def __init__(   self,
                     model : ModelLoader = ModelLoader(),
                     dataset : DataTrain = DataTrain(),
-                    groupsInput : List[str] = ["default"],
+                    groupsInput : list[str] = ["default"],
                     train_name : str = "default",
-                    device : Optional[int] = None,
-                    manual_seed : Optional[int] = None,
+                    device : int | None = None,
+                    manual_seed : int | None = None,
                     epochs: int = 100,
-                    it_validation : Optional[int] = None,
+                    it_validation : int | None = None,
                     autocast : bool = False,
-                    gradient_checkpoints: Optional[List[str]] = None,
+                    gradient_checkpoints: list[str] | None = None,
                     ema_decay : float = 0,
-                    images_log: Optional[List[str]] = None,
+                    images_log: list[str] | None = None,
                     save_checkpoint_mode: str= "BEST") -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)
@@ -44,8 +43,8 @@ class Trainer(NeedDevice):
         if self.manual_seed is not None:
             torch.manual_seed(self.manual_seed)
         
-        torch.backends.cudnn.deterministic = self.manual_seed is not None
-        torch.backends.cudnn.benchmark = self.manual_seed is None
+        cudnn.deterministic = self.manual_seed is not None
+        cudnn.benchmark = self.manual_seed is None
         
         self.train_name = train_name
         self.dataset = dataset
@@ -58,7 +57,7 @@ class Trainer(NeedDevice):
         self.tb = None
         self.model = model.getModel(train=True)
         self.ema_decay = ema_decay
-        self.modelEMA : Optional[torch.optim.swa_utils.AveragedModel] = None
+        self.modelEMA : torch.optim.swa_utils.AveragedModel | None = None
         self.images_log = images_log
         self.gradient_checkpoints = gradient_checkpoints
         self.save_checkpoint_mode = save_checkpoint_mode
@@ -123,11 +122,11 @@ class Trainer(NeedDevice):
         self._run()
 
     def _run(self) -> None:
-        with tqdm.tqdm(iterable = range(self.epoch, self.epochs), total=self.epochs, initial=self.epoch, desc="Progress") as epoch:
-            for self.epoch in epoch:
+        with tqdm.tqdm(iterable = range(self.epoch, self.epochs), total=self.epochs, initial=self.epoch, desc="Progress") as epoch_tqdm:
+            for self.epoch in epoch_tqdm:
                 self._train()
                 
-    def getInput(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]) -> Dict[Tuple[str, bool], torch.Tensor]:
+    def getInput(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> dict[tuple[str, bool], torch.Tensor]:
         inputs = {(k, True) : data_dict[k][0].to(self.device) for k in self.groupsInput}
         inputs.update({(k, False) : v[0].to(self.device) for k, v in data_dict.items() if k not in self.groupsInput})
         return inputs
@@ -230,7 +229,7 @@ class Trainer(NeedDevice):
 
             os.rename(self.config_namefile, self.config_namefile.replace(".yml", "")+"_"+str(self.it)+".yml")
 
-    def _load(self) -> Dict[str, Dict[str, torch.Tensor]]:
+    def _load(self) -> dict[str, dict[str, torch.Tensor]]:
         if URL_MODEL().startswith("https://"):
             try:
                 state_dict = {URL_MODEL().split(":")[1]: torch.hub.load_state_dict_from_url(url=URL_MODEL().split(":")[0], map_location="cpu", check_hash=True)}
@@ -249,7 +248,7 @@ class Trainer(NeedDevice):
             self.it = state_dict['it']
         return state_dict
         
-    def _train_log(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]):
+    def _train_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]):
         assert self.tb, "SummaryWriter is None"
         models = {"" : self.model}
         if self.modelEMA is not None:
@@ -268,7 +267,7 @@ class Trainer(NeedDevice):
             
             if self.images_log:
                 images_log = []
-                addImageFunction = lambda name, layer : self.tb.add_image("result/Train/{}{}".format(name, label), logImageFormat(layer), self.it, dataformats='HW' if layer.shape[1] == 1 else 'CHW')
+                addImageFunction = lambda name, layer : self.tb.add_image("result/Train/{}{}".format(name, label), logImageFormat(layer), self.it, dataformats='HW' if layer.shape[1] == 1 or layer.shape[1] > 50 else 'CHW')
 
                 for name in self.images_log:
                     if name in data_dict:
@@ -286,7 +285,7 @@ class Trainer(NeedDevice):
             if network.optimizer is not None:
                 self.tb.add_scalar("{}/Learning Rate".format(name), network.optimizer.param_groups[0]['lr'], self.it)
 
-    def _validation_log(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]):
+    def _validation_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]):
         assert self.tb, "SummaryWriter is None"
         models = {"" : self.model}
         if self.modelEMA is not None:
@@ -299,7 +298,7 @@ class Trainer(NeedDevice):
                     self.tb.add_scalars("{}{}/Metric/Validation".format(name, label), network.measure.format(isLoss=False), self.it)
             
             
-            addImageFunction = lambda name, layer : self.tb.add_image("result/Validation/{}{}".format(name, label), logImageFormat(layer), self.it, dataformats='HW' if layer.shape[1] == 1 else 'CHW')
+            addImageFunction = lambda name, layer : self.tb.add_image("result/Validation/{}{}".format(name, label), logImageFormat(layer), self.it, dataformats='HW' if layer.shape[1] == 1 or layer.shape[1] > 50 else 'CHW')
 
             if self.images_log:
                 images_log = []

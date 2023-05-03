@@ -2,7 +2,6 @@ from abc import ABC, abstractmethod
 import builtins
 import importlib
 import shutil
-from typing import Dict, List, Optional, Tuple
 import torch
 import tqdm
 import os
@@ -20,16 +19,16 @@ from torch.utils.tensorboard.writer import SummaryWriter
 
 class OutDataset(DatasetUtils, NeedDevice, ABC):
 
-    def __init__(self, filename: str, group: str, pre_transforms : Dict[str, TransformLoader], post_transforms : Dict[str, TransformLoader], patchCombine:Optional[str]) -> None:
+    def __init__(self, filename: str, group: str, pre_transforms : dict[str, TransformLoader], post_transforms : dict[str, TransformLoader], patchCombine: str | None) -> None: 
         super().__init__(filename, read=False)
         self.group = group
         self._pre_transforms = pre_transforms
         self._post_transforms = post_transforms
         self.patchCombine = patchCombine
-        self.pre_transforms : List[Transform] = []
-        self.post_transforms : List[Transform] = []
-        self.output_layer_accumulator: Dict[int, Accumulator] = {}
-        self.attributes: Dict[int, Dict[int, Attribute]] = {}
+        self.pre_transforms : list[Transform] = []
+        self.post_transforms : list[Transform] = []
+        self.output_layer_accumulator: dict[int, Accumulator] = {}
+        self.attributes: dict[int, dict[int, Attribute]] = {}
 
     def load(self, name_layer: str):
         if self._pre_transforms is not None:
@@ -63,7 +62,7 @@ class OutDataset(DatasetUtils, NeedDevice, ABC):
     def getOutput(self, index: int, dataset: DataSet) -> torch.Tensor:
         pass
 
-    def write(self, index: int, name: str, layer: torch.Tensor, measure: Dict[str, float]):
+    def write(self, index: int, name: str, layer: torch.Tensor, measure: dict[str, float]):
         self.attributes[index].update({k : v for k, v in measure.items()})
         self.writeData(self.group, name, layer.numpy(), self.attributes[index][0])
         self.attributes.pop(index)
@@ -71,7 +70,7 @@ class OutDataset(DatasetUtils, NeedDevice, ABC):
 class OutSameAsGroupDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine:Optional[str] = None) -> None:
+    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: str | None = None) -> None:
         super().__init__(dataset_filename, group, pre_transforms, post_transforms, patchCombine)
         self.group_src, self.group_dest = sameAsGroup.split("/")
 
@@ -103,7 +102,7 @@ class OutSameAsGroupDataset(OutDataset):
 class OutLayerDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", overlap : Optional[List[int]] = None, pre_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine:Optional[str] = None) -> None:
+    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", overlap : list[int] | None = None, pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: str | None = None) -> None:
         super().__init__(dataset_filename, group, pre_transforms, post_transforms, patchCombine)
         self.overlap = overlap
         
@@ -143,17 +142,16 @@ class Predictor(NeedDevice):
                     model: ModelLoader = ModelLoader(),
                     dataset: DataPrediction = DataPrediction(),
                     train_name: str = "name",
-                    groupsInput: List[str] = ["default"],
-                    device: Optional[int] = None,
-                    outsDataset: Optional[Dict[str, OutDatasetLoader]] = {"default:Default" : OutDatasetLoader()},
-                    images_log: List[str] = []) -> None:
+                    groupsInput: list[str] = ["default"],
+                    device: int | None = None,
+                    outsDataset: dict[str, OutDatasetLoader] | None = {"default:Default" : OutDatasetLoader()},
+                    images_log: list[str] = []) -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)
 
         torch.backends.cudnn.deterministic = True  # type: ignore
         torch.backends.cudnn.benchmark = False # type: ignore
 
-        
         self.groupsInput = groupsInput
         self.train_name = train_name
         self.dataset = dataset
@@ -190,7 +188,7 @@ class Predictor(NeedDevice):
             self.tb.close()
         pynvml.nvmlShutdown()
 
-    def getInput(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]) -> Dict[Tuple[str, bool], torch.Tensor]:
+    def getInput(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> dict[tuple[str, bool], torch.Tensor]:
         inputs = {(k, True) : data_dict[k][0].to(self.device) for k in self.groupsInput}
         inputs.update({(k, False) : v[0].to(self.device) for k, v in data_dict.items() if k not in self.groupsInput})
         return inputs
@@ -237,7 +235,7 @@ class Predictor(NeedDevice):
         
         description = lambda : "Prediction : Metric ("+" ".join(["{} : ".format(name)+" ".join(["{} : {:.4f}".format(nameMetric, value) for nameMetric, value in network.measure.getLastMetrics().items()]) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+gpuInfo(self.device)
 
-        measures : List[Measure] = [network.measure for name, network in self.model.getNetworks().items() if network.measure is not None]
+        measures : list[Measure] = [network.measure for name, network in self.model.getNetworks().items() if network.measure is not None]
         
         dataset: DataSet = self.dataloader_prediction.dataset
         it_image = 0
@@ -261,13 +259,14 @@ class Predictor(NeedDevice):
                                 self.tb.add_scalars("{}_Prediction/Loss".format(name), measure.format(isLoss=True), it_image)
                                 self.tb.add_scalars("{}_Prediction/Metric".format(name), measure.format(isLoss=False), it_image)
                             
+                            print("OKKKKK")
                             outDataset.write(index, name_data, layer_output.cpu(), measure_result)
                             it_image+=1
 
                 batch_iter.set_description(description())
                 self.it += 1
 
-    def _predict_log(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]):
+    def _predict_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]):
         assert self.tb, "SummaryWriter is None"
         for name, network in self.model.getNetworks().items():
             if network.measure is not None:

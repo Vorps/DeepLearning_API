@@ -5,6 +5,7 @@ from DeepLearning_API import CONFIG_FILE
 from DeepLearning_API.trainer import Trainer
 from DeepLearning_API.predictor import Predictor
 from DeepLearning_API.utils import State
+import torch
 
 def main():
     parser = argparse.ArgumentParser(description="DeepLearing API",

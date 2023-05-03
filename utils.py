@@ -1,6 +1,4 @@
 import itertools
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-from typing_extensions import Self
 import pynvml
 import psutil
 import h5py
@@ -11,28 +9,29 @@ import torch
 import datetime
 from abc import ABC
 from enum import Enum
+from typing import Callable, Any
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
 
-class Attribute(dict):
+class Attribute(dict[str, Any]):
 
-    def __init__(self, attributes : Dict[str, torch.Tensor] = {}) -> None:
+    def __init__(self, attributes : dict[str, Any] = {}) -> None:
         super().__init__()
         for k, v in attributes.items():
             super().__setitem__(k, v)
     
-    def __getitem__(self, key: str) -> torch.Tensor:
+    def __getitem__(self, key: str) -> Any:
         i = len([k for k in super().keys() if k.startswith(key)])
         if i > 0 and "{}_{}".format(key, i-1) in super().keys():   
             return super().__getitem__("{}_{}".format(key, i-1))
         else:
             raise NameError("{} not in cache_attribute".format(key))
 
-    def __setitem__(self, key: str, value: torch.Tensor) -> None:
+    def __setitem__(self, key: str, value: Any) -> None:
         i = len([k for k in super().keys() if k.startswith(key)])
         super().__setitem__("{}_{}".format(key, i), value)
 
-    def pop(self, key: str) -> torch.Tensor:
+    def pop(self, key: str) -> Any:
         i = len([k for k in super().keys() if k.startswith(key)])
         if i > 0 and "{}_{}".format(key, i-1) in super().keys():   
             return super().pop("{}_{}".format(key, i-1))
@@ -43,7 +42,7 @@ class Attribute(dict):
     def __contains__(self, key: str) -> bool:
         return len([k for k in super().keys() if k.startswith(key)]) > 0
 
-def dataset_to_data(dataset : h5py.Dataset) -> Tuple[np.ndarray, Attribute]:
+def dataset_to_data(dataset : h5py.Dataset) -> tuple[np.ndarray, Attribute]:
     data = np.zeros(dataset.shape, dataset.dtype)
     dataset.read_direct(data)
     attrs = Attribute()
@@ -56,7 +55,6 @@ def data_to_image(data : np.ndarray, attributes: Attribute) -> sitk.Image:
     else:
         data = data.transpose(tuple([i+1 for i in range(len(data.shape)-1)]+[0]))
         image = sitk.GetImageFromArray(data, isVector=True)
-
     if "Origin" in attributes:
         image.SetOrigin(attributes["Origin"])
     if "Spacing" in attributes:
@@ -69,17 +67,15 @@ def dataset_to_image(dataset : h5py.Dataset) -> sitk.Image:
     data, attributes = dataset_to_data(dataset)
     return data_to_image(data, attributes)
 
-
-
-def data_to_dataset(h5 : h5py.Group, name : str, data : np.ndarray, attributes : Optional[Attribute] = None) -> None:
+def data_to_dataset(h5 : h5py.Group, name : str, data : np.ndarray, attributes : Attribute | None = None) -> None:
     if name in h5:
         del h5[name]
     if attributes is None:
         attributes = Attribute()
     dataset = h5.create_dataset(name, data=data, dtype=data.dtype, chunks=None)
-    dataset.attrs.update({k : v for k, v in attributes.items()})
+    dataset.attrs.update({k : (v if isinstance(v.numpy() if isinstance(v, torch.Tensor) else v, np.ndarray) else str(v)) for k, v in attributes.items()})
 
-def image_to_dataset(h5 : h5py.Group, name : str, image : sitk.Image, attributes : Optional[Attribute] = None) -> None:
+def image_to_dataset(h5 : h5py.Group, name : str, image : sitk.Image, attributes : Attribute | None = None) -> None:
     if attributes is None:
         attributes = Attribute()
     attributes["Origin"] = image.GetOrigin()
@@ -99,7 +95,7 @@ class DatasetUtils():
         self.filename = filename
         self.data = {}
         self.read = read
-        self.h5: Optional[h5py.File] = None
+        self.h5: h5py.File | None = None
 
     def __enter__(self):
         if self.read:
@@ -118,7 +114,7 @@ class DatasetUtils():
         if self.h5 is not None:
             self.h5.close()
 
-    def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Optional[Attribute] = None) -> None:
+    def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Attribute | None = None) -> None:
         assert self.h5
         if group not in self.h5:
             self.h5.create_group(group)
@@ -126,7 +122,7 @@ class DatasetUtils():
         if isinstance(h5_group, h5py.Group):
             image_to_dataset(h5_group, name, image, attributes)
     
-    def writeData(self, group : str, name : str, data : np.ndarray, attributes : Optional[Attribute] = None) -> None:
+    def writeData(self, group : str, name : str, data : np.ndarray, attributes : Attribute | None = None) -> None:
         assert self.h5
         if group not in self.h5:
             self.h5.create_group(group)
@@ -144,7 +140,7 @@ class DatasetUtils():
                     data, attrs = dataset_to_data(obj)
                     data = function(data, attrs, name)
                     im = data_to_image(data, attrs)
-                    sitk.WriteImage(im, path_dest+name, useCompression=True)
+                    sitk.WriteImage(im, path_dest+name, True)
                     print("Write image : {}{}".format(path_dest, name))
     
         if not os.path.exists(path_dest):
@@ -189,7 +185,7 @@ def memoryForecast(memory_init : float, i : float, size : float) -> str:
     forecast = memory_init + ((current_memory-memory_init)*size/i) if i > 0 else 0
     return "Memory forecast ({:.2f}G ({:.2f} %))".format(forecast, forecast/(psutil.virtual_memory()[0]/2**30)*100)
 
-def gpuInfo(device : Union[int, torch.device]) -> str:
+def gpuInfo(device : int | torch.device) -> str:
     if isinstance(device, torch.device):
         if str(device).startswith("cuda:"):
             device = int(str(device).replace("cuda:", ""))
@@ -200,9 +196,9 @@ def gpuInfo(device : Union[int, torch.device]) -> str:
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
     else:
         return ""
-    return  "GPU({}) Memory GPU ({:.2f}G ({:.2f} %)) | {} | Power {}W | Temperature {}°C".format(device, memory.used/(10**9), memory.used/memory.total*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
+    return  "GPU({}) Memory GPU ({:.2f}G ({:.2f} %)) | {} | Power {}W | Temperature {}°C".format(device, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
 
-def gpuMemory(device : Union[int, torch.device]) -> str:
+def gpuMemory(device : int | torch.device) -> str:
     if isinstance(device, torch.device):
         if str(device).startswith("cuda:"):
             device = int(str(device).replace("cuda:", ""))
@@ -213,9 +209,9 @@ def gpuMemory(device : Union[int, torch.device]) -> str:
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
     else:
         return ""
-    return  "Memory GPU ({:.2f}G)".format(memory.used/(10**9))
+    return  "Memory GPU ({:.2f}G)".format(float(memory.used)/(10**9))
 
-def getAvailableDevice() -> List[int]:
+def getAvailableDevice() -> list[int]:
     pynvml.nvmlInit()
     available = []
     deviceCount = pynvml.nvmlDeviceGetCount()
@@ -228,7 +224,7 @@ def getAvailableDevice() -> List[int]:
     pynvml.nvmlShutdown()
     return available
 
-def getDevice(device : Optional[int]) -> torch.device:
+def getDevice(device : int | None) -> torch.device:
     if torch.cuda.is_available():
         if device is None:
             availableDevice = getAvailableDevice()
@@ -245,15 +241,21 @@ def getDevice(device : Optional[int]) -> torch.device:
     else:
         return torch.device("cpu")
 
-def logImageFormat(input : torch.Tensor):
-    input = input[0].detach().cpu().numpy()
+def logImageFormat(input_torch : torch.Tensor):
+    input = input_torch[0].detach().cpu().numpy()
+    if input.shape[0] > 50:
+        input = np.expand_dims(input, 0)
     nb_channel = input.shape[0]
+
     if len(input.shape)-1 == 3:
         input = input[:,input.shape[1]//2, ...]
     if nb_channel == 1:
         input = input[0]
     else:
-        channel_split = np.split(input, 3, axis=0)
+        if nb_channel < 3:
+            channel_split = [input[i] for i in range(input.shape[0])]
+        else: 
+            channel_split = np.split(input, 3, axis=0)
         input = np.zeros((3, *list(input.shape[1:])))
         for i, channels in enumerate(channel_split):
             input[i] = np.mean(channels, axis=0)
@@ -280,9 +282,9 @@ class State(Enum):
     def __str__(self) -> str:
         return self.value
 
-def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: List[int], nb_patch_per_dim : List[Tuple[int, bool]], overlap: Optional[List[int]]) -> List[Tuple[slice]]:
+def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: list[int], nb_patch_per_dim : list[tuple[int, bool]], overlap: list[int] | None) -> list[tuple[slice]]:
     patch_slices = []
-    slices : List[List[slice]] = []
+    slices : list[list[slice]] = []
     if overlap is None:
         overlap = [0 for _ in range(len(nb_patch_per_dim))]
     patch_size = []
@@ -304,15 +306,16 @@ def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: List[int], nb_patch_p
         patch_slices.append(tuple(chunk))
     return patch_slices
 
-def get_patch_slices_from_shape(patch_size: List[int], shape : List[int], overlap: Optional[List[int]]) -> Tuple[List[Tuple[slice]], List[Tuple[int, bool]]]:
+def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overlap: list[int] | None) -> tuple[list[tuple[slice]], list[tuple[int, bool]]]:
     if len(shape) != len(patch_size) or not all(a >= b for a, b in zip(shape, patch_size)):
         return [tuple([slice(0, s) for s in shape])], [(1, True)]*len(shape)
+
     patch_slices = []
     nb_patch_per_dim = []
-    slices : List[List[slice]] = []
+    slices : list[list[slice]] = []
     if overlap is None:
-        size = [a//b for a, b in zip(shape, patch_size)]
-        overlap_tmp = np.zeros(len(size), dtype=np.int)
+        size = [np.ceil(a/b) for a, b in zip(shape, patch_size)]
+        overlap_tmp = np.zeros(len(size), dtype=np.int_)
         for i, s in enumerate(size):
             if s > 1:
                 overlap_tmp[i] = np.mod(patch_size[i]-np.mod(shape[i], patch_size[i]), patch_size[i])//(size[i]-1)
@@ -324,6 +327,7 @@ def get_patch_slices_from_shape(patch_size: List[int], shape : List[int], overla
         index = 0
         while True:
             start = (patch_size[dim]-overlap_tmp[dim])*index
+
             end = start + patch_size[dim]
             if end >= shape[dim]:
                 end = shape[dim]
@@ -341,7 +345,7 @@ def get_patch_slices_from_shape(patch_size: List[int], shape : List[int], overla
     return patch_slices, nb_patch_per_dim
 
 
-def resampleITK(path, image_reference : sitk.Image, image : sitk.Image, transforms_files : Dict[str, bool], mask = True):
+def resampleITK(path, image_reference : sitk.Image, image : sitk.Image, transforms_files : dict[str, bool], mask = True):
     transforms = []
     for transform_file, invert in transforms_files.items():
         transform = sitk.ReadTransform(path+transform_file+".itk.txt")
@@ -373,9 +377,9 @@ def resampleITK(path, image_reference : sitk.Image, image : sitk.Image, transfor
                 transform = sitk.DisplacementFieldTransform(inverseDisplacementField)
             transforms.append(transform)
     result_transform = sitk.CompositeTransform(transforms)
-    return sitk.Resample(image, image_reference, result_transform, sitk.sitkNearestNeighbor if mask else sitk.sitkBSpline, defaultPixelValue = 0 if mask else -1024)
+    return sitk.Resample(image, image_reference, result_transform, sitk.sitkNearestNeighbor if mask else sitk.sitkBSpline, *{"defaultPixelValue" : 0 if mask else -1024})
 
-def formatMaskLabel(mask: sitk.Image, labels: List[Tuple[int, int]]) -> sitk.Image:
+def formatMaskLabel(mask: sitk.Image, labels: list[tuple[int, int]]) -> sitk.Image:
     data = sitk.GetArrayFromImage(mask)
     result_data = np.zeros_like(data, np.uint8)
 
@@ -383,5 +387,5 @@ def formatMaskLabel(mask: sitk.Image, labels: List[Tuple[int, int]]) -> sitk.Ima
         result_data[np.where(data == label_old)] = label_new
 
     result = sitk.GetImageFromArray(result_data)
-    result.CopyInformation(mask)        
+    result.CopyInformation(mask)
     return result

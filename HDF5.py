@@ -1,14 +1,11 @@
 from abc import ABC, abstractmethod
-from functools import partial
-from traceback import print_tb
-from typing import Any, Dict, Iterator, List, Optional, Tuple
-from typing_extensions import Self
 import SimpleITK as sitk
 import h5py
 import numpy as np
 import torch
 import os
 import torch.nn.functional as F
+from typing import Iterator
 
 from DeepLearning_API.config import config
 from DeepLearning_API.utils import DatasetUtils, NeedDevice, dataset_to_data, Attribute, get_patch_slices_from_shape
@@ -30,8 +27,8 @@ class PathCombine(NeedDevice, ABC):
 
 class Accumulator():
 
-    def __init__(self, patch_slices: List[Tuple[slice]], patchCombine:Optional[str] = None, batch: bool = True) -> None:
-        self._layer_accumulator: List[Optional[torch.Tensor]] = [None for i in range(len(patch_slices))]
+    def __init__(self, patch_slices: list[tuple[slice]], patchCombine: str | None = None, batch: bool = True) -> None:
+        self._layer_accumulator: list[torch.Tensor | None] = [None for i in range(len(patch_slices))]
         self.patch_slices = patch_slices
         self.shape = max([[v.stop for v in patch] for patch in patch_slices])
 
@@ -63,13 +60,17 @@ class Accumulator():
 
 class Patch(ABC):
 
-    def __init__(self, patch_size: List[int], overlap: Optional[List[int]]) -> None:
+    def __init__(self, patch_size: list[int], overlap: list[int] | None, path_mask: str | None = None) -> None:
         self.patch_size = patch_size
         self.overlap = overlap
-        self.patch_slices : List[Tuple[slice]] = None
-        self.nb_patch_per_dim: List[Tuple[int, bool]] = None
+        self.patch_slices : list[tuple[slice]]
+        self.nb_patch_per_dim: list[tuple[int, bool]]
+        self.path_mask = path_mask
+        self.mask = None
+        if self.path_mask is not None and os.path.exists(self.path_mask):
+            self.mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path_mask)))
 
-    def load(self, shape : List[int]) -> None:
+    def load(self, shape : list[int]) -> None:
         self.patch_slices, self.nb_patch_per_dim = get_patch_slices_from_shape(self.patch_size, shape, self.overlap)
 
     def getData(self, data : torch.Tensor, index : int) -> torch.Tensor:
@@ -88,8 +89,12 @@ class Patch(ABC):
             dim = nb_dim-dim_it-1
             padding.append(0)
             padding.append(0 if _slice.start+self.patch_size[dim] <= data.shape[dim] else _slice.start+self.patch_size[dim]-_slice.stop)
-    
+
         data = F.pad(data, tuple(padding), "constant", 0)
+
+        if self.mask is not None:
+            data = torch.where(self.mask == 0, torch.zeros((1), dtype=data.dtype), data)
+
         for d in [i for i, v in enumerate(reversed(self.patch_size)) if v == 1]:
             data = torch.squeeze(data, dim = len(data.shape)-d-1)
         return data
@@ -97,41 +102,42 @@ class Patch(ABC):
     def __len__(self) -> int:
         return len(self.patch_slices) if self.patch_slices is not None else 1
     
-    def disassemble(self, *dataList: torch.Tensor) -> Iterator[List[torch.Tensor]]:
+    def disassemble(self, *dataList: torch.Tensor) -> Iterator[list[torch.Tensor]]:
         for i in range(len(self)):
             yield [self.getData(data, i) for data in dataList]
 
 class DatasetPatch(Patch):
 
     @config("Patch")
-    def __init__(self, patch_size : List[int] = [128, 256, 256], overlap : Optional[List[int]] = None) -> None:
-        super().__init__(patch_size, overlap)
+    def __init__(self, patch_size : list[int] = [128, 256, 256], overlap : list[int] | None = None, mask: str | None = None) -> None:
+        super().__init__(patch_size, overlap, mask)
 
 class ModelPatch(Patch):
 
     @config("Patch")
-    def __init__(self, patch_size : List[int] = [128, 256, 256], overlap : Optional[List[int]] = None, patchCombine:Optional[str] = None) -> None:
-        super().__init__(patch_size, overlap)
+    def __init__(self, patch_size : list[int] = [128, 256, 256], overlap : list[int] | None = None, patchCombine: str | None = None, mask: str | None = None) -> None:
+        super().__init__(patch_size, overlap, mask)
         self.patchCombine = patchCombine
 
 class Dataset():
 
-    def __init__(self, group : str, dataset : h5py.Dataset, patch : Optional[DatasetPatch], pre_transforms : List[Transform]) -> None:
+    def __init__(self, group : str, dataset : h5py.Dataset, patch : DatasetPatch | None, pre_transforms : list[Transform]) -> None:
         self._dataset = dataset
         self.group = group
         self.name = self._dataset.name    
         self.loaded = False
         self._shape = list(self._dataset.shape[1:])
-        self.cache_attribute = Attribute({k : torch.tensor(v) for k, v in self._dataset.attrs.items()})
-        
-        self.data : List[torch.Tensor] = list()
-        for transformFunction in pre_transforms:
-            self._shape = transformFunction.transformShape(self._shape)
 
-        self.patch = DatasetPatch(patch_size=patch.patch_size, overlap=patch.overlap) if patch else DatasetPatch(self._shape)
+        self.cache_attribute = Attribute({k : torch.tensor(v) if isinstance(v, np.ndarray) else v for k, v in self._dataset.attrs.items()})
+        
+        self.data : list[torch.Tensor] = list()
+        for transformFunction in pre_transforms:
+            self._shape = transformFunction.transformShape(self._shape, self.cache_attribute)
+
+        self.patch = DatasetPatch(patch_size=patch.patch_size, overlap=patch.overlap, mask=patch.path_mask) if patch else DatasetPatch(self._shape, mask=patch.path_mask)
         self.patch.load(self._shape)
     
-    def load(self, index : int, pre_transform : List[Transform], dataAugmentationsList : List[DataAugmentationsList]) -> None:
+    def load(self, index : int, pre_transform : list[Transform], dataAugmentationsList : list[DataAugmentationsList]) -> None:
         if self.loaded:
             return
         
@@ -177,7 +183,7 @@ class Dataset():
         del self.data
         self.loaded = False
     
-    def getData(self, index : int, a : int, post_transforms : List[Transform]) -> torch.Tensor:
+    def getData(self, index : int, a : int, post_transforms : list[Transform]) -> torch.Tensor:
         data = self.patch.getData(self.data[a], index)
         for transformFunction in post_transforms:
             data = transformFunction(data, self.cache_attribute)
@@ -200,11 +206,11 @@ class HDF5(DatasetUtils):
             result += self.getSize(group) if group in self.h5 else 1
         return result
     
-    def getDatasets(self, group: str, index: List[int], i: int = 0, it: int = 0) -> Tuple[List[h5py.Dataset], List[List[int]], int, int]:
+    def getDatasets(self, group: str, index: list[int], i: int = 0, it: int = 0) -> tuple[list[h5py.Dataset], list[list[int]], int, int]:
         h5_group = self.h5[group]
         assert isinstance(h5_group, h5py.Group)
         datasets = []
-        mapping: List[List[int]] = []
+        mapping: list[list[int]] = []
         for dataset in [dataset for dataset in h5_group.values() if type(dataset) == h5py.Dataset]:
             group = dataset.name.split(".")[0]
             if group in self.h5:

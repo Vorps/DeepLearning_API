@@ -1,4 +1,4 @@
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable
 import importlib
 import torch
 from abc import ABC, abstractmethod
@@ -21,14 +21,14 @@ class DataAugmentation(NeedDevice, ABC):
     def load(self, nb: int, prob: float):
         self.who_function = lambda : torch.rand(nb) < prob
 
-    def state_init(self, index : int, shape: List[int], cache_attribute: Dict[str, torch.Tensor]):
+    def state_init(self, index : int, shape: list[int], cache_attribute: dict[str, torch.Tensor]):
         if self.lastIndex != index:
             self.who = self.who_function()
             self.nb = len([i for i in self.who if i])
             self._state_init(shape, cache_attribute)
 
     @abstractmethod
-    def _state_init(self, shape: List[int], cache_attribute: Dict[str, torch.Tensor]):
+    def _state_init(self, shape: list[int], cache_attribute: dict[str, torch.Tensor]):
         pass
     
     def __call__(self, input : torch.Tensor) -> torch.Tensor:
@@ -48,9 +48,9 @@ class Prob():
 class DataAugmentationsList():
 
     @config()
-    def __init__(self, nb : int = 10, dataAugmentations: Dict[str, Prob] = {"default:RandomElastixTransform" : Prob(1)}) -> None:
+    def __init__(self, nb : int = 10, dataAugmentations: dict[str, Prob] = {"default:RandomElastixTransform" : Prob(1)}) -> None:
         self.nb = nb
-        self.dataAugmentations : List[DataAugmentation] = []
+        self.dataAugmentations : list[DataAugmentation] = []
         self.dataAugmentationsLoader = dataAugmentations
 
     def load(self, key: str, device: torch.device):
@@ -65,7 +65,7 @@ class DataAugmentationsList():
 class RandomRotateTransform(DataAugmentation):
 
     @config("RandomRotateTransform")
-    def __init__(self, min_angles: List[float] = [0, 0, 0], max_angles: List[float] = [360, 360, 360]) -> None:
+    def __init__(self, min_angles: list[float] = [0, 0, 0], max_angles: list[float] = [360, 360, 360]) -> None:
         super().__init__()
         assert len(min_angles) == len(max_angles)
         assert len(min_angles) == 3 or len(min_angles) == 1
@@ -81,7 +81,7 @@ class RandomRotateTransform(DataAugmentation):
     def _rotation2DMatrix(self, rotation : torch.Tensor) -> torch.Tensor:
         return torch.cat((torch.tensor([[torch.cos(rotation[0]), -torch.sin(rotation[0])], [torch.sin(rotation[0]), torch.cos(rotation[0])]]), torch.zeros((2, 1))), dim=1)
     
-    def _state_init(self, shape: List[int], cache_attribute: Dict[str, torch.Tensor]):
+    def _state_init(self, shape: list[int], cache_attribute: dict[str, torch.Tensor]):
         func = self._rotation3DMatrix if len(self.range_angle)== 3 else self._rotation2DMatrix
         angles = torch.rand((self.nb, len(self.range_angle)))*torch.tensor([max_angle-min_angle for min_angle, max_angle in self.range_angle])+torch.tensor([min_angle for min_angle, _ in self.range_angle])/360*2*torch.pi
         self.matrix = torch.cat([torch.unsqueeze(func(value), dim=0) for value in angles], dim=0)
@@ -104,14 +104,14 @@ class RandomElastixTransform(DataAugmentation):
         new_locs = new_locs[..., [2, 1, 0]]
         return new_locs
 
-    def _state_init(self, shape: List[int], cache_attribute: Dict[str, torch.Tensor]):
+    def _state_init(self, shape: list[int], cache_attribute: dict[str, torch.Tensor]):
         shape = shape
         dim = len(shape)
 
         grid_physical_spacing = [self.grid_spacing]*dim
         image_physical_size = [size*spacing for size, spacing in zip(shape, cache_attribute["Spacing"])]
         mesh_size = [int(image_size/grid_spacing + 0.5) for image_size,grid_spacing in zip(image_physical_size, grid_physical_spacing)]
-        self.displacement_fields : List[torch.Tensor] = []
+        self.displacement_fields : list[torch.Tensor] = []
         ref_image = sitk.GetImageFromArray(np.zeros(shape))
         ref_image.SetOrigin([float(v) for v in cache_attribute["Origin"]])
         ref_image.SetSpacing([float(v) for v in cache_attribute["Spacing"]])
@@ -143,12 +143,12 @@ class RandomElastixTransform(DataAugmentation):
 class RandomFlipTransform(DataAugmentation):
 
     @config("RandomFlipTransform")
-    def __init__(self, flip: List[float] = [0.5, 0.25 ,0.25]) -> None:
+    def __init__(self, flip: list[float] = [0.5, 0.25 ,0.25]) -> None:
         super().__init__()
         self.flip = flip
         self.dim_flip : torch.Tensor
 
-    def _state_init(self, shape: List[int], cache_attribute: Dict[str, torch.Tensor]):
+    def _state_init(self, shape: list[int], cache_attribute: dict[str, torch.Tensor]):
         self.dim_flip = torch.rand((self.nb, len(self.flip))) < torch.tensor(self.flip)
 
     def _compute(self, input : torch.Tensor) -> torch.Tensor:

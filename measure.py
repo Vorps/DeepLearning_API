@@ -1,6 +1,5 @@
 from abc import ABC
 import importlib
-from typing import List, Tuple, Iterator, Callable
 import numpy as np
 import torch
 
@@ -11,14 +10,9 @@ from DeepLearning_API.config import config
 from DeepLearning_API.utils import NeedDevice, _getModule
 from DeepLearning_API.networks.blocks import LatentDistribution
 from DeepLearning_API.networks.network import ModelLoader, Network
-from DeepLearning_API.transform import Gradient
-from DeepLearning_API.dataset import DatasetPatch
-from torch.cuda.amp.autocast_mode import autocast
+from typing import Callable
 
-import torchvision.models as tm
 import torch.nn.functional as F
-
-from networks import blocks
 import itertools
 
 
@@ -46,6 +40,14 @@ class MaskedMSE(Criterion):
                 loss += self.loss(torch.masked_select(input[batch, ...], mask == 1), torch.masked_select(target[batch, :-1, ...], mask == 1))/input.shape[0]
         return loss
 
+class DistanceLoss(Criterion):
+
+    def __init__(self) -> None:
+        super().__init__()
+    
+    def forward(self, input1: torch.Tensor, target : torch.Tensor) -> torch.Tensor:
+        return torch.mean(input1[:,1:]*target)
+        
 class Dice(Criterion):
     
     def __init__(self, smooth : float = 1e-6) -> None:
@@ -60,9 +62,9 @@ class Dice(Criterion):
         target = self.flatten(target)
         return (2.*(input * target).sum() + self.smooth)/(input.sum() + target.sum() + self.smooth)
 
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        target = F.one_hot(target.type(torch.int64), num_classes=input.shape[1]).permute(0, len(target.shape), *[i+1 for i in range(len(target.shape)-1)]).float()
-        return 1-torch.mean(self.dice_per_channel(input, target))
+    def forward(self, input1: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        target = F.one_hot(target.type(torch.int64), num_classes=input1.shape[1]).permute(0, len(target.shape), *[i+1 for i in range(len(target.shape)-1)]).float()
+        return 1-torch.mean(self.dice_per_channel(input1, target))
 
 class GradientImages(Criterion):
 
@@ -70,13 +72,13 @@ class GradientImages(Criterion):
         super().__init__()
     
     @staticmethod
-    def _image_gradient2D(image : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _image_gradient2D(image : torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         dx = image[:, :, 1:, :] - image[:, :, :-1, :]
         dy = image[:, :, :, 1:] - image[:, :, :, :-1]
         return dx, dy
 
     @staticmethod
-    def _image_gradient3D(image : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _image_gradient3D(image : torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         dx = image[:, :, 1:, :, :] - image[:, :, :-1, :, :]
         dy = image[:, :, :, 1:, :] - image[:, :, :, :-1, :]
         dz = image[:, :, :, :, 1:] - image[:, :, :, :, :-1]
@@ -293,7 +295,7 @@ class Contrastive(Criterion):
         self.loss = torch.nn.MSELoss(reduction="mean")
         self.alpha = alpha
 
-    def J_ij(self, D: Callable[[int, int], torch.Tensor], i: int, j: int, negative_index: List[int]) -> torch.Tensor:
+    def J_ij(self, D: Callable[[int, int], torch.Tensor], i: int, j: int, negative_index: list[int]) -> torch.Tensor:
         loss = torch.tensor(0, dtype=torch.float, device=self.device)
         for k in negative_index:
             loss += torch.exp(self.alpha-D(i, k))

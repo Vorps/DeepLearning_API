@@ -1,11 +1,9 @@
 from functools import partial
 import torch
 from torch.nn.parameter import Parameter
-import numpy as np
-from typing import Dict, List
 from DeepLearning_API.config import config
-from DeepLearning_API.networks import network, segmentation
-from networks import blocks
+from DeepLearning_API.models.segmentation import uNet
+from networks import blocks, network
 import torch.nn.functional as F
 
 class VoxelMorph(network.Network):
@@ -14,20 +12,20 @@ class VoxelMorph(network.Network):
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3,
-                    channels : List[int] = [4, 16,32,32,32],
+                    channels : list[int] = [4, 16,32,32,32],
                     blockConfig: blocks.BlockConfig = blocks.BlockConfig(),
                     nb_conv_per_stage: int = 2,
                     downSampleMode: str = "MAXPOOL",
                     upSampleMode: str = "CONV_TRANSPOSE",
                     attention : bool = False,
-                    shape : List[int] = [192, 192, 192],
+                    shape : list[int] = [192, 192, 192],
                     int_steps : int = 7,
                     int_downsize : int = 2):
         super().__init__(in_channels = channels[0], optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim)
         self.add_module("Concat", blocks.Concat(), in_branch=[0,1,2,3])
-        self.add_module("UNetBlock_0", segmentation.UNetBlock(channels, nb_conv_per_stage, blockConfig, downSampleMode=blocks.DownSampleMode._member_map_[downSampleMode], upSampleMode=blocks.UpSampleMode._member_map_[upSampleMode], attention=attention, dim=dim))
+        self.add_module("UNetBlock_0", uNet.UNetBlock(channels, nb_conv_per_stage, blockConfig, downSampleMode=blocks.DownSampleMode._member_map_[downSampleMode], upSampleMode=blocks.UpSampleMode._member_map_[upSampleMode], attention=attention, dim=dim))
         self.add_module("Head", blocks.getTorchModule("Conv", dim)(in_channels = channels[1], out_channels = channels[0], kernel_size = 3, stride = 1, padding = 1))
         
         self["Head"].weight = Parameter(torch.distributions.Normal(0, 1e-5).sample(self["Head"].weight.shape))
@@ -50,7 +48,7 @@ class VoxelMorph(network.Network):
 
 class SpatialTransformer(torch.nn.Module):
     
-    def __init__(self, size : List[int]):
+    def __init__(self, size : list[int]):
         super().__init__()
         vectors = [torch.arange(0, s) for s in size]
         grids = torch.meshgrid(vectors, indexing='ij')
