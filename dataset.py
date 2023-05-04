@@ -14,13 +14,14 @@ from DeepLearning_API.config import config
 from DeepLearning_API.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, NeedDevice
 from DeepLearning_API.transform import TransformLoader, Transform
 from DeepLearning_API.augmentation import DataAugmentationsList
+from typing import Dict, List, Union, Tuple
 
 
 class GroupTransform:
 
     @config()
-    def __init__(self,  pre_transforms : dict[str, TransformLoader] | list[Transform] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
-                        post_transforms : dict[str, TransformLoader]| list[Transform] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()}) -> None:
+    def __init__(self,  pre_transforms : Union[Dict[str, TransformLoader], List[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
+                        post_transforms : Union[Dict[str, TransformLoader], List[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()}) -> None:
         self._pre_transforms = pre_transforms
         self._post_transforms = post_transforms
         self.pre_transforms : list[Transform] = []
@@ -52,13 +53,13 @@ class GroupTransform:
 class Group(dict):
 
     @config()
-    def __init__(self, groups_dest: dict[str, GroupTransform] = {"default": GroupTransform()}):
+    def __init__(self, groups_dest: Dict[str, GroupTransform] = {"default": GroupTransform()}):
         super().__init__(groups_dest)
 
 
 class DataSet(data.Dataset):
 
-    def __init__(self, hdf5 : HDF5, index : list[int], groups_src : dict[str, Group], dataAugmentationsList : list[DataAugmentationsList], patch : DatasetPatch | None, use_cache = True) -> None:
+    def __init__(self, hdf5 : HDF5, index : List[int], groups_src : Dict[str, Group], dataAugmentationsList : List[DataAugmentationsList], patch : Union[DatasetPatch, None], use_cache = True) -> None:
         self.data : dict[str, list[Dataset]] = {}
         self.cache : dict[str, set[int]] = {}
 
@@ -93,7 +94,7 @@ class DataSet(data.Dataset):
                     self.map[i] = (x,y,z)
                     i += 1
 
-    def getDatasetsFromIndex(self, group_dest: str, indexs: list[int]) -> list[Dataset]:
+    def getDatasetsFromIndex(self, group_dest: str, indexs: List[int]) -> List[Dataset]:
         data = self.data[group_dest]
         result : list[Dataset] = []
         for index in indexs:
@@ -124,13 +125,13 @@ class DataSet(data.Dataset):
         self.cache[group_dest]
         return self.data[group_dest][index].unload()
 
-    def getMap(self, index) -> tuple[int, int, int]:
+    def getMap(self, index) -> Tuple[int, int, int]:
         return self.map[index]
 
     def __len__(self) -> int:
         return len(self.map)
 
-    def __getitem__(self, index : int) -> dict[str, tuple[torch.Tensor, int, int, int]]:
+    def __getitem__(self, index : int) -> Dict[str, Tuple[torch.Tensor, int, int, int]]:
         data = {}
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
@@ -149,10 +150,10 @@ class Data(NeedDevice, ABC):
     
     @config("Dataset")
     def __init__(self,  dataset_filename : str = "default", 
-                        groups_src : dict[str, Group] = {"default" : Group()},
-                        patch : DatasetPatch | None = None,
+                        groups_src : Dict[str, Group] = {"default" : Group()},
+                        patch : Union[DatasetPatch, None] = None,
                         use_cache : bool = True,
-                        subset : list[int] | None = None,
+                        subset : Union[List[int], None] = None,
                         num_workers : int = 4,
                         pin_memory : bool = True,
                         batch_size : int = 1,
@@ -183,7 +184,7 @@ class Data(NeedDevice, ABC):
         return sizes[0]
 
     @abstractmethod
-    def getData(self) -> tuple[DataLoader, DataLoader | None] | DataLoader:
+    def getData(self) -> Union[Tuple[DataLoader, Union[DataLoader, None]], DataLoader]:
         assert self.device, "No device set"
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
@@ -200,11 +201,11 @@ class DataTrain(Data):
 
     @config("Dataset")
     def __init__(self,  dataset_filename : str = "default", 
-                        groups_src : dict[str, Group] = {"default" : Group()},
-                        augmentations : dict[str, DataAugmentationsList] | None = {"DataAugmentation_0" : DataAugmentationsList()},
-                        patch : DatasetPatch | None = DatasetPatch(),
+                        groups_src : Dict[str, Group] = {"default" : Group()},
+                        augmentations : Union[Dict[str, DataAugmentationsList], None] = {"DataAugmentation_0" : DataAugmentationsList()},
+                        patch : Union[DatasetPatch, None] = DatasetPatch(),
                         use_cache : bool = True,
-                        subset : list[int] | None = None,
+                        subset : Union[List[int], None] = None,
                         num_workers : int = 4,
                         pin_memory : bool = True,
                         batch_size : int = 1,
@@ -214,7 +215,7 @@ class DataTrain(Data):
         self.dataAugmentationsList = augmentations if augmentations else {}
         self.train_test_split_args = dict(train_size=train_size, shuffle=shuffle)
 
-    def getData(self, random_state : int | None) -> tuple[DataLoader, DataLoader | None] | DataLoader:
+    def getData(self, random_state : Union[int, None]) -> Union[Tuple[DataLoader, Union[DataLoader, None]], DataLoader]:
         super().getData()
         assert self.subset
         if len(self.subset) == 1:
@@ -247,17 +248,17 @@ class DataPrediction(Data):
 
     @config("Dataset")
     def __init__(self,  dataset_filename : str = "Dataset.h5", 
-                        groups_src : dict[str, Group] = {"default" : Group()},
-                        patch : DatasetPatch | None = DatasetPatch(),
+                        groups_src : Dict[str, Group] = {"default" : Group()},
+                        patch : Union[DatasetPatch, None] = DatasetPatch(),
                         use_cache : bool = True,
-                        subset : list[int] | None = None,
+                        subset : Union[List[int], None] = None,
                         num_workers : int = 4,
                         pin_memory : bool = True,
                         batch_size : int = 1) -> None:
 
         super().__init__(dataset_filename, groups_src, patch, use_cache, subset, num_workers, pin_memory, batch_size, False)
         
-    def getData(self) -> tuple[DataLoader, DataLoader | None] | DataLoader:
+    def getData(self) -> Union[Tuple[DataLoader, Union[DataLoader, None]], DataLoader]:
         super().getData()
         assert self.subset
         if len(self.subset) == 1:

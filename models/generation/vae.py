@@ -3,6 +3,7 @@ from DeepLearning_API.config import config
 
 import torch
 from networks import blocks
+from typing import Dict
 
 class VAE(network.Network):
 
@@ -96,7 +97,7 @@ class VAE(network.Network):
     def __init__(self,
                     optimizer: network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers: network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim: int = 3) -> None:
         super().__init__(in_channels = 1, init_type="kaiming", optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim, nb_batch_per_step=1)
         

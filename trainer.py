@@ -1,6 +1,4 @@
 import torch
-from torch.cuda.amp.autocast_mode import autocast
-from torch.backends import cudnn
 import tqdm
 import numpy as np
 import datetime
@@ -20,32 +18,34 @@ import pynvml
 
 from torch.utils.tensorboard.writer import SummaryWriter
 
+from typing import List, Union, Dict, List, Tuple
+
 class Trainer(NeedDevice):
 
     @config("Trainer")
     def __init__(   self,
                     model : ModelLoader = ModelLoader(),
                     dataset : DataTrain = DataTrain(),
-                    groupsInput : list[str] = ["default"],
+                    groupsInput : List[str] = ["default"],
                     train_name : str = "default",
-                    device : int | None = None,
-                    manual_seed : int | None = None,
+                    device : Union[int, None] = None,
+                    manual_seed : Union[int, None] = None,
                     epochs: int = 100,
-                    it_validation : int | None = None,
+                    it_validation : Union[int, None] = None,
                     autocast : bool = False,
-                    gradient_checkpoints: list[str] | None = None,
+                    gradient_checkpoints: Union[List[str], None] = None,
                     ema_decay : float = 0,
-                    images_log: list[str] | None = None,
-                    save_checkpoint_mode: str= "BEST") -> None:
+                    images_log: Union[List[str], None] = None,
+                    save_checkpoint_mode: str = "BEST") -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)
         self.manual_seed = manual_seed
         if self.manual_seed is not None:
             torch.manual_seed(self.manual_seed)
         
-        cudnn.deterministic = self.manual_seed is not None
-        cudnn.benchmark = self.manual_seed is None
-        
+        torch.backends.cudnn.deterministic = self.manual_seed is not None
+        torch.backends.cudnn.benchmark = self.manual_seed is None
+        torch.cuda.empty_cache()
         self.train_name = train_name
         self.dataset = dataset
         self.groupsInput = groupsInput
@@ -107,7 +107,7 @@ class Trainer(NeedDevice):
             self.modelEMA = torch.optim.swa_utils.AveragedModel(self.model, self.device, ema_avg)
 
             if state_dict is not None:
-                model = self.modelEMA.module 
+                model = self.modelEMA.module
                 if isinstance(model, Network):
                     model.load(state_dict, init = False, ema=True)
             
@@ -126,7 +126,7 @@ class Trainer(NeedDevice):
             for self.epoch in epoch_tqdm:
                 self._train()
                 
-    def getInput(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> dict[tuple[str, bool], torch.Tensor]:
+    def getInput(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]) -> Dict[Tuple[str, bool], torch.Tensor]:
         inputs = {(k, True) : data_dict[k][0].to(self.device) for k in self.groupsInput}
         inputs.update({(k, False) : v[0].to(self.device) for k, v in data_dict.items() if k not in self.groupsInput})
         return inputs
@@ -139,7 +139,7 @@ class Trainer(NeedDevice):
         description = lambda : "Training : Loss ("+" ".join(["{}({:.6f}) : {:.4f}".format(name, network.optimizer.param_groups[0]['lr'], network.measure.getLastValue()) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.device)
         with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = description(), total=len(self.dataloader_training), leave=False) as batch_iter:
             for _, data_dict in batch_iter:
-                with autocast(enabled=self.autocast):            
+                with torch.autocast(enabled=self.autocast):            
                     input = self.getInput(data_dict)
                     self.model(input)
                     if self.modelEMA is not None:
@@ -229,7 +229,7 @@ class Trainer(NeedDevice):
 
             os.rename(self.config_namefile, self.config_namefile.replace(".yml", "")+"_"+str(self.it)+".yml")
 
-    def _load(self) -> dict[str, dict[str, torch.Tensor]]:
+    def _load(self) -> Dict[str, Dict[str, torch.Tensor]]:
         if URL_MODEL().startswith("https://"):
             try:
                 state_dict = {URL_MODEL().split(":")[1]: torch.hub.load_state_dict_from_url(url=URL_MODEL().split(":")[0], map_location="cpu", check_hash=True)}
@@ -248,7 +248,7 @@ class Trainer(NeedDevice):
             self.it = state_dict['it']
         return state_dict
         
-    def _train_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]):
+    def _train_log(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]):
         assert self.tb, "SummaryWriter is None"
         models = {"" : self.model}
         if self.modelEMA is not None:
@@ -285,7 +285,7 @@ class Trainer(NeedDevice):
             if network.optimizer is not None:
                 self.tb.add_scalar("{}/Learning Rate".format(name), network.optimizer.param_groups[0]['lr'], self.it)
 
-    def _validation_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]):
+    def _validation_log(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]):
         assert self.tb, "SummaryWriter is None"
         models = {"" : self.model}
         if self.modelEMA is not None:

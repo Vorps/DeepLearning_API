@@ -6,21 +6,23 @@ from DeepLearning_API.models.segmentation import uNet
 from networks import blocks, network
 import torch.nn.functional as F
 
+from typing import Dict, List
+
 class VoxelMorph(network.Network):
 
     @config("VoxelMorph")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3,
-                    channels : list[int] = [4, 16,32,32,32],
+                    channels : List[int] = [4, 16,32,32,32],
                     blockConfig: blocks.BlockConfig = blocks.BlockConfig(),
                     nb_conv_per_stage: int = 2,
                     downSampleMode: str = "MAXPOOL",
                     upSampleMode: str = "CONV_TRANSPOSE",
                     attention : bool = False,
-                    shape : list[int] = [192, 192, 192],
+                    shape : List[int] = [192, 192, 192],
                     int_steps : int = 7,
                     int_downsize : int = 2):
         super().__init__(in_channels = channels[0], optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim)
@@ -48,7 +50,7 @@ class VoxelMorph(network.Network):
 
 class SpatialTransformer(torch.nn.Module):
     
-    def __init__(self, size : list[int]):
+    def __init__(self, size : List[int]):
         super().__init__()
         vectors = [torch.arange(0, s) for s in size]
         grids = torch.meshgrid(vectors, indexing='ij')

@@ -5,7 +5,8 @@ import torch.nn.functional as F
 import importlib
 
 import torch
-    
+from typing import Dict, List
+
 class MappingNetwork(network.ModuleArgsDict):
     def __init__(self, z_dim: int, c_dim: int, w_dim: int, num_layers: int, embed_features: int, layer_features: int):
         super().__init__()
@@ -96,7 +97,7 @@ class ModulatedConv(torch.nn.Module):
         
 class UNetBlock(network.ModuleArgsDict):
 
-    def __init__(self, w_dim: int, channels: list[int], nb_conv_per_stage: int, blockConfig: blocks.BlockConfig, downSampleMode: blocks.DownSampleMode, upSampleMode: blocks.UpSampleMode, attention : bool, dim: int, i : int = 0) -> None:
+    def __init__(self, w_dim: int, channels: List[int], nb_conv_per_stage: int, blockConfig: blocks.BlockConfig, downSampleMode: blocks.DownSampleMode, upSampleMode: blocks.UpSampleMode, attention : bool, dim: int, i : int = 0) -> None:
         super().__init__()
         if i > 0:
             self.add_module(downSampleMode.name, blocks.downSample(in_channels=channels[0], out_channels=channels[1], downSampleMode=downSampleMode, dim=dim))
@@ -124,8 +125,8 @@ class Generator(network.Network):
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     patch : ModelPatch = ModelPatch(),
-                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
-                    channels: list[int]=[1, 64, 128, 256, 512, 1024],
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    channels: List[int]=[1, 64, 128, 256, 512, 1024],
                     nb_batch_per_step: int = 64,
                     z_dim: int = 512,
                     c_dim: int = 1,

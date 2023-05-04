@@ -7,14 +7,14 @@ from DeepLearning_API.utils import _getModule, NeedDevice, Attribute
 from DeepLearning_API.config import config
 from abc import ABC, abstractmethod
 import torch.nn.functional as F
-from typing import Any
+from typing import Any, List, Union, Dict, Tuple
 
 class Transform(NeedDevice, ABC):
     
     def __init__(self, save = None) -> None:
         self.save = save
     
-    def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transformShape(self, shape: List[int], cache_attribute: Attribute) -> List[int]:
         return shape
 
     @abstractmethod
@@ -59,7 +59,7 @@ class Clip(Transform):
 class Normalize(Transform):
 
     @config("Normalize")
-    def __init__(self, lazy : bool = False, channels: list[int] | None = None, min_value : float = -1, max_value : float = 1) -> None:
+    def __init__(self, lazy : bool = False, channels: Union[List[int], None] = None, min_value : float = -1, max_value : float = 1) -> None:
         super().__init__()
         assert max_value > min_value
         self.lazy = lazy
@@ -105,7 +105,7 @@ class Normalize(Transform):
 class Standardize(Transform):
 
     @config("Standardize")
-    def __init__(self, lazy : bool = False, mean: list[float] | None = None, std: list[float] | None= None) -> None:
+    def __init__(self, lazy : bool = False, mean: Union[List[float], None] = None, std: Union[List[float], None]= None) -> None:
         super().__init__()
         self.lazy = lazy
         self.mean = mean
@@ -149,7 +149,7 @@ class TensorCast(Transform):
 class Padding(Transform):
 
     @config("Padding")
-    def __init__(self, padding : list[int] = [0,0], mode : str = "default:constant,reflect,replicate,circular", dim: int = 0) -> None:
+    def __init__(self, padding : List[int] = [0,0], mode : str = "default:constant,reflect,replicate,circular", dim: int = 0) -> None:
         super().__init__()
         self.padding = padding
         self.mode = mode
@@ -164,12 +164,12 @@ class Padding(Transform):
             cache_attribute["Origin"] = origin.dot(np.linalg.inv(matrix))
         return F.pad(input.unsqueeze(0), tuple([0, 0]*(len(input.shape)-self.dim-1)+self.padding+[0, 0]*(self.dim)), self.mode.split(":")[0], float(self.mode.split(":")[1]) if len(self.mode.split(":")) == 2 else 0).squeeze()
 
-    def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transformShape(self, shape: List[int], cache_attribute: Attribute) -> List[int]:
         if self.dim > 0:
             shape[self.dim-1] += sum(self.padding)
         return shape
 
-    def inverse(self, input : torch.Tensor, cache_attribute: dict[str, torch.Tensor]) -> torch.Tensor:
+    def inverse(self, input : torch.Tensor, cache_attribute: Dict[str, torch.Tensor]) -> torch.Tensor:
         if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute and self.dim > 0:
             cache_attribute.pop("Origin")
         slices = []
@@ -191,7 +191,7 @@ class Squeeze(Transform):
     def __call__(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return input.squeeze(self.dim)
 
-    def inverse(self, input : torch.Tensor, cache_attribute: dict[str, Any]) -> torch.Tensor:
+    def inverse(self, input : torch.Tensor, cache_attribute: Dict[str, Any]) -> torch.Tensor:
         return input.unsqueeze(self.dim)
 
 class Resample(Transform, ABC):
@@ -199,7 +199,7 @@ class Resample(Transform, ABC):
     def __init__(self, save: str) -> None:
         super().__init__(save)
 
-    def _resample(self, input: torch.Tensor, size: list[int]) -> torch.Tensor:
+    def _resample(self, input: torch.Tensor, size: List[int]) -> torch.Tensor:
         args = {}
         if input.dtype == torch.uint8:
             mode = "nearest"
@@ -216,7 +216,7 @@ class Resample(Transform, ABC):
         pass
     
     @abstractmethod
-    def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transformShape(self, shape: List[int], cache_attribute: Attribute) -> List[int]:
         pass
     
     def inverse(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -227,11 +227,11 @@ class Resample(Transform, ABC):
 class ResampleIsotropic(Resample):
 
     @config("ResampleIsotropic") 
-    def __init__(self, spacing : list[float] = [1., 1., 1.], save : str = "name.h5") -> None:
+    def __init__(self, spacing : List[float] = [1., 1., 1.], save : str = "name.h5") -> None:
         super().__init__(save)
         self.spacing = torch.tensor(spacing, dtype=torch.float64)
         
-    def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transformShape(self, shape: List[int], cache_attribute: Attribute) -> List[int]:
         assert "Spacing" in cache_attribute, "Error no spacing"
         resize_factor = self.spacing/cache_attribute["Spacing"].flip(0)
         return  [int(x) for x in (torch.tensor(shape) * 1/resize_factor)]
@@ -245,11 +245,11 @@ class ResampleIsotropic(Resample):
 class ResampleResize(Resample):
 
     @config("ResampleResize")
-    def __init__(self, size : list[int] = [100,512,512], save : str = "name.h5") -> None:
+    def __init__(self, size : List[int] = [100,512,512], save : str = "name.h5") -> None:
         super().__init__(save)
         self.size = size
 
-    def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transformShape(self, shape: List[int], cache_attribute: Attribute) -> List[int]:
         return self.size
     
     def __call__(self, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -284,13 +284,13 @@ class Gradient(Transform):
         self.per_dim = per_dim
     
     @staticmethod
-    def _image_gradient2D(image : torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _image_gradient2D(image : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         dx = image[:, 1:, :] - image[:, :-1, :]
         dy = image[:, :, 1:] - image[:, :, :-1]
         return torch.nn.ConstantPad2d((0,0,0,1), 0)(dx), torch.nn.ConstantPad2d((0,1,0,0), 0)(dy)
 
     @staticmethod
-    def _image_gradient3D(image : torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _image_gradient3D(image : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         dx = image[:, 1:, :, :] - image[:, :-1, :, :]
         dy = image[:, :, 1:, :] - image[:, :, :-1, :]
         dz = image[:, :, :, 1:] - image[:, :, :, :-1]
@@ -321,7 +321,7 @@ class ArgMax(Transform):
 class FlatLabel(Transform):
 
     @config("FlatLabel")
-    def __init__(self, labels: list[int] | None = None) -> None:
+    def __init__(self, labels: Union[List[int], None] = None) -> None:
         super().__init__()
         self.labels = labels
 

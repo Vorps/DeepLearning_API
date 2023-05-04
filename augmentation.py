@@ -9,6 +9,7 @@ from torch.functional import Tensor
 from DeepLearning_API.config import config
 from DeepLearning_API.utils import _getModule, NeedDevice
 import torch.nn.functional as F
+from typing import List, Dict
 
 class DataAugmentation(NeedDevice, ABC):
 
@@ -21,14 +22,14 @@ class DataAugmentation(NeedDevice, ABC):
     def load(self, nb: int, prob: float):
         self.who_function = lambda : torch.rand(nb) < prob
 
-    def state_init(self, index : int, shape: list[int], cache_attribute: dict[str, torch.Tensor]):
+    def state_init(self, index : int, shape: List[int], cache_attribute: Dict[str, torch.Tensor]):
         if self.lastIndex != index:
             self.who = self.who_function()
             self.nb = len([i for i in self.who if i])
             self._state_init(shape, cache_attribute)
 
     @abstractmethod
-    def _state_init(self, shape: list[int], cache_attribute: dict[str, torch.Tensor]):
+    def _state_init(self, shape: List[int], cache_attribute: Dict[str, torch.Tensor]):
         pass
     
     def __call__(self, input : torch.Tensor) -> torch.Tensor:
@@ -48,7 +49,7 @@ class Prob():
 class DataAugmentationsList():
 
     @config()
-    def __init__(self, nb : int = 10, dataAugmentations: dict[str, Prob] = {"default:RandomElastixTransform" : Prob(1)}) -> None:
+    def __init__(self, nb : int = 10, dataAugmentations: Dict[str, Prob] = {"default:RandomElastixTransform" : Prob(1)}) -> None:
         self.nb = nb
         self.dataAugmentations : list[DataAugmentation] = []
         self.dataAugmentationsLoader = dataAugmentations
@@ -65,7 +66,7 @@ class DataAugmentationsList():
 class RandomRotateTransform(DataAugmentation):
 
     @config("RandomRotateTransform")
-    def __init__(self, min_angles: list[float] = [0, 0, 0], max_angles: list[float] = [360, 360, 360]) -> None:
+    def __init__(self, min_angles: List[float] = [0, 0, 0], max_angles: List[float] = [360, 360, 360]) -> None:
         super().__init__()
         assert len(min_angles) == len(max_angles)
         assert len(min_angles) == 3 or len(min_angles) == 1
@@ -81,7 +82,7 @@ class RandomRotateTransform(DataAugmentation):
     def _rotation2DMatrix(self, rotation : torch.Tensor) -> torch.Tensor:
         return torch.cat((torch.tensor([[torch.cos(rotation[0]), -torch.sin(rotation[0])], [torch.sin(rotation[0]), torch.cos(rotation[0])]]), torch.zeros((2, 1))), dim=1)
     
-    def _state_init(self, shape: list[int], cache_attribute: dict[str, torch.Tensor]):
+    def _state_init(self, shape: List[int], cache_attribute: Dict[str, torch.Tensor]):
         func = self._rotation3DMatrix if len(self.range_angle)== 3 else self._rotation2DMatrix
         angles = torch.rand((self.nb, len(self.range_angle)))*torch.tensor([max_angle-min_angle for min_angle, max_angle in self.range_angle])+torch.tensor([min_angle for min_angle, _ in self.range_angle])/360*2*torch.pi
         self.matrix = torch.cat([torch.unsqueeze(func(value), dim=0) for value in angles], dim=0)
@@ -104,7 +105,7 @@ class RandomElastixTransform(DataAugmentation):
         new_locs = new_locs[..., [2, 1, 0]]
         return new_locs
 
-    def _state_init(self, shape: list[int], cache_attribute: dict[str, torch.Tensor]):
+    def _state_init(self, shape: List[int], cache_attribute: Dict[str, torch.Tensor]):
         shape = shape
         dim = len(shape)
 
@@ -143,12 +144,12 @@ class RandomElastixTransform(DataAugmentation):
 class RandomFlipTransform(DataAugmentation):
 
     @config("RandomFlipTransform")
-    def __init__(self, flip: list[float] = [0.5, 0.25 ,0.25]) -> None:
+    def __init__(self, flip: List[float] = [0.5, 0.25 ,0.25]) -> None:
         super().__init__()
         self.flip = flip
         self.dim_flip : torch.Tensor
 
-    def _state_init(self, shape: list[int], cache_attribute: dict[str, torch.Tensor]):
+    def _state_init(self, shape: List[int], cache_attribute: Dict[str, torch.Tensor]):
         self.dim_flip = torch.rand((self.nb, len(self.flip))) < torch.tensor(self.flip)
 
     def _compute(self, input : torch.Tensor) -> torch.Tensor:

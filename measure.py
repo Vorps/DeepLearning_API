@@ -10,10 +10,11 @@ from DeepLearning_API.config import config
 from DeepLearning_API.utils import NeedDevice, _getModule
 from DeepLearning_API.networks.blocks import LatentDistribution
 from DeepLearning_API.networks.network import ModelLoader, Network
-from typing import Callable
+from typing import Callable, Tuple, List
 
 import torch.nn.functional as F
 import itertools
+
 
 
 modelsRegister = {}
@@ -72,13 +73,13 @@ class GradientImages(Criterion):
         super().__init__()
     
     @staticmethod
-    def _image_gradient2D(image : torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _image_gradient2D(image : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         dx = image[:, :, 1:, :] - image[:, :, :-1, :]
         dy = image[:, :, :, 1:] - image[:, :, :, :-1]
         return dx, dy
 
     @staticmethod
-    def _image_gradient3D(image : torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _image_gradient3D(image : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         dx = image[:, :, 1:, :, :] - image[:, :, :-1, :, :]
         dy = image[:, :, :, 1:, :] - image[:, :, :, :-1, :]
         dz = image[:, :, :, :, 1:] - image[:, :, :, :, :-1]
@@ -295,7 +296,7 @@ class Contrastive(Criterion):
         self.loss = torch.nn.MSELoss(reduction="mean")
         self.alpha = alpha
 
-    def J_ij(self, D: Callable[[int, int], torch.Tensor], i: int, j: int, negative_index: list[int]) -> torch.Tensor:
+    def J_ij(self, D: Callable[[int, int], torch.Tensor], i: int, j: int, negative_index: List[int]) -> torch.Tensor:
         loss = torch.tensor(0, dtype=torch.float, device=self.device)
         for k in negative_index:
             loss += torch.exp(self.alpha-D(i, k))

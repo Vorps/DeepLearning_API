@@ -15,11 +15,13 @@ from DeepLearning_API.HDF5 import Accumulator
 from DeepLearning_API.networks.network import Measure, ModelLoader
 from DeepLearning_API.transform import Transform, TransformLoader
 
+from typing import Tuple, Dict, Union, List
+
 from torch.utils.tensorboard.writer import SummaryWriter
 
 class OutDataset(DatasetUtils, NeedDevice, ABC):
 
-    def __init__(self, filename: str, group: str, pre_transforms : dict[str, TransformLoader], post_transforms : dict[str, TransformLoader], patchCombine: str | None) -> None: 
+    def __init__(self, filename: str, group: str, pre_transforms : Dict[str, TransformLoader], post_transforms : Dict[str, TransformLoader], patchCombine: Union[str, None]) -> None: 
         super().__init__(filename, read=False)
         self.group = group
         self._pre_transforms = pre_transforms
@@ -62,7 +64,7 @@ class OutDataset(DatasetUtils, NeedDevice, ABC):
     def getOutput(self, index: int, dataset: DataSet) -> torch.Tensor:
         pass
 
-    def write(self, index: int, name: str, layer: torch.Tensor, measure: dict[str, float]):
+    def write(self, index: int, name: str, layer: torch.Tensor, measure: Dict[str, float]):
         self.attributes[index].update({k : v for k, v in measure.items()})
         self.writeData(self.group, name, layer.numpy(), self.attributes[index][0])
         self.attributes.pop(index)
@@ -70,7 +72,7 @@ class OutDataset(DatasetUtils, NeedDevice, ABC):
 class OutSameAsGroupDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: str | None = None) -> None:
+    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None) -> None:
         super().__init__(dataset_filename, group, pre_transforms, post_transforms, patchCombine)
         self.group_src, self.group_dest = sameAsGroup.split("/")
 
@@ -102,7 +104,7 @@ class OutSameAsGroupDataset(OutDataset):
 class OutLayerDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", overlap : list[int] | None = None, pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: str | None = None) -> None:
+    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", overlap : Union[List[int], None] = None, pre_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : Dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None) -> None:
         super().__init__(dataset_filename, group, pre_transforms, post_transforms, patchCombine)
         self.overlap = overlap
         
@@ -142,10 +144,10 @@ class Predictor(NeedDevice):
                     model: ModelLoader = ModelLoader(),
                     dataset: DataPrediction = DataPrediction(),
                     train_name: str = "name",
-                    groupsInput: list[str] = ["default"],
-                    device: int | None = None,
-                    outsDataset: dict[str, OutDatasetLoader] | None = {"default:Default" : OutDatasetLoader()},
-                    images_log: list[str] = []) -> None:
+                    groupsInput: List[str] = ["default"],
+                    device: Union[int, None] = None,
+                    outsDataset: Union[Dict[str, OutDatasetLoader], None] = {"default:Default" : OutDatasetLoader()},
+                    images_log: List[str] = []) -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)
 
@@ -188,7 +190,7 @@ class Predictor(NeedDevice):
             self.tb.close()
         pynvml.nvmlShutdown()
 
-    def getInput(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> dict[tuple[str, bool], torch.Tensor]:
+    def getInput(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]) -> Dict[Tuple[str, bool], torch.Tensor]:
         inputs = {(k, True) : data_dict[k][0].to(self.device) for k in self.groupsInput}
         inputs.update({(k, False) : v[0].to(self.device) for k, v in data_dict.items() if k not in self.groupsInput})
         return inputs
@@ -266,7 +268,7 @@ class Predictor(NeedDevice):
                 batch_iter.set_description(description())
                 self.it += 1
 
-    def _predict_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]):
+    def _predict_log(self, data_dict : Dict[str, Tuple[torch.Tensor, int, int, int]]):
         assert self.tb, "SummaryWriter is None"
         for name, network in self.model.getNetworks().items():
             if network.measure is not None:

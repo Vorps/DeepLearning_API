@@ -9,13 +9,13 @@ import torch
 import datetime
 from abc import ABC
 from enum import Enum
-from typing import Callable, Any
+from typing import Callable, Any, Dict, Tuple, Union, List
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
 
-class Attribute(dict[str, Any]):
+class Attribute(Dict[str, Any]):
 
-    def __init__(self, attributes : dict[str, Any] = {}) -> None:
+    def __init__(self, attributes : Dict[str, Any] = {}) -> None:
         super().__init__()
         for k, v in attributes.items():
             super().__setitem__(k, v)
@@ -38,11 +38,10 @@ class Attribute(dict[str, Any]):
         else:
             raise NameError("{} not in cache_attribute".format(key))
 
-
     def __contains__(self, key: str) -> bool:
         return len([k for k in super().keys() if k.startswith(key)]) > 0
 
-def dataset_to_data(dataset : h5py.Dataset) -> tuple[np.ndarray, Attribute]:
+def dataset_to_data(dataset : h5py.Dataset) -> Tuple[np.ndarray, Attribute]:
     data = np.zeros(dataset.shape, dataset.dtype)
     dataset.read_direct(data)
     attrs = Attribute()
@@ -67,7 +66,7 @@ def dataset_to_image(dataset : h5py.Dataset) -> sitk.Image:
     data, attributes = dataset_to_data(dataset)
     return data_to_image(data, attributes)
 
-def data_to_dataset(h5 : h5py.Group, name : str, data : np.ndarray, attributes : Attribute | None = None) -> None:
+def data_to_dataset(h5 : h5py.Group, name : str, data : np.ndarray, attributes : Union[Attribute, None] = None) -> None:
     if name in h5:
         del h5[name]
     if attributes is None:
@@ -75,13 +74,12 @@ def data_to_dataset(h5 : h5py.Group, name : str, data : np.ndarray, attributes :
     dataset = h5.create_dataset(name, data=data, dtype=data.dtype, chunks=None)
     dataset.attrs.update({k : (v if isinstance(v.numpy() if isinstance(v, torch.Tensor) else v, np.ndarray) else str(v)) for k, v in attributes.items()})
 
-def image_to_dataset(h5 : h5py.Group, name : str, image : sitk.Image, attributes : Attribute | None = None) -> None:
+def image_to_dataset(h5 : h5py.Group, name : str, image : sitk.Image, attributes : Union[Attribute, None] = None) -> None:
     if attributes is None:
         attributes = Attribute()
     attributes["Origin"] = image.GetOrigin()
     attributes["Spacing"] = image.GetSpacing()
     attributes["Direction"] = image.GetDirection()
-
     data = sitk.GetArrayFromImage(image)
     if image.GetNumberOfComponentsPerPixel() == 1:
         data = np.expand_dims(data, 0)
@@ -95,7 +93,7 @@ class DatasetUtils():
         self.filename = filename
         self.data = {}
         self.read = read
-        self.h5: h5py.File | None = None
+        self.h5: Union[h5py.File, None] = None
 
     def __enter__(self):
         if self.read:
@@ -114,7 +112,7 @@ class DatasetUtils():
         if self.h5 is not None:
             self.h5.close()
 
-    def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Attribute | None = None) -> None:
+    def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Union[Attribute, None] = None) -> None:
         assert self.h5
         if group not in self.h5:
             self.h5.create_group(group)
@@ -122,7 +120,7 @@ class DatasetUtils():
         if isinstance(h5_group, h5py.Group):
             image_to_dataset(h5_group, name, image, attributes)
     
-    def writeData(self, group : str, name : str, data : np.ndarray, attributes : Attribute | None = None) -> None:
+    def writeData(self, group : str, name : str, data : np.ndarray, attributes : Union[Attribute, None] = None) -> None:
         assert self.h5
         if group not in self.h5:
             self.h5.create_group(group)
@@ -185,7 +183,7 @@ def memoryForecast(memory_init : float, i : float, size : float) -> str:
     forecast = memory_init + ((current_memory-memory_init)*size/i) if i > 0 else 0
     return "Memory forecast ({:.2f}G ({:.2f} %))".format(forecast, forecast/(psutil.virtual_memory()[0]/2**30)*100)
 
-def gpuInfo(device : int | torch.device) -> str:
+def gpuInfo(device : Union[int, torch.device]) -> str:
     if isinstance(device, torch.device):
         if str(device).startswith("cuda:"):
             device = int(str(device).replace("cuda:", ""))
@@ -198,7 +196,7 @@ def gpuInfo(device : int | torch.device) -> str:
         return ""
     return  "GPU({}) Memory GPU ({:.2f}G ({:.2f} %)) | {} | Power {}W | Temperature {}°C".format(device, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
 
-def gpuMemory(device : int | torch.device) -> str:
+def gpuMemory(device : Union[int, torch.device]) -> str:
     if isinstance(device, torch.device):
         if str(device).startswith("cuda:"):
             device = int(str(device).replace("cuda:", ""))
@@ -211,7 +209,7 @@ def gpuMemory(device : int | torch.device) -> str:
         return ""
     return  "Memory GPU ({:.2f}G)".format(float(memory.used)/(10**9))
 
-def getAvailableDevice() -> list[int]:
+def getAvailableDevice() -> List[int]:
     pynvml.nvmlInit()
     available = []
     deviceCount = pynvml.nvmlDeviceGetCount()
@@ -224,7 +222,7 @@ def getAvailableDevice() -> list[int]:
     pynvml.nvmlShutdown()
     return available
 
-def getDevice(device : int | None) -> torch.device:
+def getDevice(device : Union[int,None]) -> torch.device:
     if torch.cuda.is_available():
         if device is None:
             availableDevice = getAvailableDevice()
@@ -282,7 +280,7 @@ class State(Enum):
     def __str__(self) -> str:
         return self.value
 
-def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: list[int], nb_patch_per_dim : list[tuple[int, bool]], overlap: list[int] | None) -> list[tuple[slice]]:
+def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: List[int], nb_patch_per_dim : List[Tuple[int, bool]], overlap: Union[List[int], None]) -> List[Tuple[slice]]:
     patch_slices = []
     slices : list[list[slice]] = []
     if overlap is None:
@@ -306,7 +304,7 @@ def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: list[int], nb_patch_p
         patch_slices.append(tuple(chunk))
     return patch_slices
 
-def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overlap: list[int] | None) -> tuple[list[tuple[slice]], list[tuple[int, bool]]]:
+def get_patch_slices_from_shape(patch_size: List[int], shape : List[int], overlap: Union[List[int], None]) -> Tuple[List[Tuple[slice]], List[Tuple[int, bool]]]:
     if len(shape) != len(patch_size) or not all(a >= b for a, b in zip(shape, patch_size)):
         return [tuple([slice(0, s) for s in shape])], [(1, True)]*len(shape)
 
@@ -345,7 +343,7 @@ def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overla
     return patch_slices, nb_patch_per_dim
 
 
-def resampleITK(path, image_reference : sitk.Image, image : sitk.Image, transforms_files : dict[str, bool], mask = True):
+def resampleITK(path, image_reference : sitk.Image, image : sitk.Image, transforms_files : Dict[str, bool], mask = True):
     transforms = []
     for transform_file, invert in transforms_files.items():
         transform = sitk.ReadTransform(path+transform_file+".itk.txt")
@@ -379,7 +377,7 @@ def resampleITK(path, image_reference : sitk.Image, image : sitk.Image, transfor
     result_transform = sitk.CompositeTransform(transforms)
     return sitk.Resample(image, image_reference, result_transform, sitk.sitkNearestNeighbor if mask else sitk.sitkBSpline, *{"defaultPixelValue" : 0 if mask else -1024})
 
-def formatMaskLabel(mask: sitk.Image, labels: list[tuple[int, int]]) -> sitk.Image:
+def formatMaskLabel(mask: sitk.Image, labels: List[Tuple[int, int]]) -> sitk.Image:
     data = sitk.GetArrayFromImage(mask)
     result_data = np.zeros_like(data, np.uint8)
 

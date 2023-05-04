@@ -1,7 +1,7 @@
 import ast
 from enum import Enum
 import importlib
-from typing import Callable
+from typing import Callable, List, Dict, Union
 import torch
 from DeepLearning_API.config import config
 from DeepLearning_API.networks import network
@@ -40,7 +40,7 @@ class DownSampleMode(Enum):
     AVGPOOL = 1,
     CONV_STRIDE = 2
 
-def getTorchModule(name_fonction : str, dim : int | None = None) -> torch.nn.Module:
+def getTorchModule(name_fonction : str, dim : Union[int, None] = None) -> torch.nn.Module:
     return getattr(importlib.import_module("torch.nn"), "{}".format(name_fonction) + ("{}d".format(dim) if dim is not None else ""))
 
 class BlockConfig():
@@ -73,7 +73,7 @@ class BlockConfig():
 
 class ConvBlock(network.ModuleArgsDict):
     
-    def __init__(self, in_channels : int, out_channels : int, nb_conv: int, blockConfig : BlockConfig, dim : int, alias : list[list[str]]=[[], [], []]) -> None:
+    def __init__(self, in_channels : int, out_channels : int, nb_conv: int, blockConfig : BlockConfig, dim : int, alias : List[List[str]]=[[], [], []]) -> None:
         super().__init__()
         for i in range(nb_conv):
             self.add_module("Conv_{}".format(i), blockConfig.getConv(in_channels, out_channels, dim), alias=alias[0])
@@ -129,7 +129,7 @@ class Unsqueeze(ApplyFunction):
 
 class Permute(ApplyFunction):
 
-    def __init__(self, dims : list[int]):
+    def __init__(self, dims : List[int]):
         super().__init__(lambda input : torch.permute(input, self.dims))
         self.dims = dims
 
@@ -212,7 +212,7 @@ class AddNoiseImage(torch.nn.Module):
     
 class Const(torch.nn.Module):
 
-    def __init__(self, shape: list[int], std: float) -> None:
+    def __init__(self, shape: List[int], std: float) -> None:
         super().__init__()
         self.noise = torch.nn.parameter.Parameter(torch.randn(shape)*std)
         
@@ -246,7 +246,7 @@ class HistogramNoise(torch.nn.Module):
         return result
 
 class View(torch.nn.Module):
-	def __init__(self, size: list[int]):
+	def __init__(self, size: List[int]):
 		super().__init__()
 		self.size = size
 
@@ -275,7 +275,7 @@ class LatentDistribution(network.ModuleArgsDict):
             linear = torch.nn.Linear(self.latentDim, torch.prod(shape[1:])).to(input.device)
             return linear(input).view(-1, *[int(i) for i in shape[1:]])
             
-    def __init__(self, out_channels: int, out_is_channel : bool, latentDim: int, modelDim: int, out_branch : list[int]) -> None:
+    def __init__(self, out_channels: int, out_is_channel : bool, latentDim: int, modelDim: int, out_branch : List[int]) -> None:
         super().__init__()
         if not out_is_channel:
             self.add_module("ToChannels", ToChannels(modelDim))

@@ -5,6 +5,8 @@ from DeepLearning_API.networks import network, blocks
 from DeepLearning_API.HDF5 import ModelPatch
 from DeepLearning_API.config import config
 
+from typing import List, Dict
+
 """
 'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth', dim = 2, in_channels = 3, depths=[2, 2, 2, 2], widths = [64, 64, 128, 256, 512],  num_classes=1000, useBottleneck=False
 
@@ -76,8 +78,8 @@ class ResNetEncoder(network.ModuleArgsDict):
     
     def __init__(self,
                     in_channels: int,
-                    depths: list[int],
-                    widths: list[int],
+                    depths: List[int],
+                    widths: List[int],
                     useBottleneck : bool,
                     dim : int):
         super().__init__()
@@ -102,12 +104,12 @@ class ResNet(network.Network):
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : ModelPatch = ModelPatch(),
                     dim : int = 3,
                     in_channels: int = 1,
-                    depths: list[int] = [2, 2, 2, 2],
-                    widths: list[int] = [64, 64, 128, 256, 512],
+                    depths: List[int] = [2, 2, 2, 2],
+                    widths: List[int] = [64, 64, 128, 256, 512],
                     num_classes: int = 10, 
                     useBottleneck=False):
         super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02)

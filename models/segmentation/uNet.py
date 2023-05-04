@@ -2,11 +2,11 @@ from DeepLearning_API.config import config
 from DeepLearning_API.networks import network, blocks
 import torch
 from DeepLearning_API.HDF5 import ModelPatch
-
+from typing import List, Dict, Union
 
 class UNetBlock(network.ModuleArgsDict):
 
-    def __init__(self, channels: list[int], nb_conv_per_stage: int, blockConfig: blocks.BlockConfig, downSampleMode: blocks.DownSampleMode, upSampleMode: blocks.UpSampleMode, attention : bool, dim: int, i : int = 0) -> None:
+    def __init__(self, channels: List[int], nb_conv_per_stage: int, blockConfig: blocks.BlockConfig, downSampleMode: blocks.DownSampleMode, upSampleMode: blocks.UpSampleMode, attention : bool, dim: int, i : int = 0) -> None:
         super().__init__()
         if i > 0:
             self.add_module(downSampleMode.name, blocks.downSample(in_channels=channels[0], out_channels=channels[1], downSampleMode=downSampleMode, dim=dim))
@@ -34,10 +34,10 @@ class UNet(network.Network):
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
-                    patch : ModelPatch | None = None,
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    patch : Union[ModelPatch, None] = None,
                     dim : int = 3,
-                    channels: list[int]=[1, 64, 128, 256, 512, 1024],
+                    channels: List[int]=[1, 64, 128, 256, 512, 1024],
                     nb_class: int = 2,
                     blockConfig: blocks.BlockConfig = blocks.BlockConfig(),
                     nb_conv_per_stage: int = 2,

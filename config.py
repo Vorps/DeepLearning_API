@@ -4,8 +4,9 @@ import ruamel.yaml
 import inspect 
 import collections
 from copy import deepcopy
-
 import torch
+
+from typing import Union, List
 
 from DeepLearning_API import CONFIG_FILE
 
@@ -96,7 +97,7 @@ class Config():
         return default.split(":")[1] if len(default.split(":")) > 1 else default
 
     @staticmethod
-    def _getInputDefault(name : str, default : str | None, isList : bool = False) -> list[str | None] | str | None:
+    def _getInputDefault(name : str, default : Union[str, None], isList : bool = False) -> Union[List[Union[str, None]], str, None]:
         if isinstance(default, str) and (default == "default" or (len(default.split(":")) > 1 and default.split(":")[0] == "default")):
             if os.environ["DEEP_LEANING_API_CONFIG_MODE"] == "interactive":
                 if isList:
@@ -165,7 +166,7 @@ class Config():
             value = None
         return value
                     
-def config(key : str | None = None):
+def config(key : Union[str, None] = None):
     def decorator(function):
         def new_function(*args, **kwargs):
             if "config" in kwargs:
@@ -191,25 +192,27 @@ def config(key : str | None = None):
                             continue
                         if not annotation == inspect._empty:
                             if annotation not in [int, str, bool, float, torch.Tensor]:
-                                if str(annotation).startswith("list") or str(annotation).startswith("tuple"):
-                                    if annotation.__args__[0] in [int, str, bool, float]:
-                                        values = config.getValue(param.name, param.default)
-                                        kwargs[param.name] = values
-                                    else:
-                                        raise ConfigError()
-                                elif str(annotation).startswith("dict"):
-                                    if annotation.__args__[0] == str:
-                                        values = config.getValue(param.name, param.default)
-                                        if values is not None and annotation.__args__[1] not in [int, str, bool, float]:
-                                            kwargs[param.name] = {value : annotation.__args__[1](config = filename, DL_args = key_tmp+"."+param.name+"."+value) for value in values}
-                                        else:
+                                if "__extra__" in annotation.__dict__:
+                                    if annotation.__extra__ == list or annotation.__extra__ == tuple:
+                                        if annotation.__args__[0] in [int, str, bool, float]:
+                                            values = config.getValue(param.name, param.default)
                                             kwargs[param.name] = values
-                                    else: 
+                                        else:
+                                            raise ConfigError()
+                                    elif annotation.__extra__ == dict:
+                                        if annotation.__args__[0] == str:
+                                            values = config.getValue(param.name, param.default)
+                                            if values is not None and annotation.__args__[1] not in [int, str, bool, float]:
+                                                kwargs[param.name] = {value : annotation.__args__[1](config = filename, DL_args = key_tmp+"."+param.name+"."+value) for value in values}
+                                            else:
+                                                kwargs[param.name] = values
+                                        else: 
+                                            raise ConfigError()
+                                    else:
                                         raise ConfigError()
                                 else:
                                     kwargs[param.name] = annotation(config = filename, DL_args = key_tmp)
                                     if os.environ['DEEP_LEARNING_API_CONFIG_VARIABLE'] == "True":
-                                        os.environ['DEEP_LEARNING_API_CONFIG_VARIABLE'] = "False"
                                         kwargs[param.name] = None
                             else:
                                 kwargs[param.name] = config.getValue(param.name, param.default)

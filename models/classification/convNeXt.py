@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from DeepLearning_API.networks import network, blocks
 from DeepLearning_API.config import config
 from DeepLearning_API.HDF5 import ModelPatch
+from typing import List, Dict
 
 """
 "convnext_tiny_1k": "https://dl.fbaipublicfiles.com/convnext/convnext_tiny_1k_224_ema.pth", depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]
@@ -113,7 +114,7 @@ class ConvNexStage(network.ModuleArgsDict):
     def __init__(   self, 
                     features: int,
                     depth: int, 
-                    drop_p: list[float],
+                    drop_p: List[float],
                     dim : int):
         super().__init__()
         for i in range(depth):
@@ -130,8 +131,8 @@ class ConvNextEncoder(network.ModuleArgsDict):
 
     def __init__(   self,
                     in_channels: int,
-                    depths: list[int],
-                    widths: list[int],
+                    depths: List[int],
+                    widths: List[int],
                     drop_p: float,
                     dim : int):
         super().__init__()
@@ -146,7 +147,7 @@ class ConvNextEncoder(network.ModuleArgsDict):
 
 class Head(network.ModuleArgsDict):
 
-    def __init__(self, in_features : int, num_classes : list[int], dim : int) -> None:
+    def __init__(self, in_features : int, num_classes : List[int], dim : int) -> None:
         super().__init__()
         self.add_module("AdaptiveAvgPool", blocks.getTorchModule("AdaptiveAvgPool", dim)(tuple([1]*dim)))
         self.add_module("Flatten", torch.nn.Flatten(1))
@@ -162,14 +163,14 @@ class ConvNeXt(network.Network):
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : ModelPatch = ModelPatch(),
                     dim : int = 3,
                     in_channels: int = 1,
-                    depths: list[int] = [3,3,27,3],
-                    widths: list[int] = [128, 256, 512, 1024],
+                    depths: List[int] = [3,3,27,3],
+                    widths: List[int] = [128, 256, 512, 1024],
                     drop_p: float = 0.1,
-                    num_classes: list[int] = [4, 7]):
+                    num_classes: List[int] = [4, 7]):
 
         super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, patch=patch, init_type = "trunc_normal", init_gain=0.02)
         self.add_module("ConvNextEncoder", ConvNextEncoder(in_channels=in_channels, depths=depths, widths=widths, drop_p=drop_p, dim=dim))        

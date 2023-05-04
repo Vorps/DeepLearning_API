@@ -3,6 +3,7 @@ from DeepLearning_API.config import config
 from DeepLearning_API.networks import blocks
 from DeepLearning_API.models.segmentation.uNet import UNetBlock
 import torch
+from typing import Dict, List
 
 class Generator(network.Network):
 
@@ -16,9 +17,9 @@ class Generator(network.Network):
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3,
-                    channels: list[int]=[1, 64, 128, 256, 512, 1024],
+                    channels: List[int]=[1, 64, 128, 256, 512, 1024],
                     blockConfig: blocks.BlockConfig = blocks.BlockConfig(),
                     nb_conv_per_stage: int = 2,
                     downSampleMode: str = "MAXPOOL",

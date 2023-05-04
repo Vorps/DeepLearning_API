@@ -6,6 +6,8 @@ from DeepLearning_API.config import config
 from DeepLearning_API.networks import network, blocks
 from DeepLearning_API.HDF5 import ModelPatch
 
+from typing import Dict, List
+
 class DiscriminatorV1(network.Network):
 
     class DiscriminatorStem(network.ModuleArgsDict):
@@ -33,7 +35,7 @@ class DiscriminatorV1(network.Network):
 
     class DiscriminatorNLayers(network.ModuleArgsDict):
 
-        def __init__(self, channels: list[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
+        def __init__(self, channels: List[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
             super().__init__()
             for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], [2]*(len(channels)-2)+[1])):
                 self.add_module("Layer_{}".format(i), DiscriminatorV1.DiscriminatorLayers(in_channels, out_channels, stride, norm_layer, bias, dim))
@@ -42,7 +44,7 @@ class DiscriminatorV1(network.Network):
     def __init__(self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3,
                     nb_batch_per_step: int = 64,
                     normMode: str = "INSTANCE",
@@ -117,13 +119,13 @@ class GeneratorV1(network.Network):
             self.add_module("Relu", torch.nn.ReLU(True))
     
     class GeneratorEncoder(network.ModuleArgsDict):
-        def __init__(self, channels: list[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
+        def __init__(self, channels: List[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
             super().__init__()
             for i, (in_channels, out_channels) in enumerate(zip(channels, channels[1:])):
                 self.add_module("DownSample_{}".format(i), GeneratorV1.GeneratorDownSample(in_channels=in_channels, out_channels=out_channels, norm_layer=norm_layer, bias=bias, dim=dim))
     
     class GeneratorDecoder(network.ModuleArgsDict):
-        def __init__(self, channels: list[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
+        def __init__(self, channels: List[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
             super().__init__()
             for i, (in_channels, out_channels) in enumerate(zip(reversed(channels), reversed(channels[:-1]))):
                 self.add_module("UpSample_{}".format(i), GeneratorV1.GeneratorUpSample(in_channels=in_channels, out_channels=out_channels, norm_layer=norm_layer, bias=bias, dim=dim))
@@ -167,7 +169,7 @@ class GeneratorV1(network.Network):
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     patch : ModelPatch = ModelPatch(),
-                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     in_channels : int = 1,
                     nb_batch_per_step: int = 64,
                     normMode: str = "INSTANCE",
@@ -223,7 +225,7 @@ class DiscriminatorV2(network.Network):
 
     class DiscriminatorNLayers(network.ModuleArgsDict):
 
-        def __init__(self, channels: list[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
+        def __init__(self, channels: List[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
             super().__init__()
             for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], [2]*(len(channels)-2)+[1])):
                 self.add_module("Layer_{}".format(i), DiscriminatorV2.DiscriminatorLayers(in_channels, out_channels, stride, norm_layer, bias, dim))
@@ -233,7 +235,7 @@ class DiscriminatorV2(network.Network):
     def __init__(self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3,
                     nb_batch_per_step: int = 64,
                     normMode: str = "INSTANCE",
@@ -310,13 +312,13 @@ class GeneratorV2(network.Network):
             self.add_module("Relu", torch.nn.ReLU(True))
     
     class GeneratorEncoder(network.ModuleArgsDict):
-        def __init__(self, channels: list[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
+        def __init__(self, channels: List[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
             super().__init__()
             for i, (in_channels, out_channels) in enumerate(zip(channels, channels[1:])):
                 self.add_module("DownSample_{}".format(i), GeneratorV2.GeneratorDownSample(in_channels=in_channels, out_channels=out_channels, norm_layer=norm_layer, bias=bias, dim=dim))
     
     class GeneratorDecoder(network.ModuleArgsDict):
-        def __init__(self, channels: list[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
+        def __init__(self, channels: List[int], norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
             super().__init__()
             for i, (in_channels, out_channels) in enumerate(zip(reversed(channels), reversed(channels[:-1]))):
                 self.add_module("UpSample_{}".format(i), GeneratorV2.GeneratorUpSample(in_channels=in_channels, out_channels=out_channels, norm_layer=norm_layer, bias=bias, dim=dim))
@@ -349,7 +351,7 @@ class GeneratorV2(network.Network):
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     patch : ModelPatch = ModelPatch(),
-                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
+                    outputsCriterions: Dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     in_channels : int = 1,
                     nb_batch_per_step: int = 64,
                     normMode: str = "INSTANCE",
