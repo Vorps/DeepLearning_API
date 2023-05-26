@@ -9,7 +9,9 @@ import torch
 import datetime
 from abc import ABC
 from enum import Enum
-from typing import Callable, Any
+from typing import Callable, Any, Union, Optional
+from functools import partial
+
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
 
@@ -56,18 +58,18 @@ def data_to_image(data : np.ndarray, attributes: Attribute) -> sitk.Image:
         data = data.transpose(tuple([i+1 for i in range(len(data.shape)-1)]+[0]))
         image = sitk.GetImageFromArray(data, isVector=True)
     if "Origin" in attributes:
-        image.SetOrigin(attributes["Origin"])
+        image.SetOrigin(attributes["Origin"].tolist())
     if "Spacing" in attributes:
-        image.SetSpacing(attributes["Spacing"])
+        image.SetSpacing(attributes["Spacing"].tolist())
     if "Direction" in attributes:
-        image.SetDirection(attributes["Direction"])
+        image.SetDirection(attributes["Direction"].tolist())
     return image
 
 def dataset_to_image(dataset : h5py.Dataset) -> sitk.Image:
     data, attributes = dataset_to_data(dataset)
     return data_to_image(data, attributes)
 
-def data_to_dataset(h5 : h5py.Group, name : str, data : np.ndarray, attributes : Attribute | None = None) -> None:
+def data_to_dataset(h5 : Union[h5py.File, h5py.Group], name : str, data : np.ndarray, attributes : Union[Attribute, None] = None) -> None:
     if name in h5:
         del h5[name]
     if attributes is None:
@@ -75,12 +77,12 @@ def data_to_dataset(h5 : h5py.Group, name : str, data : np.ndarray, attributes :
     dataset = h5.create_dataset(name, data=data, dtype=data.dtype, chunks=None)
     dataset.attrs.update({k : (v if isinstance(v.numpy() if isinstance(v, torch.Tensor) else v, np.ndarray) else str(v)) for k, v in attributes.items()})
 
-def image_to_dataset(h5 : h5py.Group, name : str, image : sitk.Image, attributes : Attribute | None = None) -> None:
+def image_to_dataset(h5 : Union[h5py.File, h5py.Group], name : str, image : sitk.Image, attributes : Union[Attribute, None] = None) -> None:
     if attributes is None:
         attributes = Attribute()
-    attributes["Origin"] = image.GetOrigin()
-    attributes["Spacing"] = image.GetSpacing()
-    attributes["Direction"] = image.GetDirection()
+    attributes["Origin"] = torch.tensor(image.GetOrigin())
+    attributes["Spacing"] = torch.tensor(image.GetSpacing())
+    attributes["Direction"] = torch.tensor(image.GetDirection())
 
     data = sitk.GetArrayFromImage(image)
     if image.GetNumberOfComponentsPerPixel() == 1:
@@ -91,77 +93,177 @@ def image_to_dataset(h5 : h5py.Group, name : str, image : sitk.Image, attributes
 
 class DatasetUtils():
 
-    def __init__(self, filename : str, read : bool = True) -> None:
+    def __init__(self, filename : str, read : bool = True, parallel : bool = False, is_directory: bool = False) -> None:
         self.filename = filename
+        if os.path.exists(filename) and os.path.isdir(filename):
+            self.is_directory = True
+        elif not read:
+            self.is_directory = is_directory
+        else:
+            self.is_directory = False
         self.data = {}
         self.read = read
-        self.h5: h5py.File | None = None
+        self._h5: Union[h5py.File, None] = None
+        self.parallel = parallel
+        self.h5Files : dict[str, h5py.File] = {}
 
     def __enter__(self):
-        if self.read:
-            self.h5 = h5py.File(self.filename, 'r')
-        else:
+        if self.is_directory:
             if not os.path.exists(self.filename):
+                os.makedirs(self.filename)
+            return self
+        
+        args = {}
+        if self.parallel:
+            try:
+                 from mpi4py import MPI
+                 args.update(dict(driver='mpio', comm=MPI.COMM_WORLD))
+            except:
+                print("Module importation error mpi4py")
+
+        if self.read:
+            self._h5 = h5py.File(self.filename, 'r', **args)
+        else:
+            if not os.path.exists(self.filename) or self.parallel:
                 if len(self.filename.split("/")) > 1 and not os.path.exists("/".join(self.filename.split("/")[:-1])):
                     os.makedirs("/".join(self.filename.split("/")[:-1]))
-                self.h5 = h5py.File(self.filename, 'w')
+                self._h5 = h5py.File(self.filename, 'w', **args)
             else: 
-                self.h5 = h5py.File(self.filename, 'r+')
-            self.h5.attrs["Date"] = DATE()
+                self._h5 = h5py.File(self.filename, 'r+', **args)
+            self._h5.attrs["Date"] = DATE()
+        self._h5.__enter__()
         return self
     
     def __exit__(self, type, value, traceback):
-        if self.h5 is not None:
-            self.h5.close()
+        if self._h5 is not None:
+            self._h5.close()
+        for h5Files in self.h5Files.values():
+            h5Files.close()
 
-    def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Attribute | None = None) -> None:
-        assert self.h5
-        if group not in self.h5:
-            self.h5.create_group(group)
-        h5_group = self.h5[group]
-        if isinstance(h5_group, h5py.Group):
+    def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Union[Attribute, None] = None) -> None:
+        if self.is_directory:
+            with h5py.File("{}/{}".format(self.filename, name), "r+" if os.path.exists("{}/{}".format(self.filename, name)) else "w") as h5_file:
+                image_to_dataset(h5_file, group, image, attributes)
+        else:
+            assert self._h5
+            if group not in self._h5:
+                self._h5.create_group(group)
+            h5_group = self.h5[group]
             image_to_dataset(h5_group, name, image, attributes)
     
-    def writeData(self, group : str, name : str, data : np.ndarray, attributes : Attribute | None = None) -> None:
-        assert self.h5
-        if group not in self.h5:
-            self.h5.create_group(group)
-        h5_group = self.h5[group]
-        if isinstance(h5_group, h5py.Group):
+    def writeData(self, group : str, name : str, data : np.ndarray, attributes : Union[Attribute, None] = None) -> None:
+        if self.is_directory:
+            with h5py.File("{}/{}".format(self.filename, name), "r+" if os.path.exists("{}/{}".format(self.filename, name)) else "w") as h5_file:
+                data_to_dataset(h5_file, group, data, attributes)
+        else:
+            assert self._h5
+            if group not in self._h5:
+                self._h5.create_group(group)
+            h5_group = self._h5[group]
             data_to_dataset(h5_group, name, data, attributes)
-
-    def readImages(self, path_dest : str, function: Callable[[np.ndarray, Attribute, str], np.ndarray] = lambda x, y, z: x) -> None:
-        assert self.h5
-        def write(name, obj):
-            if isinstance(obj, h5py.Dataset):
-                if len(name.split("/")) > 1 and not os.path.exists(path_dest+"/".join(name.split("/")[:-1])):
-                    os.makedirs(path_dest+"/".join(name.split("/")[:-1]))
-                if not os.path.exists(path_dest+name):
-                    data, attrs = dataset_to_data(obj)
-                    data = function(data, attrs, name)
-                    im = data_to_image(data, attrs)
-                    sitk.WriteImage(im, path_dest+name, True)
-                    print("Write image : {}{}".format(path_dest, name))
     
+        
+    def readImages(self, path_dest : str, function: Callable[[np.ndarray, Attribute, str], np.ndarray] = lambda x, y, z: x) -> None:
         if not os.path.exists(path_dest):
             os.makedirs(path_dest)
-            
-        self.h5.visititems(write)
+
+        if self.is_directory:
+            def write(name, group, obj):
+                if isinstance(obj, h5py.Dataset):
+                    if not os.path.exists("{}{}".format(path_dest, group)):
+                        os.makedirs("{}{}".format(path_dest, group))
+                    if not os.path.exists("{}{}/{}".format(path_dest, group, name)):
+                        data, attrs = dataset_to_data(obj)
+                        data = function(data, attrs, name)
+                        im = data_to_image(data, attrs)
+                        sitk.WriteImage(im, "{}{}/{}".format(path_dest, group, name), True)
+                        print("Write image : {}{}/{}".format(path_dest, group, name))
+            names = sorted(os.listdir(self.filename))
+            for name in names:
+                h5 = h5py.File("{}/{}".format(self.filename, name), 'r')
+                h5.visititems(partial(write, name))
+        else:
+            assert self._h5
+            def write(name, obj):
+                if isinstance(obj, h5py.Dataset):
+                    if len(name.split("/")) > 1 and not os.path.exists(path_dest+"/".join(name.split("/")[:-1])):
+                        os.makedirs(path_dest+"/".join(name.split("/")[:-1]))
+                    if not os.path.exists(path_dest+name):
+                        data, attrs = dataset_to_data(obj)
+                        data = function(data, attrs, name)
+                        im = data_to_image(data, attrs)
+                        sitk.WriteImage(im, path_dest+name, True)
+                        print("Write image : {}{}".format(path_dest, name))
+            self._h5.visititems(partial(write, None))
+
+    def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Union[Attribute, None] = None) -> None:
+        if self.is_directory:
+            with h5py.File("{}/{}".format(self.filename, name), "r+" if os.path.exists("{}/{}".format(self.filename, name)) else "w") as h5_file:
+                image_to_dataset(h5_file, group, image, attributes)
+        else:
+            assert self._h5
+            if group not in self._h5:
+                self._h5.create_group(group)
+            h5_group = self.h5[group]
+            image_to_dataset(h5_group, name, image, attributes)
 
     def directory_to_dataset(self, src_path : str):
-        assert self.h5
+        if not self.is_directory:
+            assert self._h5
         for root, dirs, files in os.walk(src_path):
             path = root.replace(src_path, "")
             for i, file in enumerate(files):
                 if file.endswith(".mha"):
-                    if path not in self.h5:
-                       self.h5.create_group(path)
-                    h5_group = self.h5[path]
-                    if isinstance(h5_group, h5py.Group):
-                        image_to_dataset(h5_group, file, sitk.ReadImage("{}/{}".format(root, file)))
-                print("Compute in progress : {:.2f} %".format((i+1)/len(files)*100))
-        
-        
+                    self.writeImage(path, file, sitk.ReadImage("{}/{}".format(root, file)))
+                print("Compute in progress : {} {:.2f} %".format(path, (i+1)/len(files)*100))
+    
+    def getSize(self, group):
+        return len(os.listdir(self.filename)) if self.is_directory else len(self._h5[group].keys())
+
+    def isExist(self, group, name: str) -> bool:
+        if self.is_directory:
+            if os.path.exists("{}/{}".format(self.filename, name)):
+                h5File = self._geth5File("{}/{}".format(self.filename, name))
+                return group in h5File
+            else:
+                return False
+        else:
+            return group in self._h5 and name in self._h5[group]
+    
+    def getDataset(self, group: str, name: str) -> h5py.Dataset:
+        if self.is_directory:
+            h5File = self._geth5File("{}/{}".format(self.filename, name))
+            return h5File[group]
+        else:
+            return self._h5[group][name]
+
+    def getInfos(self, group, index: Optional[list[int]] = None) -> list[str]:
+        if self.is_directory:
+            return [name for i, name in enumerate(sorted(os.listdir(self.filename))) if index is None or i in index]
+        else:
+            return [dataset.name for i, dataset in enumerate(self._h5[group].values()) if index is None or i in index]
+    
+    def _geth5File(self, filename: str):
+        if filename not in self.h5Files:
+            h5File = h5py.File(filename)
+            h5File.__enter__()
+            self.h5Files[filename] = h5File
+        else:
+            h5File = self.h5Files[filename]
+        return h5File
+    
+    def getDatasets(self, group: str, index: list[int]) -> list[h5py.Dataset]:
+        datasets = []
+        if self.is_directory:
+            for i, filename in enumerate(sorted(os.listdir(self.filename))):
+                if i in index:
+                    datasets.append(self.getDataset(group, filename))
+        else:
+            for i, dataset in enumerate(self._h5[group].values()):
+                if i in index:
+                    datasets.append(dataset)
+        return datasets
+    
 def _getModule(classpath : str, type : str):
     if len(classpath.split("_")) > 1:
         module = ".".join(classpath.split("_")[:-1])
@@ -185,7 +287,7 @@ def memoryForecast(memory_init : float, i : float, size : float) -> str:
     forecast = memory_init + ((current_memory-memory_init)*size/i) if i > 0 else 0
     return "Memory forecast ({:.2f}G ({:.2f} %))".format(forecast, forecast/(psutil.virtual_memory()[0]/2**30)*100)
 
-def gpuInfo(device : int | torch.device) -> str:
+def gpuInfo(device : Union[int, torch.device]) -> str:
     if isinstance(device, torch.device):
         if str(device).startswith("cuda:"):
             device = int(str(device).replace("cuda:", ""))
@@ -198,7 +300,7 @@ def gpuInfo(device : int | torch.device) -> str:
         return ""
     return  "GPU({}) Memory GPU ({:.2f}G ({:.2f} %)) | {} | Power {}W | Temperature {}°C".format(device, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
 
-def gpuMemory(device : int | torch.device) -> str:
+def gpuMemory(device : Union[int, torch.device]) -> str:
     if isinstance(device, torch.device):
         if str(device).startswith("cuda:"):
             device = int(str(device).replace("cuda:", ""))
@@ -224,7 +326,7 @@ def getAvailableDevice() -> list[int]:
     pynvml.nvmlShutdown()
     return available
 
-def getDevice(device : int | None) -> torch.device:
+def getDevice(device : Union[int, None]) -> torch.device:
     if torch.cuda.is_available():
         if device is None:
             availableDevice = getAvailableDevice()
@@ -282,7 +384,7 @@ class State(Enum):
     def __str__(self) -> str:
         return self.value
 
-def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: list[int], nb_patch_per_dim : list[tuple[int, bool]], overlap: list[int] | None) -> list[tuple[slice]]:
+def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: list[int], nb_patch_per_dim : list[tuple[int, bool]], overlap: Union[list[int], None]) -> list[tuple[slice]]:
     patch_slices = []
     slices : list[list[slice]] = []
     if overlap is None:
@@ -306,7 +408,7 @@ def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: list[int], nb_patch_p
         patch_slices.append(tuple(chunk))
     return patch_slices
 
-def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overlap: list[int] | None) -> tuple[list[tuple[slice]], list[tuple[int, bool]]]:
+def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overlap: Union[list[int], None]) -> tuple[list[tuple[slice]], list[tuple[int, bool]]]:
     if len(shape) != len(patch_size) or not all(a >= b for a, b in zip(shape, patch_size)):
         return [tuple([slice(0, s) for s in shape])], [(1, True)]*len(shape)
 
@@ -377,7 +479,7 @@ def resampleITK(path, image_reference : sitk.Image, image : sitk.Image, transfor
                 transform = sitk.DisplacementFieldTransform(inverseDisplacementField)
             transforms.append(transform)
     result_transform = sitk.CompositeTransform(transforms)
-    return sitk.Resample(image, image_reference, result_transform, sitk.sitkNearestNeighbor if mask else sitk.sitkBSpline, *{"defaultPixelValue" : 0 if mask else -1024})
+    return sitk.Resample(image, image_reference, result_transform, sitk.sitkNearestNeighbor if mask else sitk.sitkBSpline, defaultPixelValue =  0 if mask else -1024)
 
 def formatMaskLabel(mask: sitk.Image, labels: list[tuple[int, int]]) -> sitk.Image:
     data = sitk.GetArrayFromImage(mask)

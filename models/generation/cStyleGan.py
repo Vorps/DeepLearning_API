@@ -1,7 +1,6 @@
 from DeepLearning_API.networks import network, blocks
 from DeepLearning_API.config import config
 from DeepLearning_API.HDF5 import ModelPatch
-import torch.nn.functional as F
 import importlib
 
 import torch

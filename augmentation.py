@@ -1,4 +1,3 @@
-from typing import Callable
 import importlib
 import torch
 from abc import ABC, abstractmethod
@@ -9,6 +8,7 @@ from torch.functional import Tensor
 from DeepLearning_API.config import config
 from DeepLearning_API.utils import _getModule, NeedDevice
 import torch.nn.functional as F
+from typing import Callable
 
 class DataAugmentation(NeedDevice, ABC):
 

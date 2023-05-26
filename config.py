@@ -1,9 +1,9 @@
 import os
-import types
 import ruamel.yaml
 import inspect 
 import collections
 from copy import deepcopy
+from typing import Union
 
 import torch
 
@@ -14,7 +14,7 @@ yaml = ruamel.yaml.YAML()
 
 class ConfigError(Exception):
 
-    def __init__(self, message : str = "The config only supports types : config(Object), int, str, bool, float, List[int], List[str], List[bool], List[float], Dict[str, Object]") -> None:
+    def __init__(self, message : str = "The config only supports types : config(Object), int, str, bool, float, list[int], list[str], list[bool], list[float], dict[str, Object]") -> None:
         self.message = message
         super().__init__(self.message)
 
@@ -96,7 +96,7 @@ class Config():
         return default.split(":")[1] if len(default.split(":")) > 1 else default
 
     @staticmethod
-    def _getInputDefault(name : str, default : str | None, isList : bool = False) -> list[str | None] | str | None:
+    def _getInputDefault(name : str, default : Union[str, None], isList : bool = False) -> Union[list[Union[str, None]], str, None]:
         if isinstance(default, str) and (default == "default" or (len(default.split(":")) > 1 and default.split(":")[0] == "default")):
             if os.environ["DEEP_LEANING_API_CONFIG_MODE"] == "interactive":
                 if isList:
@@ -165,7 +165,7 @@ class Config():
             value = None
         return value
                     
-def config(key : str | None = None):
+def config(key : Union[str, None] = None):
     def decorator(function):
         def new_function(*args, **kwargs):
             if "config" in kwargs:
@@ -183,7 +183,7 @@ def config(key : str | None = None):
                     kwargs = {} 
                     for param in list(inspect.signature(function).parameters.values())[len(args):]:
                         annotation = param.annotation
-                        if isinstance(annotation, types.UnionType):
+                        if str(annotation).startswith("typing.Union") or str(annotation).startswith("typing.Optional"):
                             for i in annotation.__args__:
                                 annotation = i
                                 break

@@ -2,7 +2,7 @@ from DeepLearning_API.config import config
 from DeepLearning_API.networks import network, blocks
 import torch
 from DeepLearning_API.HDF5 import ModelPatch
-
+from typing import Union
 
 class UNetBlock(network.ModuleArgsDict):
 
@@ -35,7 +35,7 @@ class UNet(network.Network):
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
-                    patch : ModelPatch | None = None,
+                    patch : Union[ModelPatch, None] = None,
                     dim : int = 3,
                     channels: list[int]=[1, 64, 128, 256, 512, 1024],
                     nb_class: int = 2,

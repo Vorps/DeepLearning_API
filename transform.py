@@ -7,12 +7,12 @@ from DeepLearning_API.utils import _getModule, NeedDevice, Attribute
 from DeepLearning_API.config import config
 from abc import ABC, abstractmethod
 import torch.nn.functional as F
-from typing import Any
+from typing import Any, Union
 
 class Transform(NeedDevice, ABC):
     
-    def __init__(self, save = None) -> None:
-        self.save = save
+    def __init__(self) -> None:
+        pass
     
     def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return shape
@@ -39,7 +39,6 @@ class Clip(Transform):
 
     @config("Clip")
     def __init__(self, min_value : float = -1024, max_value : float = 1024, saveClip: bool = False) -> None:
-        super().__init__()
         assert max_value > min_value
         self.min_value = min_value
         self.max_value = max_value
@@ -59,8 +58,7 @@ class Clip(Transform):
 class Normalize(Transform):
 
     @config("Normalize")
-    def __init__(self, lazy : bool = False, channels: list[int] | None = None, min_value : float = -1, max_value : float = 1) -> None:
-        super().__init__()
+    def __init__(self, lazy : bool = False, channels: Union[list[int], None] = None, min_value : float = -1, max_value : float = 1) -> None:
         assert max_value > min_value
         self.lazy = lazy
         self.min_value = min_value
@@ -72,6 +70,7 @@ class Normalize(Transform):
             if self.channels:
                 cache_attribute["Min"] = torch.min(input[self.channels])
             else:
+                
                 cache_attribute["Min"] = torch.min(input)
         if "Max" not in cache_attribute:
             if self.channels:
@@ -82,14 +81,19 @@ class Normalize(Transform):
         if not self.lazy:
             input_min = cache_attribute["Min"]
             input_max = cache_attribute["Max"]
-
+            print(input_min)
+            print(input_max)
             norm = input_max-input_min
             assert norm != 0
+            print(self.channels)
             if self.channels:
                 for channel in self.channels:
                     input[channel] = (self.max_value-self.min_value)*(input[channel] - input_min) / norm + self.min_value
             else:
+                print("OKKKK")
                 input = (self.max_value-self.min_value)*(input - input_min) / norm + self.min_value
+            print(torch.min(input))
+            print(torch.max(input))
         return input
     
     def inverse(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -105,8 +109,7 @@ class Normalize(Transform):
 class Standardize(Transform):
 
     @config("Standardize")
-    def __init__(self, lazy : bool = False, mean: list[float] | None = None, std: list[float] | None= None) -> None:
-        super().__init__()
+    def __init__(self, lazy : bool = False, mean: Union[list[float], None] = None, std: Union[list[float], None]= None) -> None:
         self.lazy = lazy
         self.mean = mean
         self.std = std
@@ -136,7 +139,6 @@ class TensorCast(Transform):
 
     @config("TensorCast")
     def __init__(self, dtype : str = "default:float32,int64,int16") -> None:
-        super().__init__()
         self.dtype : torch.dtype = getattr(torch, dtype)
 
     def __call__(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -150,7 +152,6 @@ class Padding(Transform):
 
     @config("Padding")
     def __init__(self, padding : list[int] = [0,0], mode : str = "default:constant,reflect,replicate,circular", dim: int = 0) -> None:
-        super().__init__()
         self.padding = padding
         self.mode = mode
         self.dim = dim
@@ -185,7 +186,6 @@ class Squeeze(Transform):
 
     @config("Squeeze")
     def __init__(self, dim: int) -> None:
-        super().__init__(None)
         self.dim = dim
     
     def __call__(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -196,8 +196,8 @@ class Squeeze(Transform):
 
 class Resample(Transform, ABC):
 
-    def __init__(self, save: str) -> None:
-        super().__init__(save)
+    def __init__(self) -> None:
+        pass
 
     def _resample(self, input: torch.Tensor, size: list[int]) -> torch.Tensor:
         args = {}
@@ -227,8 +227,7 @@ class Resample(Transform, ABC):
 class ResampleIsotropic(Resample):
 
     @config("ResampleIsotropic") 
-    def __init__(self, spacing : list[float] = [1., 1., 1.], save : str = "name.h5") -> None:
-        super().__init__(save)
+    def __init__(self, spacing : list[float] = [1., 1., 1.]) -> None:
         self.spacing = torch.tensor(spacing, dtype=torch.float64)
         
     def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
@@ -245,8 +244,7 @@ class ResampleIsotropic(Resample):
 class ResampleResize(Resample):
 
     @config("ResampleResize")
-    def __init__(self, size : list[int] = [100,512,512], save : str = "name.h5") -> None:
-        super().__init__(save)
+    def __init__(self, size : list[int] = [100,512,512]) -> None:
         self.size = size
 
     def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
@@ -261,7 +259,6 @@ class Mask(Transform):
     
     @config("Mask")
     def __init__(self, path : str = "default:./default.mha", value_outside: int = 0) -> None:
-        super().__init__()
         self.mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(path))).unsqueeze(0)
         self.value_outside = value_outside
         
@@ -280,7 +277,6 @@ class Gradient(Transform):
 
     @config("Gradient")
     def __init__(self, per_dim: bool = False):
-        super().__init__()
         self.per_dim = per_dim
     
     @staticmethod
@@ -312,7 +308,6 @@ class ArgMax(Transform):
 
     @config("ArgMax") 
     def __init__(self, dim: int) -> None:
-        super().__init__()
         self.dim = dim
     
     def __call__(self, input : torch.Tensor) -> torch.Tensor:
@@ -321,8 +316,7 @@ class ArgMax(Transform):
 class FlatLabel(Transform):
 
     @config("FlatLabel")
-    def __init__(self, labels: list[int] | None = None) -> None:
-        super().__init__()
+    def __init__(self, labels: Union[list[int], None] = None) -> None:
         self.labels = labels
 
     def __call__(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -336,6 +330,20 @@ class FlatLabel(Transform):
 
     def inverse(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return input
+
+class Save(Transform):
+
+    @config("Save")
+    def __init__(self, save: str) -> None:
+        self.save = save
+    
+    def __call__(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return input
+
+    def inverse(self, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return input
+    
+
     
 """class NConnexeLabel(Transform):
 

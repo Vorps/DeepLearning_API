@@ -16,10 +16,11 @@ from DeepLearning_API.networks.network import Measure, ModelLoader
 from DeepLearning_API.transform import Transform, TransformLoader
 
 from torch.utils.tensorboard.writer import SummaryWriter
+from typing import Union
 
 class OutDataset(DatasetUtils, NeedDevice, ABC):
 
-    def __init__(self, filename: str, group: str, pre_transforms : dict[str, TransformLoader], post_transforms : dict[str, TransformLoader], patchCombine: str | None) -> None: 
+    def __init__(self, filename: str, group: str, pre_transforms : dict[str, TransformLoader], post_transforms : dict[str, TransformLoader], patchCombine: Union[str, None]) -> None: 
         super().__init__(filename, read=False)
         self.group = group
         self._pre_transforms = pre_transforms
@@ -70,7 +71,7 @@ class OutDataset(DatasetUtils, NeedDevice, ABC):
 class OutSameAsGroupDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: str | None = None) -> None:
+    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None) -> None:
         super().__init__(dataset_filename, group, pre_transforms, post_transforms, patchCombine)
         self.group_src, self.group_dest = sameAsGroup.split("/")
 
@@ -102,7 +103,7 @@ class OutSameAsGroupDataset(OutDataset):
 class OutLayerDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", overlap : list[int] | None = None, pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: str | None = None) -> None:
+    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", overlap : Union[list[int], None] = None, pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None) -> None:
         super().__init__(dataset_filename, group, pre_transforms, post_transforms, patchCombine)
         self.overlap = overlap
         
@@ -143,8 +144,8 @@ class Predictor(NeedDevice):
                     dataset: DataPrediction = DataPrediction(),
                     train_name: str = "name",
                     groupsInput: list[str] = ["default"],
-                    device: int | None = None,
-                    outsDataset: dict[str, OutDatasetLoader] | None = {"default:Default" : OutDatasetLoader()},
+                    device: Union[int, None] = None,
+                    outsDataset: Union[dict[str, OutDatasetLoader], None] = {"default:Default" : OutDatasetLoader()},
                     images_log: list[str] = []) -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)
@@ -259,7 +260,6 @@ class Predictor(NeedDevice):
                                 self.tb.add_scalars("{}_Prediction/Loss".format(name), measure.format(isLoss=True), it_image)
                                 self.tb.add_scalars("{}_Prediction/Metric".format(name), measure.format(isLoss=False), it_image)
                             
-                            print("OKKKKK")
                             outDataset.write(index, name_data, layer_output.cpu(), measure_result)
                             it_image+=1
 

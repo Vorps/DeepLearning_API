@@ -9,8 +9,9 @@ from typing import Iterator
 
 from DeepLearning_API.config import config
 from DeepLearning_API.utils import DatasetUtils, NeedDevice, dataset_to_data, Attribute, get_patch_slices_from_shape
-from DeepLearning_API.transform import Transform
+from DeepLearning_API.transform import Transform, Save
 from DeepLearning_API.augmentation import DataAugmentationsList
+from typing import Union, Callable
 
 class PathCombine(NeedDevice, ABC):
 
@@ -27,8 +28,8 @@ class PathCombine(NeedDevice, ABC):
 
 class Accumulator():
 
-    def __init__(self, patch_slices: list[tuple[slice]], patchCombine: str | None = None, batch: bool = True) -> None:
-        self._layer_accumulator: list[torch.Tensor | None] = [None for i in range(len(patch_slices))]
+    def __init__(self, patch_slices: list[tuple[slice]], patchCombine: Union[str, None] = None, batch: bool = True) -> None:
+        self._layer_accumulator: list[Union[torch.Tensor, None]] = [None for i in range(len(patch_slices))]
         self.patch_slices = patch_slices
         self.shape = max([[v.stop for v in patch] for patch in patch_slices])
 
@@ -40,7 +41,6 @@ class Accumulator():
     
     def isFull(self) -> bool:
         return len(self.patch_slices) == len([v for v in self._layer_accumulator if v is not None])
-
 
     def assemble(self, device: torch.device) -> torch.Tensor:
         patch_size = [sl.stop-sl.start for sl in self.patch_slices[0]]
@@ -60,11 +60,11 @@ class Accumulator():
 
 class Patch(ABC):
 
-    def __init__(self, patch_size: list[int], overlap: list[int] | None, path_mask: str | None = None) -> None:
+    def __init__(self, patch_size: list[int], overlap: Union[list[int], None], path_mask: Union[str, None] = None) -> None:
         self.patch_size = patch_size
         self.overlap = overlap
-        self.patch_slices : list[tuple[slice]]
-        self.nb_patch_per_dim: list[tuple[int, bool]]
+        self.patch_slices : list[tuple[slice]] = None
+        self.nb_patch_per_dim: list[tuple[int, bool]] = None
         self.path_mask = path_mask
         self.mask = None
         if self.path_mask is not None and os.path.exists(self.path_mask):
@@ -109,26 +109,28 @@ class Patch(ABC):
 class DatasetPatch(Patch):
 
     @config("Patch")
-    def __init__(self, patch_size : list[int] = [128, 256, 256], overlap : list[int] | None = None, mask: str | None = None) -> None:
+    def __init__(self, patch_size : list[int] = [128, 256, 256], overlap : Union[list[int], None] = None, mask: Union[str, None] = None) -> None:
         super().__init__(patch_size, overlap, mask)
 
 class ModelPatch(Patch):
 
     @config("Patch")
-    def __init__(self, patch_size : list[int] = [128, 256, 256], overlap : list[int] | None = None, patchCombine: str | None = None, mask: str | None = None) -> None:
+    def __init__(self, patch_size : list[int] = [128, 256, 256], overlap : Union[list[int], None] = None, patchCombine: Union[str, None] = None, mask: Union[str, None] = None) -> None:
         super().__init__(patch_size, overlap, mask)
         self.patchCombine = patchCombine
 
 class Dataset():
 
-    def __init__(self, group : str, dataset : h5py.Dataset, patch : DatasetPatch | None, pre_transforms : list[Transform]) -> None:
-        self._dataset = dataset
+    def __init__(self, group : str, name: str, dataset : DatasetUtils, patch : Union[DatasetPatch, None], pre_transforms : list[Transform]) -> None:
         self.group = group
-        self.name = self._dataset.name    
-        self.loaded = False
-        self._shape = list(self._dataset.shape[1:])
+        self.name = name
 
-        self.cache_attribute = Attribute({k : torch.tensor(v) if isinstance(v, np.ndarray) else v for k, v in self._dataset.attrs.items()})
+        _dataset = dataset.getDataset(group, name)
+
+        self.loaded = False
+        self._shape = list(_dataset.shape[1:])
+
+        self.cache_attribute = Attribute({k : torch.tensor(v) if isinstance(v, np.ndarray) else v for k, v in _dataset.attrs.items()})
         
         self.data : list[torch.Tensor] = list()
         for transformFunction in pre_transforms:
@@ -137,38 +139,37 @@ class Dataset():
         self.patch = DatasetPatch(patch_size=patch.patch_size, overlap=patch.overlap, mask=patch.path_mask) if patch else DatasetPatch(self._shape, mask=patch.path_mask)
         self.patch.load(self._shape)
     
-    def load(self, index : int, pre_transform : list[Transform], dataAugmentationsList : list[DataAugmentationsList]) -> None:
+    def load(self, dataset: DatasetUtils, index : int, pre_transform : list[Transform], dataAugmentationsList : list[DataAugmentationsList]) -> None:
         if self.loaded:
             return
         
         assert self.name
+
+        _dataset = dataset.getDataset(self.group, self.name)
         i = len(pre_transform)
         data = None
         for transformFunction in reversed(pre_transform):
-            if transformFunction.save is not None and os.path.exists(transformFunction.save):
-                with DatasetUtils(transformFunction.save) as datasetUtils:
-                    if self.group in datasetUtils.h5:
-                        group = datasetUtils.h5[self.group]
-                        if isinstance(group, h5py.Group) and self.name in group:
-                            dataset = group[self.name]
-                            if isinstance(dataset, h5py.Dataset):
-                                data, attrib = dataset_to_data(dataset)
-                                self.cache_attribute.update(attrib)
-                                break
+            if isinstance(transformFunction, Save) and os.path.exists(transformFunction.save):
+                with DatasetUtils(transformFunction.save if not transformFunction.save.endswith("/") else transformFunction.save[:-1]) as datasetUtils:
+                    if datasetUtils.isExist(self.group, self.name):
+                        _, dataset = datasetUtils.getDataset(self.group, self.name)
+                        data, attrib = dataset_to_data(dataset)
+                        self.cache_attribute.update(attrib)
+                        break
             i-=1
-
-        if i==0:
-            data = np.empty(self._dataset.shape, self._dataset.dtype)
-            self._dataset.read_direct(data)
         
+        if i==0:
+            data = np.empty(_dataset.shape, _dataset.dtype)
+            _dataset.read_direct(data)
+
         data = torch.from_numpy(data)
         if len(pre_transform):
             for transformFunction in pre_transform[i:]:
                 data = transformFunction(data, self.cache_attribute)
-                if transformFunction.save is not None:
-                    with DatasetUtils(transformFunction.save, read=False) as datasetUtils:
+                if isinstance(transformFunction, Save):
+                    with DatasetUtils(transformFunction.save if not transformFunction.save.endswith("/") else transformFunction.save[:-1], read=False, is_directory=transformFunction.save.endswith("/")) as datasetUtils:
                         datasetUtils.writeData(self.group, self.name, data.numpy(), self.cache_attribute)
-        self.data : List[torch.Tensor] = list()
+        self.data : list[torch.Tensor] = list()
         if not dataAugmentationsList:
             self.data.append(data)
             
@@ -192,39 +193,4 @@ class Dataset():
     def __len__(self) -> int:
         return len(self.patch)
   
-class HDF5(DatasetUtils):
-
-    def __init__(self, filename : str) -> None:
-        super().__init__(filename, read=True)
-
-    def getSize(self, group):
-        result = 0
-        h5_group = self.h5[group]
-        assert isinstance(h5_group, h5py.Group)
-        for dataset in [dataset for dataset in h5_group.values() if type(dataset) == h5py.Dataset]:
-            group = dataset.name.split(".")[0]
-            result += self.getSize(group) if group in self.h5 else 1
-        return result
     
-    def getDatasets(self, group: str, index: list[int], i: int = 0, it: int = 0) -> tuple[list[h5py.Dataset], list[list[int]], int, int]:
-        h5_group = self.h5[group]
-        assert isinstance(h5_group, h5py.Group)
-        datasets = []
-        mapping: list[list[int]] = []
-        for dataset in [dataset for dataset in h5_group.values() if type(dataset) == h5py.Dataset]:
-            group = dataset.name.split(".")[0]
-            if group in self.h5:
-                sub_datasets, sub_mapping, i, it = self.getDatasets(group, index, i, it)
-                for l in sub_mapping:
-                    mapping.append([it]+l)
-                datasets+=sub_datasets
-                if len(sub_datasets):
-                    datasets.append(dataset)
-                    it += 1
-            else:
-                if i in index:
-                    mapping.append([it])
-                    datasets.append(dataset)
-                    it += 1
-                i += 1
-        return datasets, mapping, i, it

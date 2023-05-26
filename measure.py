@@ -169,7 +169,7 @@ class Gram(Criterion):
 
 class MedPerceptualLoss(Criterion):
     
-    def __init__(self, modelLoader : ModelLoader = ModelLoader(), path_model : str = "name", module_names : List[str] = ["ConvNextEncoder.ConvNexStage_2.BottleNeckBlock_0.Linear_2", "ConvNextEncoder.ConvNexStage_3.BottleNeckBlock_0.Linear_2"], shape: List[int] = [128, 256, 256], losses: List[str] = ["Gram", "torch_nn_L1Loss"]) -> None:
+    def __init__(self, modelLoader : ModelLoader = ModelLoader(), path_model : str = "name", module_names : list[str] = ["ConvNextEncoder.ConvNexStage_2.BottleNeckBlock_0.Linear_2", "ConvNextEncoder.ConvNexStage_3.BottleNeckBlock_0.Linear_2"], shape: list[int] = [128, 256, 256], losses: list[str] = ["Gram", "torch_nn_L1Loss"]) -> None:
         super().__init__()
         
         DEEP_LEARNING_API_CONFIG_PATH = ".".join(os.environ['DEEP_LEARNING_API_CONFIG_PATH'].split(".")[:-1])

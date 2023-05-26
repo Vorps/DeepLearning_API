@@ -1,4 +1,3 @@
-import ast
 from enum import Enum
 import importlib
 from typing import Callable
@@ -7,6 +6,8 @@ from DeepLearning_API.config import config
 from DeepLearning_API.networks import network
 from scipy.interpolate import interp1d
 import numpy as np
+import ast
+from typing import Union
 
 class NormMode(Enum):
     NONE = 0,
@@ -40,7 +41,7 @@ class DownSampleMode(Enum):
     AVGPOOL = 1,
     CONV_STRIDE = 2
 
-def getTorchModule(name_fonction : str, dim : int | None = None) -> torch.nn.Module:
+def getTorchModule(name_fonction : str, dim : Union[int, None] = None) -> torch.nn.Module:
     return getattr(importlib.import_module("torch.nn"), "{}".format(name_fonction) + ("{}d".format(dim) if dim is not None else ""))
 
 class BlockConfig():
@@ -191,24 +192,14 @@ class ArgMax(torch.nn.Module):
         result = torch.argmax(input, dim=self.dim).unsqueeze(self.dim)
         return result
 
-class NormalSample(torch.nn.Module):
+class NormalNoise(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
     
-    def forward(self, mu: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
-        q = torch.distributions.Normal(mu, torch.exp(std/2))
-        z = q.rsample().to(mu.device)
-        return z
-
-class AddNoiseImage(torch.nn.Module):
-
-    def __init__(self, std: float) -> None:
-        super().__init__()
-        self.std = std
-        
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return input+torch.randn_like(input).to(input.device)*self.std
+    def forward(self) -> torch.Tensor:
+        q = torch.distributions.Normal(0, 1)
+        return q.rsample()
     
 class Const(torch.nn.Module):
 
@@ -218,16 +209,6 @@ class Const(torch.nn.Module):
         
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return self.noise.to(input.device)
-
-class Noise(torch.nn.Module):
-
-    def __init__(self, std: float) -> None:
-        super().__init__()
-        self.std = std
-        
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return torch.randn_like(input).to(input.device)*self.std
-
 
 class HistogramNoise(torch.nn.Module):
 
@@ -286,7 +267,9 @@ class LatentDistribution(network.ModuleArgsDict):
         self.add_module("log_std", LatentDistribution.LatentDistribution_Linear(latentDim), in_branch =  [*out_branch, "Shape"], out_branch = [2])
         self.add_module("Unsqueeze_mu", Unsqueeze(1), in_branch = [1], out_branch = [1])
         self.add_module("Unsqueeze_log_std", Unsqueeze(1), in_branch = [2], out_branch = [2])
-        self.add_module("NormalSample", NormalSample(), in_branch=[1,2], out_branch=[3])
+        self.add_module("NormalSample", NormalNoise(), in_branch=[], out_branch=[3])
+        self.add_module("Multiply_std", Multiply(), in_branch=[2,3], out_branch=[3])
+        self.add_module("Add_mu", Add(), in_branch=[1,3], out_branch=[3])
         self.add_module("Concat", Concat(), in_branch=[1,2,3])
         self.add_module("DecoderInput", LatentDistribution.LatentDistribution_DecoderInput(latentDim), in_branch=[3, "Shape"])
 

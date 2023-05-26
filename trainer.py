@@ -12,6 +12,7 @@ from DeepLearning_API.utils import gpuInfo, getDevice, State, NeedDevice, logIma
 from DeepLearning_API.networks.network import Network, ModelLoader
 import datetime
 import dill
+from typing import Union
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
@@ -28,21 +29,21 @@ class Trainer(NeedDevice):
                     dataset : DataTrain = DataTrain(),
                     groupsInput : list[str] = ["default"],
                     train_name : str = "default",
-                    device : int | None = None,
-                    manual_seed : int | None = None,
+                    device : Union[int, None] = None,
+                    manual_seed : Union[int, None] = None,
                     epochs: int = 100,
-                    it_validation : int | None = None,
+                    it_validation : Union[int, None] = None,
                     autocast : bool = False,
-                    gradient_checkpoints: list[str] | None = None,
+                    gradient_checkpoints: Union[list[str], None] = None,
                     ema_decay : float = 0,
-                    images_log: list[str] | None = None,
+                    images_log: Union[list[str], None] = None,
                     save_checkpoint_mode: str= "BEST") -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)
         self.manual_seed = manual_seed
         if self.manual_seed is not None:
             torch.manual_seed(self.manual_seed)
-        
+        torch.multiprocessing.set_start_method('spawn')
         cudnn.deterministic = self.manual_seed is not None
         cudnn.benchmark = self.manual_seed is None
         
@@ -57,7 +58,7 @@ class Trainer(NeedDevice):
         self.tb = None
         self.model = model.getModel(train=True)
         self.ema_decay = ema_decay
-        self.modelEMA : torch.optim.swa_utils.AveragedModel | None = None
+        self.modelEMA : Union[torch.optim.swa_utils.AveragedModel, None] = None
         self.images_log = images_log
         self.gradient_checkpoints = gradient_checkpoints
         self.save_checkpoint_mode = save_checkpoint_mode
@@ -109,8 +110,7 @@ class Trainer(NeedDevice):
             if state_dict is not None:
                 model = self.modelEMA.module 
                 if isinstance(model, Network):
-                    model.load(state_dict, init = False, ema=True)
-            
+                    model.load(state_dict, init=False, ema=True)
         
         self.tb = SummaryWriter(log_dir = STATISTICS_DIRECTORY()+self.train_name+"/")
         config_namefile_src = CONFIG_FILE().replace(".yml", "")
@@ -131,12 +131,12 @@ class Trainer(NeedDevice):
         inputs.update({(k, False) : v[0].to(self.device) for k, v in data_dict.items() if k not in self.groupsInput})
         return inputs
 
-
     def _train(self) -> None:
         assert self.it_validation, "it_validation is None"
         self.model.train()
                 
         description = lambda : "Training : Loss ("+" ".join(["{}({:.6f}) : {:.4f}".format(name, network.optimizer.param_groups[0]['lr'], network.measure.getLastValue()) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.device)
+
         with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = description(), total=len(self.dataloader_training), leave=False) as batch_iter:
             for _, data_dict in batch_iter:
                 with autocast(enabled=self.autocast):            
@@ -147,7 +147,6 @@ class Trainer(NeedDevice):
                         self.modelEMA(input)
 
                     self.model.update_lr()
-                    
 
                     if (self.it+1) % self.it_validation == 0:
                         self._train_log(data_dict)
@@ -159,13 +158,15 @@ class Trainer(NeedDevice):
 
                 batch_iter.set_description(description()) 
                 self.it += 1
-            
+
     @torch.no_grad()
     def _validate(self) -> None:
+        
         self.model.measureClear()
         self.model.eval()
         description = lambda : "Validation : Loss ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.ema.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.device)
         data_dict = None
+
         with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = description(), total=len(self.dataloader_validation), leave=False) as batch_iter:
             for _, data_dict in batch_iter:
                 input = self.getInput(data_dict)
@@ -178,6 +179,7 @@ class Trainer(NeedDevice):
                 batch_iter.set_description(description())
             assert data_dict, "No data"
             self._validation_log(data_dict)
+        
 
     def checkpoint_save(self, loss) -> None:
         path = CHECKPOINTS_DIRECTORY()+self.train_name+"/"

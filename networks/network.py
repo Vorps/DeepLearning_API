@@ -14,6 +14,7 @@ from DeepLearning_API.utils import NeedDevice, State, _getModule
 from DeepLearning_API.HDF5 import Accumulator, ModelPatch
 from collections import OrderedDict
 from torch.utils.checkpoint import checkpoint
+from typing import Union
 
 class OptimizerLoader():
     
@@ -46,7 +47,7 @@ class SchedulersLoader():
 class CriterionsAttr():
 
     @config()
-    def __init__(self, l: float = 1.0, isLoss: bool = True, stepStart:int = 0, stepStop: int | None = None) -> None:
+    def __init__(self, l: float = 1.0, isLoss: bool = True, stepStart:int = 0, stepStop: Union[int, None] = None) -> None:
         self.l = l
         self.isTorchCriterion = True
         self.isLoss = isLoss
@@ -87,7 +88,7 @@ class Measure(NeedDevice):
         for output_group, targetCriterionsLoader in outputsCriterions.items():
             self.outputsCriterions[output_group.replace(":", ".")] = targetCriterionsLoader.getTargetsCriterions(output_group, model_classname, train)
         self.values : dict[str, list[float]] = dict()
-        self.loss : torch.Tensor | None = None
+        self.loss : Union[torch.Tensor, None] = None
         self._it = 0
         self._nb_loss = 0
 
@@ -169,7 +170,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
    
     class ModuleArgs:
 
-        def __init__(self, in_branch: list[str], out_branch: list[str], pretrained : bool, alias : list[str], requires_grad: bool | None) -> None:
+        def __init__(self, in_branch: list[str], out_branch: list[str], pretrained : bool, alias : list[str], requires_grad: Union[bool, None]) -> None:
             super().__init__()
             self.alias= alias
             self.pretrained = pretrained
@@ -246,14 +247,14 @@ class ModuleArgsDict(torch.nn.Module, ABC):
         return self._modules.keys()
 
     @_copy_to_script_wrapper
-    def items(self) -> Iterable[tuple[str, torch.nn.Module | None]]:
+    def items(self) -> Iterable[tuple[str, Union[torch.nn.Module, None]]]:
         return self._modules.items()
 
     @_copy_to_script_wrapper
-    def values(self) -> Iterable[torch.nn.Module | None]:
+    def values(self) -> Iterable[Union[torch.nn.Module, None]]:
         return self._modules.values()
 
-    def add_module(self, name: str, module : torch.nn.Module, in_branch: list[int | str] = [0], out_branch: list[int | str] = [0], pretrained : bool = True, alias : list[str] = [], requires_grad:bool | None = None) -> None:
+    def add_module(self, name: str, module : torch.nn.Module, in_branch: list[Union[int, str]] = [0], out_branch: list[Union[int, str]] = [0], pretrained : bool = True, alias : list[str] = [], requires_grad: Union[bool, None] = None) -> None:
         super().add_module(name, module)
         self._modulesArgs[name] = ModuleArgsDict.ModuleArgs([str(value) for value in in_branch], [str(value) for value in out_branch], pretrained, alias, requires_grad)
     
@@ -378,10 +379,10 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
 
     def __init__(   self,
                     in_channels : int = 1,
-                    optimizer: OptimizerLoader | None = None, 
-                    schedulers: SchedulersLoader | None = None, 
-                    outputsCriterions: dict[str, TargetCriterionsLoader] | None = None,
-                    patch : ModelPatch | None = None,
+                    optimizer: Union[OptimizerLoader, None] = None, 
+                    schedulers: Union[SchedulersLoader, None] = None, 
+                    outputsCriterions: Union[dict[str, TargetCriterionsLoader], None] = None,
+                    patch : Union[ModelPatch, None] = None,
                     nb_batch_per_step : int = 1,
                     init_type : str = "normal",
                     init_gain : float = 0.02,
@@ -390,13 +391,13 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
         self.name : str = ""
         self.in_channels = in_channels
         self.optimizerLoader  = optimizer
-        self.optimizer : torch.optim.Optimizer | None = None
+        self.optimizer : Union[torch.optim.Optimizer, None] = None
 
         self.schedulersLoader  = schedulers
-        self.schedulers : dict[torch.optim.lr_scheduler._LRScheduler, int] | None = None
+        self.schedulers : Union[dict[torch.optim.lr_scheduler._LRScheduler, int], None] = None
 
         self.outputsCriterionsLoader = outputsCriterions
-        self.measure : Measure | None = None
+        self.measure : Union[Measure, None] = None
 
         self.patch = patch
 
@@ -405,7 +406,7 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
         self.init_gain  = init_gain
         self.dim = dim
         
-        self.scaler : torch.cuda.amp.grad_scaler.GradScaler | None = None
+        self.scaler : Union[torch.cuda.amp.grad_scaler.GradScaler, None] = None
         self._it = 0
         
     @_function_network
@@ -488,7 +489,7 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
         if "{}_optimizer_state_dict".format(name) in state_dict and self.optimizer:
             self.optimizer.load_state_dict(state_dict['{}_optimizer_state_dict'.format(name)])
 
-    def _compute_channels_trace(self, module : ModuleArgsDict, in_channels : int, gradient_checkpoints: list[str] | None, name: str | None= None, in_is_channel = True, out_channels : int | None = None, out_is_channel = True) -> tuple[int, bool, int, bool]:
+    def _compute_channels_trace(self, module : ModuleArgsDict, in_channels : int, gradient_checkpoints: Union[list[str], None], name: Union[str, None] = None, in_is_channel = True, out_channels : Union[int, None] = None, out_is_channel = True) -> tuple[int, bool, int, bool]:
         for k, v in module.items():
             if hasattr(v, "in_channels"):
                 if v.in_channels:
@@ -679,7 +680,7 @@ class ModelLoader():
     def __init__(self, classpath : str = "default:segmentation.UNet") -> None:
         self.module, self.name = _getModule(classpath.split(".")[-1] if len(classpath.split(".")) > 1 else classpath, "models" + "."+".".join(classpath.split(".")[:-1]) if len(classpath.split(".")) > 1 else "")
         
-    def getModel(self, train : bool = True, DL_args: str | None = None, DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain"]) -> Network:
+    def getModel(self, train : bool = True, DL_args: Union[str, None] = None, DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain"]) -> Network:
         if not DL_args:
             DL_args="{}.Model".format(os.environ["DEEP_LEARNING_API_ROOT"])
         model = partial(getattr(importlib.import_module(self.module), self.name), config = None, DL_args=DL_args)
