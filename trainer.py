@@ -134,7 +134,7 @@ class Trainer(NeedDevice):
     def _train(self) -> None:
         assert self.it_validation, "it_validation is None"
         self.model.train()
-                
+        self.dataloader_training.dataset.init()
         description = lambda : "Training : Loss ("+" ".join(["{}({:.6f}) : {:.4f}".format(name, network.optimizer.param_groups[0]['lr'], network.measure.getLastValue()) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.device)
 
         with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = description(), total=len(self.dataloader_training), leave=False) as batch_iter:
@@ -158,15 +158,14 @@ class Trainer(NeedDevice):
 
                 batch_iter.set_description(description()) 
                 self.it += 1
-
+        self.dataloader_training.dataset.close()
     @torch.no_grad()
     def _validate(self) -> None:
-        
         self.model.measureClear()
         self.model.eval()
         description = lambda : "Validation : Loss ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.ema.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.device)
         data_dict = None
-
+        self.dataloader_validation.dataset.init()
         with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = description(), total=len(self.dataloader_validation), leave=False) as batch_iter:
             for _, data_dict in batch_iter:
                 input = self.getInput(data_dict)
@@ -179,7 +178,7 @@ class Trainer(NeedDevice):
                 batch_iter.set_description(description())
             assert data_dict, "No data"
             self._validation_log(data_dict)
-        
+        self.dataloader_validation.dataset.close()
 
     def checkpoint_save(self, loss) -> None:
         path = CHECKPOINTS_DIRECTORY()+self.train_name+"/"

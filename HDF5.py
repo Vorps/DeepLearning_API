@@ -121,16 +121,13 @@ class ModelPatch(Patch):
 
 class Dataset():
 
-    def __init__(self, group : str, name: str, dataset : DatasetUtils, patch : Union[DatasetPatch, None], pre_transforms : list[Transform]) -> None:
+    def __init__(self, group : str, name: str, datasetUtils : DatasetUtils, patch : Union[DatasetPatch, None], pre_transforms : list[Transform]) -> None:
         self.group = group
         self.name = name
-
-        _dataset = dataset.getDataset(group, name)
-
+        self.datasetUtils = datasetUtils
         self.loaded = False
-        self._shape = list(_dataset.shape[1:])
-
-        self.cache_attribute = Attribute({k : torch.tensor(v) if isinstance(v, np.ndarray) else v for k, v in _dataset.attrs.items()})
+        self._shape, self.cache_attribute =  self.datasetUtils.getInfos(group, name)
+        self._shape = list(self._shape[1:])
         
         self.data : list[torch.Tensor] = list()
         for transformFunction in pre_transforms:
@@ -139,36 +136,31 @@ class Dataset():
         self.patch = DatasetPatch(patch_size=patch.patch_size, overlap=patch.overlap, mask=patch.path_mask) if patch else DatasetPatch(self._shape, mask=patch.path_mask)
         self.patch.load(self._shape)
     
-    def load(self, dataset: DatasetUtils, index : int, pre_transform : list[Transform], dataAugmentationsList : list[DataAugmentationsList]) -> None:
+    def load(self, index : int, pre_transform : list[Transform], dataAugmentationsList : list[DataAugmentationsList]) -> None:
         if self.loaded:
             return
-        
         assert self.name
-
-        _dataset = dataset.getDataset(self.group, self.name)
         i = len(pre_transform)
         data = None
         for transformFunction in reversed(pre_transform):
             if isinstance(transformFunction, Save) and os.path.exists(transformFunction.save):
-                with DatasetUtils(transformFunction.save if not transformFunction.save.endswith("/") else transformFunction.save[:-1]) as datasetUtils:
-                    if datasetUtils.isExist(self.group, self.name):
-                        _, dataset = datasetUtils.getDataset(self.group, self.name)
-                        data, attrib = dataset_to_data(dataset)
-                        self.cache_attribute.update(attrib)
-                        break
+                datasetUtils = DatasetUtils(transformFunction.save if not transformFunction.save.endswith("/") else transformFunction.save[:-1])
+                if datasetUtils.isExist(self.group, self.name):
+                    data, attrib = datasetUtils.readData(self.group, self.name)
+                    self.cache_attribute.update(attrib)
+                    break
             i-=1
         
         if i==0:
-            data = np.empty(_dataset.shape, _dataset.dtype)
-            _dataset.read_direct(data)
+            data, _ = self.datasetUtils.readData(self.group, self.name)
 
         data = torch.from_numpy(data)
         if len(pre_transform):
             for transformFunction in pre_transform[i:]:
                 data = transformFunction(data, self.cache_attribute)
                 if isinstance(transformFunction, Save):
-                    with DatasetUtils(transformFunction.save if not transformFunction.save.endswith("/") else transformFunction.save[:-1], read=False, is_directory=transformFunction.save.endswith("/")) as datasetUtils:
-                        datasetUtils.writeData(self.group, self.name, data.numpy(), self.cache_attribute)
+                    datasetUtils = DatasetUtils(transformFunction.save if not transformFunction.save.endswith("/") else transformFunction.save[:-1], is_directory=transformFunction.save.endswith("/"))
+                    datasetUtils.writeData(self.group, self.name, data.numpy(), self.cache_attribute)
         self.data : list[torch.Tensor] = list()
         if not dataAugmentationsList:
             self.data.append(data)

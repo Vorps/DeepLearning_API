@@ -6,24 +6,25 @@ from DeepLearning_API.networks import blocks
 import torch
 
 
-
 class Alpha_tilde(torch.nn.Module):
 
-
-    def __init__(self, T: int) -> None:
+    def __init__(self, T: int, min_beta=10 ** -4, max_beta=0.02) -> None:
         super().__init__()
         self.T = T
+        self.min_beta = min_beta
+        self.max_beta = max_beta
 
-    def forward(self) -> torch.Tensor:
-        self.betas = torch.linspace(10**-4, 0.02, self.T)
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        betas = torch.linspace(self.min_beta, self.max_beta, self.T)
+        alphas = 1 - betas
+        alpha_bars = torch.tensor([torch.prod(alphas[:i + 1]) for i in range(len(alphas))])
+        print(alpha_bars)
+
+        eta = torch.randn_like(input)
+
+        #noisy = a_bar.sqrt().reshape(n, 1, 1, 1) * input + (1 - a_bar).sqrt().reshape(n, 1, 1, 1) * eta
+        return eta
         
-        self.alphas = 1 - self.betas
-        self.alpha_bars = torch.tensor([torch.prod(self.alphas[:i + 1]) for i in range(len(self.alphas))])
-        print(self.betas)
-        print(self.alphas)
-        print(self.alpha_bars)
-        return None#torch.cat((torch.sqrt(alpha), torch.sqrt(1-alpha)))
-
 class DDPM(network.Network):
 
     @config("DDPM")
@@ -35,11 +36,7 @@ class DDPM(network.Network):
                     dim : int = 3,
                     T: int = 1000) -> None:
         super().__init__(in_channels=1, optimizer=optimizer, schedulers=schedulers, outputsCriterions=outputsCriterions, patch=patch, dim=dim)
-        self.add_module("Alpha_tilde", Alpha_tilde(T), in_branch=[], out_branch=[1])
-        self.add_module("Multiply_std", blocks.Multiply(), in_branch=[0,1])
-        self.add_module("Noise", blocks.NormalNoise(), in_branch=[], out_branch=[2])
-        self.add_module("Add_mu", blocks.Add(), in_branch=[1,2])
-
+        self.add_module("Alpha_tilde", Alpha_tilde(T))
         self.add_module("Conv", torch.nn.Conv3d(in_channels=1, out_channels=1, kernel_size=3))
         
 

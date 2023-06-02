@@ -81,16 +81,12 @@ class Normalize(Transform):
         if not self.lazy:
             input_min = cache_attribute["Min"]
             input_max = cache_attribute["Max"]
-            print(input_min)
-            print(input_max)
             norm = input_max-input_min
             assert norm != 0
-            print(self.channels)
             if self.channels:
                 for channel in self.channels:
                     input[channel] = (self.max_value-self.min_value)*(input[channel] - input_min) / norm + self.min_value
             else:
-                print("OKKKK")
                 input = (self.max_value-self.min_value)*(input - input_min) / norm + self.min_value
             print(torch.min(input))
             print(torch.max(input))

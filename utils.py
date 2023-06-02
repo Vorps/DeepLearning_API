@@ -30,9 +30,12 @@ class Attribute(dict[str, Any]):
             raise NameError("{} not in cache_attribute".format(key))
 
     def __setitem__(self, key: str, value: Any) -> None:
-        i = len([k for k in super().keys() if k.startswith(key)])
-        super().__setitem__("{}_{}".format(key, i), value)
-
+        if "_" not in key:
+            i = len([k for k in super().keys() if k.startswith(key)])
+            super().__setitem__("{}_{}".format(key, i), value)
+        else:
+            super().__setitem__(key, value)
+            
     def pop(self, key: str) -> Any:
         i = len([k for k in super().keys() if k.startswith(key)])
         if i > 0 and "{}_{}".format(key, i-1) in super().keys():   
@@ -93,76 +96,76 @@ def image_to_dataset(h5 : Union[h5py.File, h5py.Group], name : str, image : sitk
 
 class DatasetUtils():
 
-    def __init__(self, filename : str, read : bool = True, parallel : bool = False, is_directory: bool = False) -> None:
+    class H5File():
+
+        def __init__(self, filename: str, read: bool, parallel : bool = False) -> None:
+            self.h5: Union[h5py.File, None] = None
+            self.filename = filename
+            self.read = read
+            self.parallel = parallel
+
+        def __enter__(self):
+            args = {}
+            if self.parallel:
+                try:
+                    from mpi4py import MPI
+                    args.update(dict(driver='mpio', comm=MPI.COMM_WORLD))
+                except:
+                    print("Module importation error mpi4py")
+
+            if self.read:
+                self.h5 = h5py.File(self.filename, 'r', **args)
+            else:
+                if not os.path.exists(self.filename) or self.parallel:
+                    if len(self.filename.split("/")) > 1 and not os.path.exists("/".join(self.filename.split("/")[:-1])):
+                        os.makedirs("/".join(self.filename.split("/")[:-1]))
+                    self.h5 = h5py.File(self.filename, 'w', **args)
+                else: 
+                    self.h5 = h5py.File(self.filename, 'r+', **args)
+                self.h5.attrs["Date"] = DATE()
+            self.h5.__enter__()
+            return self
+    
+        def __exit__(self, type, value, traceback):
+            if self.h5 is not None:
+                self.h5.close()
+
+    def __init__(self, filename : str, parallel : bool = False, is_directory: bool = False) -> None:
         self.filename = filename
         if os.path.exists(filename) and os.path.isdir(filename):
             self.is_directory = True
-        elif not read:
-            self.is_directory = is_directory
         else:
-            self.is_directory = False
+            self.is_directory = is_directory
         self.data = {}
-        self.read = read
-        self._h5: Union[h5py.File, None] = None
         self.parallel = parallel
-        self.h5Files : dict[str, h5py.File] = {}
-
-    def __enter__(self):
         if self.is_directory:
             if not os.path.exists(self.filename):
                 os.makedirs(self.filename)
-            return self
-        
-        args = {}
-        if self.parallel:
-            try:
-                 from mpi4py import MPI
-                 args.update(dict(driver='mpio', comm=MPI.COMM_WORLD))
-            except:
-                print("Module importation error mpi4py")
-
-        if self.read:
-            self._h5 = h5py.File(self.filename, 'r', **args)
-        else:
-            if not os.path.exists(self.filename) or self.parallel:
-                if len(self.filename.split("/")) > 1 and not os.path.exists("/".join(self.filename.split("/")[:-1])):
-                    os.makedirs("/".join(self.filename.split("/")[:-1]))
-                self._h5 = h5py.File(self.filename, 'w', **args)
-            else: 
-                self._h5 = h5py.File(self.filename, 'r+', **args)
-            self._h5.attrs["Date"] = DATE()
-        self._h5.__enter__()
-        return self
     
-    def __exit__(self, type, value, traceback):
-        if self._h5 is not None:
-            self._h5.close()
-        for h5Files in self.h5Files.values():
-            h5Files.close()
+    def _write(self, group : str, name : str, func : Callable[[Union[h5py.File, h5py.Group], sitk.Image, Union[Attribute, None]], None], attributes : Union[Attribute, None] = None):
+        if self.is_directory:
+            with DatasetUtils.H5File("{}/{}".format(self.filename, name), False, self.parallel) as h5:
+                func(h5 = h5.h5, name = group, attributes = attributes)
+        else:
+            with DatasetUtils.H5File(self.filename, False, self.parallel) as h5:
+                if group not in h5.h5:
+                    h5.h5.create_group(group)
+                func(h5 = h5.h5[group], name = name, attributes = attributes)
 
     def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Union[Attribute, None] = None) -> None:
-        if self.is_directory:
-            with h5py.File("{}/{}".format(self.filename, name), "r+" if os.path.exists("{}/{}".format(self.filename, name)) else "w") as h5_file:
-                image_to_dataset(h5_file, group, image, attributes)
-        else:
-            assert self._h5
-            if group not in self._h5:
-                self._h5.create_group(group)
-            h5_group = self.h5[group]
-            image_to_dataset(h5_group, name, image, attributes)
-    
+        self._write(group, name, partial(image_to_dataset, image = image), attributes)
+
     def writeData(self, group : str, name : str, data : np.ndarray, attributes : Union[Attribute, None] = None) -> None:
-        if self.is_directory:
-            with h5py.File("{}/{}".format(self.filename, name), "r+" if os.path.exists("{}/{}".format(self.filename, name)) else "w") as h5_file:
-                data_to_dataset(h5_file, group, data, attributes)
-        else:
-            assert self._h5
-            if group not in self._h5:
-                self._h5.create_group(group)
-            h5_group = self._h5[group]
-            data_to_dataset(h5_group, name, data, attributes)
+        self._write(group, name, partial(data_to_dataset, data = data), attributes)
     
-        
+    def readData(self, group : str, name : str):
+        if self.is_directory:
+            with DatasetUtils.H5File("{}/{}".format(self.filename, name), False, self.parallel) as h5:
+                return dataset_to_data(h5.h5[group])
+        else:
+            with DatasetUtils.H5File(self.filename, False, self.parallel) as h5:
+                return dataset_to_data(h5.h5[group][name])
+    
     def readImages(self, path_dest : str, function: Callable[[np.ndarray, Attribute, str], np.ndarray] = lambda x, y, z: x) -> None:
         if not os.path.exists(path_dest):
             os.makedirs(path_dest)
@@ -180,10 +183,9 @@ class DatasetUtils():
                         print("Write image : {}{}/{}".format(path_dest, group, name))
             names = sorted(os.listdir(self.filename))
             for name in names:
-                h5 = h5py.File("{}/{}".format(self.filename, name), 'r')
-                h5.visititems(partial(write, name))
+                with DatasetUtils.H5File("{}/{}".format(self.filename, name), True, self.parallel) as h5:
+                    h5.h5.visititems(partial(write, name))
         else:
-            assert self._h5
             def write(name, obj):
                 if isinstance(obj, h5py.Dataset):
                     if len(name.split("/")) > 1 and not os.path.exists(path_dest+"/".join(name.split("/")[:-1])):
@@ -194,22 +196,10 @@ class DatasetUtils():
                         im = data_to_image(data, attrs)
                         sitk.WriteImage(im, path_dest+name, True)
                         print("Write image : {}{}".format(path_dest, name))
-            self._h5.visititems(partial(write, None))
-
-    def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Union[Attribute, None] = None) -> None:
-        if self.is_directory:
-            with h5py.File("{}/{}".format(self.filename, name), "r+" if os.path.exists("{}/{}".format(self.filename, name)) else "w") as h5_file:
-                image_to_dataset(h5_file, group, image, attributes)
-        else:
-            assert self._h5
-            if group not in self._h5:
-                self._h5.create_group(group)
-            h5_group = self.h5[group]
-            image_to_dataset(h5_group, name, image, attributes)
+            with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:            
+                h5.h5.visititems(partial(write, None))
 
     def directory_to_dataset(self, src_path : str):
-        if not self.is_directory:
-            assert self._h5
         for root, dirs, files in os.walk(src_path):
             path = root.replace(src_path, "")
             for i, file in enumerate(files):
@@ -218,52 +208,46 @@ class DatasetUtils():
                 print("Compute in progress : {} {:.2f} %".format(path, (i+1)/len(files)*100))
     
     def getSize(self, group):
-        return len(os.listdir(self.filename)) if self.is_directory else len(self._h5[group].keys())
+        if self.is_directory:
+            return len(os.listdir(self.filename))  
+        else:
+            with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:
+                len(h5.h5[group].keys())
+            return 
 
     def isExist(self, group, name: str) -> bool:
         if self.is_directory:
             if os.path.exists("{}/{}".format(self.filename, name)):
-                h5File = self._geth5File("{}/{}".format(self.filename, name))
-                return group in h5File
+                with DatasetUtils.H5File("{}/{}".format(self.filename, name), True, self.parallel) as h5:            
+                    return group in h5.h5
             else:
                 return False
         else:
-            return group in self._h5 and name in self._h5[group]
+            with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:
+                return group in h5.h5 and name in h5.h5[group]
     
-    def getDataset(self, group: str, name: str) -> h5py.Dataset:
-        if self.is_directory:
-            h5File = self._geth5File("{}/{}".format(self.filename, name))
-            return h5File[group]
-        else:
-            return self._h5[group][name]
-
-    def getInfos(self, group, index: Optional[list[int]] = None) -> list[str]:
+    def getNames(self, group, index: Optional[list[int]] = None) -> list[str]:
         if self.is_directory:
             return [name for i, name in enumerate(sorted(os.listdir(self.filename))) if index is None or i in index]
         else:
-            return [dataset.name for i, dataset in enumerate(self._h5[group].values()) if index is None or i in index]
+            with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:
+                return [dataset.name for i, dataset in enumerate(h5.h5[group].values()) if index is None or i in index]
     
-    def _geth5File(self, filename: str):
-        if filename not in self.h5Files:
-            h5File = h5py.File(filename)
-            h5File.__enter__()
-            self.h5Files[filename] = h5File
-        else:
-            h5File = self.h5Files[filename]
-        return h5File
-    
-    def getDatasets(self, group: str, index: list[int]) -> list[h5py.Dataset]:
-        datasets = []
+    def getInfos(self, group, name):
         if self.is_directory:
-            for i, filename in enumerate(sorted(os.listdir(self.filename))):
-                if i in index:
-                    datasets.append(self.getDataset(group, filename))
+            if os.path.exists("{}/{}".format(self.filename, name)):
+                with DatasetUtils.H5File("{}/{}".format(self.filename, name), True, self.parallel) as h5:            
+                    if group in h5.h5:
+                        return h5.h5[group].shape, Attribute({k : torch.tensor(v) if isinstance(v, np.ndarray) else v for k, v in h5.h5[group].attrs.items()})
+            else:
+                assert ValueError()
         else:
-            for i, dataset in enumerate(self._h5[group].values()):
-                if i in index:
-                    datasets.append(dataset)
-        return datasets
-    
+            with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:
+                if group in h5.h5 and name in h5.h5[group]:
+                    return h5.h5[group][name].shape, Attribute({k : torch.tensor(v) if isinstance(v, np.ndarray) else v for k, v in h5.h5[group][name].attrs.items()})
+                else:
+                    assert ValueError()
+
 def _getModule(classpath : str, type : str):
     if len(classpath.split("_")) > 1:
         module = ".".join(classpath.split("_")[:-1])

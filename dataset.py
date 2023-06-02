@@ -16,6 +16,7 @@ from DeepLearning_API.utils import memoryInfo, cpuInfo, memoryForecast, getMemor
 from DeepLearning_API.transform import TransformLoader, Transform
 from DeepLearning_API.augmentation import DataAugmentationsList
 
+from mpi4py.futures import MPICommExecutor
 
 class GroupTransform:
 
@@ -58,9 +59,11 @@ class Group(dict):
 
 class CustomSampler(Sampler[int]):
 
-    def __init__(self, size: int, shuffle: bool = False) -> None:
+    def __init__(self, shuffle: bool = False) -> None:
         self.index = list()
         self.shuffle = shuffle
+    
+    def setSize(self, size):
         self.size = size
 
     def init(self):
@@ -77,12 +80,13 @@ class CustomSampler(Sampler[int]):
 
 class DataSet(data.Dataset):
 
-    def __init__(self, dataset : DatasetUtils, index : list[int], patch : Union[DatasetPatch, None], groups_src : dict[str, Group], dataAugmentationsList : list[DataAugmentationsList], sampler: CustomSampler, use_cache = True, buffer_size: int = 10, nb_process: int = 4) -> None:
+    def __init__(self, dataset : DatasetUtils, index : list[int], patch : Union[DatasetPatch, None], groups_src : dict[str, Group], dataAugmentationsList : list[DataAugmentationsList], sampler: CustomSampler, use_cache = True, buffer_size: float = 0.1, nb_process: int = 4) -> None:
         self.use_cache = use_cache
-        self.buffer_size = buffer_size
+        self.buffer_size = buffer_size if buffer_size < 1 else 1 
         self.nb_process = nb_process
         self.data : dict[str, list[Dataset]] = {}
         self.cache = list()
+        self.cached = list()
         self.dataAugmentationsList = dataAugmentationsList
         self.groups_src = groups_src
         self.map : dict[int, tuple[int, int, int]] = {}
@@ -90,10 +94,14 @@ class DataSet(data.Dataset):
         nb_dataset_list = []
         nb_patch_list = []
         self.sampler = sampler
+        self.MPICommExecutor = MPICommExecutor(max_workers=self.nb_process)
+        self.MPICommExecutor.__exit__()
+        self.executor = None
         self.dataset = dataset
+        self.it = 0
 
         for group_src in self.groups_src:
-            datasets_name = dataset.getInfos(group_src, index)
+            datasets_name = dataset.getNames(group_src, index)
             nb_dataset_list.append(len(datasets_name))
             
             for group_dest in self.groups_src[group_src]:
@@ -116,51 +124,93 @@ class DataSet(data.Dataset):
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 self.loadData(group_src, group_dest, index)
-        self.cache.append(index)
+        print("Loaded : {}".format(index))
+        self.cached.append(index)
         
+
     def load(self):
         if self.use_cache:
             memory_init = getMemory()
-            description = lambda memory_init, i : "Caching : {} | {} | {}".format(memoryInfo(), memoryForecast(memory_init, i, self.nb_dataset), cpuInfo())
-            with tqdm.tqdm(range(int(np.ceil(self.nb_dataset/self.nb_process))), desc=description(memory_init, 0)) as pbar:
+            description = lambda i : "Caching : {} | {} | {}".format(memoryInfo(), memoryForecast(memory_init, i, int(np.ceil(self.nb_dataset/self.nb_process))), cpuInfo())
+            with tqdm.tqdm(range(int(np.ceil(self.nb_dataset/self.nb_process))), desc=description(0)) as pbar:
                 for i in pbar:
                     try:
-                        from mpi4py.futures import MPICommExecutor
                         with MPICommExecutor(max_workers=self.nb_process) as executor:                        
                             for index in range((i)*self.nb_process, min((i+1)*self.nb_process, self.nb_dataset)):
+                                self.cache.append(index)
                                 executor.submit(self._loadData, index)
                     except KeyboardInterrupt:
                         pbar.close()
                         exit(0)
-                    pbar.set_description(description(memory_init, index))
-            
+                    pbar.set_description(description(i))
+
+    def init(self):
+        self.sampler.init()
+        self.it = 0
+        self.executor = self.MPICommExecutor.__enter__()
+        memory_init = getMemory()
+        description = lambda i : "Buffering : {} | {} | {}".format(memoryInfo(), memoryForecast(memory_init, i, int(np.ceil(self.buffer_size*self.nb_dataset/self.nb_process))), cpuInfo())
+        with tqdm.tqdm(range(int(np.ceil(self.buffer_size*self.nb_dataset/self.nb_process))), desc=description(0)) as pbar:
+            for i in pbar:
+                it = 0
+                try:
+                    with MPICommExecutor(max_workers=self.nb_process) as executor:
+                        while it < self.nb_process and len(self.cache) < np.ceil(self.buffer_size*self.nb_dataset):
+                            index, _, _ = self.map[self.sampler.index[self.it]]
+                            self.it += 1
+                            if index not in self.cache:
+                                self.cache.append(index)
+                                executor.submit(self._loadData, index)
+                                it+= 1
+                except KeyboardInterrupt:
+                    pbar.close()
+                    exit(0)
+                pbar.set_description(description(i))
+    
+    def close(self):
+        self.MPICommExecutor.__exit__()
+
     def loadData(self, group_src: str, group_dest : str, index : int) -> None:
         dataset = self.data[group_dest][index]
-        dataset.load(self.dataset, index, self.groups_src[group_src][group_dest].pre_transforms, self.dataAugmentationsList)
+        dataset.load(index, self.groups_src[group_src][group_dest].pre_transforms, self.dataAugmentationsList)
 
     def _unloadData(self, index : int) -> None:
+        self.cache.remove(index)
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 self.unloadData(group_dest, index)
-        self.cache.remove(index)
+        self.cached.remove(index)
 
     def unloadData(self, group_dest : str, index : int) -> None:
         return self.data[group_dest][index].unload()
 
     def __len__(self) -> int:
         return len(self.map)
-        
+
     def __getitem__(self, index : int) -> dict[str, tuple[torch.Tensor, int, int, int]]:
         data = {}
         x, p, a = self.map[index]
-        if x not in self.cache: 
-            self._loadData(x)
+        if x not in self.cached:
+            self.MPICommExecutor.__exit__()
+            self.executor = self.MPICommExecutor.__enter__()
+            if x not in self.cached:
+                self.cache.append(x)
+                self._loadData(x)
+
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 dataset = self.data[group_dest][x]
                 data["{}".format(group_dest)] = (dataset.getData(p, a, self.groups_src[group_src][group_dest].post_transforms), x, p, a)
-        if not self.use_cache and len(self.cache) > self.buffer_size:
-            self._unloadData(self.cache[0])
+
+        x, _, _ = self.map[self.sampler.index[self.it]]
+        if x not in self.cache:
+            self.cache.append(x)
+            self.executor.submit(self._loadData, x)
+            if len(self.cache) > np.ceil(self.buffer_size*self.nb_dataset+10):
+                self._unloadData(self.cache[0])
+
+        self.it += 1
+        print(self.it)
         return data
 
 class Data(NeedDevice, ABC):
@@ -170,7 +220,7 @@ class Data(NeedDevice, ABC):
                         groups_src : dict[str, Group] = {"default" : Group()},
                         patch : Union[DatasetPatch, None] = None,
                         use_cache : bool = True,
-                        buffer_size : int = 10,
+                        buffer_size : float = 0.1,
                         nb_process : int = 4,
                         subset : Union[list[int], None] = None,
                         num_workers : int = 4,
@@ -185,13 +235,12 @@ class Data(NeedDevice, ABC):
         self.dataLoader_args = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
 
     def __enter__(self):
-        self.dataset.__enter__()
         if not self.subset:
             self.subset = [0, len(self)]
         return self
     
     def __exit__(self, type, value, traceback):
-        self.dataset.__exit__(type, value, traceback)
+        pass
     
     def __len__(self) -> int:
         sizes = []
@@ -222,7 +271,7 @@ class DataTrain(Data):
                         augmentations : Union[dict[str, DataAugmentationsList], None] = {"DataAugmentation_0" : DataAugmentationsList()},
                         patch : Union[DatasetPatch, None] = DatasetPatch(),
                         use_cache : bool = True,
-                        buffer_size : int = 10,
+                        buffer_size : float = 0.1,
                         nb_process: int = 4,
                         subset : Union[list[int], None] = None,
                         num_workers : int = 4,
@@ -245,18 +294,21 @@ class DataTrain(Data):
         self.dataSet_args.update(dataAugmentationsList=list(self.dataAugmentationsList.values()))
         if self.train_test_split_args["train_size"] < 1 and int(math.floor(nb*(1-self.train_test_split_args["train_size"]))) > 0:
             index_train, index_valid = train_test_split(range(self.subset[0], self.subset[1]), random_state=random_state, **self.train_test_split_args)
-            sampler_train = CustomSampler(len(index_train), self.shuffle)
+            sampler_train = CustomSampler(self.shuffle)
             self.dataset_train = DataSet(index=index_train, sampler=sampler_train, **self.dataSet_args)
-            sampler_test = CustomSampler(len(index_valid), shuffle=self.shuffle)
+            sampler_train.setSize(len(self.dataset_train))
+            sampler_test = CustomSampler(shuffle=self.shuffle)
             self.dataset_validation = DataSet(index=index_valid, sampler=sampler_test, **self.dataSet_args)
+            sampler_test.setSize(len(self.dataset_validation))
             return DataLoader(dataset=self.dataset_train, sampler=sampler_train, **self.dataLoader_args), DataLoader(dataset=self.dataset_validation, sampler=sampler_test, **self.dataLoader_args)
         else:
             if self.train_test_split_args["shuffle"]:
                 index_train =  random.sample(list(range(self.subset[0], self.subset[1])), self.subset[1]-self.subset[0])
             else:
                 index_train = list(range(self.subset[0], self.subset[1]))
-            sampler_train = CustomSampler(len(index_train), self.shuffle)
+            sampler_train = CustomSampler(self.shuffle)
             self.dataset_train = DataSet(index=index_train, sampler=sampler_train, **self.dataSet_args)
+            sampler_train.setSize(len(self.dataset_train))
             self.dataset_validation = None
             return DataLoader(dataset=self.dataset_train, sampler=sampler_train, **self.dataLoader_args), None
 
@@ -273,7 +325,7 @@ class DataPrediction(Data):
                         groups_src : dict[str, Group] = {"default" : Group()},
                         patch : Union[DatasetPatch, None] = DatasetPatch(),
                         use_cache : bool = True,
-                        buffer_size : int = 10,
+                        buffer_size : float = 0.1,
                         nb_process: int = 4,
                         subset : Union[list[int], None] = None,
                         num_workers : int = 4,
