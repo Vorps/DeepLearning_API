@@ -197,9 +197,8 @@ class NormalNoise(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
     
-    def forward(self) -> torch.Tensor:
-        q = torch.distributions.Normal(0, 1)
-        return q.rsample()
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return torch.randn_like(input)
     
 class Const(torch.nn.Module):
 
@@ -238,40 +237,40 @@ class LatentDistribution(network.ModuleArgsDict):
 
     class LatentDistribution_Linear(torch.nn.Module):
 
-        def __init__(self, latentDim: int) -> None:
+        def __init__(self, shape: list[int], latentDim: int) -> None:
             super().__init__()
             self.latentDim = latentDim
+            print(shape)
+            self.linear = torch.nn.Linear(torch.prod(torch.tensor(shape)), self.latentDim)
 
-        def forward(self, input: torch.Tensor, shape: torch.Tensor) -> torch.Tensor:
-            linear = torch.nn.Linear(torch.prod(shape[1:]), self.latentDim).to(input.device)
-            return linear(input)
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            print(input.shape)
+            return torch.unsqueeze(self.linear(input), 1)
 
     class LatentDistribution_DecoderInput(torch.nn.Module):
         
-        def __init__(self, latentDim: int) -> None:
+        def __init__(self, shape: list[int], latentDim: int) -> None:
             super().__init__()
             self.latentDim = latentDim
-        
-        def forward(self, input: torch.Tensor, shape: torch.Tensor) -> torch.Tensor:
-            linear = torch.nn.Linear(self.latentDim, torch.prod(shape[1:])).to(input.device)
-            return linear(input).view(-1, *[int(i) for i in shape[1:]])
+            self.linear = torch.nn.Linear(self.latentDim, torch.prod(torch.tensor(shape)))
+            self.shape = shape
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            return self.linear(input).view(-1, *[int(i) for i in self.shape])
             
-    def __init__(self, out_channels: int, out_is_channel : bool, latentDim: int, modelDim: int, out_branch : list[int]) -> None:
+    def __init__(self, in_channels: int, shape: list[int], out_is_channel : bool, latentDim: int, modelDim: int, out_branch : list[int]) -> None:
         super().__init__()
         if not out_is_channel:
             self.add_module("ToChannels", ToChannels(modelDim))
-        self.add_module("GetShape", GetShape(), out_branch=["Shape"])
-
+        shape = [in_channels]+shape
         self.add_module("Flatten", torch.nn.Flatten(1))
-        self.add_module("mu", LatentDistribution.LatentDistribution_Linear(latentDim), in_branch = [*out_branch, "Shape"], out_branch = [1])
-        self.add_module("log_std", LatentDistribution.LatentDistribution_Linear(latentDim), in_branch =  [*out_branch, "Shape"], out_branch = [2])
-        self.add_module("Unsqueeze_mu", Unsqueeze(1), in_branch = [1], out_branch = [1])
-        self.add_module("Unsqueeze_log_std", Unsqueeze(1), in_branch = [2], out_branch = [2])
-        self.add_module("NormalSample", NormalNoise(), in_branch=[], out_branch=[3])
-        self.add_module("Multiply_std", Multiply(), in_branch=[2,3], out_branch=[3])
-        self.add_module("Add_mu", Add(), in_branch=[1,3], out_branch=[3])
+        self.add_module("mu", LatentDistribution.LatentDistribution_Linear(shape, latentDim), in_branch = out_branch, out_branch = [1])
+        self.add_module("log_std", LatentDistribution.LatentDistribution_Linear(shape, latentDim), in_branch = out_branch, out_branch = [2])
+
+        self.add_module("NormalSample", NormalNoise(), in_branch=[1], out_branch=[3])
+        self.add_module("z", ApplyFunction(lambda mu, log_std, noise : torch.exp(log_std/2)*noise+mu), in_branch=[1,2,3], out_branch=[3])
         self.add_module("Concat", Concat(), in_branch=[1,2,3])
-        self.add_module("DecoderInput", LatentDistribution.LatentDistribution_DecoderInput(latentDim), in_branch=[3, "Shape"])
+        self.add_module("DecoderInput", LatentDistribution.LatentDistribution_DecoderInput(shape, latentDim), in_branch=[3])
 
 class AdaIN(torch.nn.Module):
 

@@ -9,7 +9,7 @@ import pynvml
 
 from DeepLearning_API import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import DatasetUtils, State, gpuInfo, getDevice, NeedDevice, logImageFormat, Attribute, get_patch_slices_from_nb_patch_per_dim
+from DeepLearning_API.utils import DatasetUtils, State, gpuInfo, getDevice, logImageFormat, Attribute, get_patch_slices_from_nb_patch_per_dim, NeedDevice
 from DeepLearning_API.dataset import DataPrediction, DataSet
 from DeepLearning_API.HDF5 import Accumulator
 from DeepLearning_API.networks.network import Measure, ModelLoader
@@ -18,7 +18,7 @@ from DeepLearning_API.transform import Transform, TransformLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 from typing import Union
 
-class OutDataset(DatasetUtils, NeedDevice, ABC):
+class OutDataset(DatasetUtils, ABC):
 
     def __init__(self, filename: str, group: str, pre_transforms : dict[str, TransformLoader], post_transforms : dict[str, TransformLoader], patchCombine: Union[str, None]) -> None: 
         super().__init__(filename, read=False)
@@ -144,7 +144,7 @@ class Predictor(NeedDevice):
                     dataset: DataPrediction = DataPrediction(),
                     train_name: str = "name",
                     groupsInput: list[str] = ["default"],
-                    device: Union[int, None] = None,
+                    devices : Union[list[int], None] = [None],
                     outsDataset: Union[dict[str, OutDatasetLoader], None] = {"default:Default" : OutDatasetLoader()},
                     images_log: list[str] = []) -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
@@ -166,14 +166,13 @@ class Predictor(NeedDevice):
         for name, outDataset in self.outsDataset.items():
             outDataset.filename = self.predict_path+outDataset.filename
             outDataset.load(name.replace(".", ":"))
-        self.setDevice(getDevice(device))
+        self.result_ids, self.result_devices = getDevice(devices)
+        self.setDevice(self.result_devices[0])
         
     def setDevice(self, device: torch.device):
         super().setDevice(device)
         self.dataset.setDevice(device)
         self.model.setDevice(device)
-        for outDataset in self.outsDataset.values():
-            outDataset.setDevice(device)
 
     def __enter__(self):
         pynvml.nvmlInit()

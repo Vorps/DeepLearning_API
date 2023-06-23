@@ -1,1 +1,1 @@
-python /datasets/work/hb-vatsop-lung/work/DeepLearning_API/1.0/DeepLearning_API/main.py $@
+mpirun python /scratch2/bou162/DeepLearning_API/1.0/DeepLearning_API/main.py $@

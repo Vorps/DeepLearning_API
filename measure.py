@@ -7,18 +7,18 @@ import torch.nn.functional as F
 import os
 
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import NeedDevice, _getModule
+from DeepLearning_API.utils import _getModule
 from DeepLearning_API.networks.blocks import LatentDistribution
 from DeepLearning_API.networks.network import ModelLoader, Network
-from typing import Callable
-
+from typing import Callable, Union
+from functools import partial
 import torch.nn.functional as F
 import itertools
-
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 modelsRegister = {}
 
-class Criterion(NeedDevice, torch.nn.Module, ABC):
+class Criterion(torch.nn.Module, ABC):
 
     def __init__(self) -> None:
         super().__init__()
@@ -26,19 +26,44 @@ class Criterion(NeedDevice, torch.nn.Module, ABC):
     def init(self, model : torch.nn.Module, output_group : str, target_group : str) -> str:
         return output_group
 
-class MaskedMSE(Criterion):
+class MaskedLoss(Criterion):
 
-    def __init__(self) -> None:
+    def __init__(self, loss : Callable[[torch.Tensor, torch.Tensor], torch.Tensor], mode_image_masked: bool) -> None:
         super().__init__()
-        self.loss = torch.nn.MSELoss()
+        self.loss = loss
+        self.mode_image_masked = mode_image_masked
 
-    def forward(self, input: torch.Tensor, target : torch.Tensor) -> torch.Tensor:
-        loss = torch.tensor(0, dtype=torch.float32).to(self.device)
+    def forward(self, input: torch.Tensor, *target : list[torch.Tensor]) -> torch.Tensor:
+        loss = torch.tensor(0, dtype=torch.float32).to(input.device)
         for batch in range(input.shape[0]):
-            mask = target[batch, -1, ...]
-            if len(torch.where(mask == 1)[0]) > 0:
-                loss += self.loss(torch.masked_select(input[batch, ...], mask == 1), torch.masked_select(target[batch, :-1, ...], mask == 1))/input.shape[0]
-        return loss
+            if len(target) > 1:
+                if self.mode_image_masked:
+                    loss += self.loss(input[batch, ...]*target[1][batch, ...], target[0][batch, ...]*target[1][batch, ...])
+                else:
+                    loss += self.loss(torch.masked_select(input[batch, ...], target[1][batch, ...] == 1), torch.masked_select(target[0][batch, ...], target[1][batch, ...] == 1))
+            else:
+                loss += self.loss(input[batch, ...], target[0][batch, ...])
+        return loss/input.shape[0]
+    
+class MSE(MaskedLoss):
+
+    def __init__(self, reduction: str = "mean") -> None:
+        super().__init__(lambda x, y : torch.nn.MSELoss(reduction=reduction)(x, y), False)
+
+class MAE(MaskedLoss):
+
+    def __init__(self, reduction: str = "mean") -> None:
+        super().__init__(lambda x, y : torch.nn.L1Loss(reduction=reduction)(x, y), False)
+
+class PSNR(MaskedLoss):
+
+    def __init__(self, dynamic_range: Union[float, None] = None) -> None:
+        super().__init__(lambda x, y : peak_signal_noise_ratio(x[0].cpu().numpy(), y[0].cpu().numpy(), data_range=dynamic_range if dynamic_range else (y.max()-y.min()).cpu().numpy()), False)
+    
+class SSIM(MaskedLoss):
+
+    def __init__(self, dynamic_range: Union[float, None] = None) -> None:
+        super().__init__(lambda x, y : structural_similarity(x[0].cpu().numpy(), y[0].cpu().numpy(), data_range=dynamic_range if dynamic_range else (y.max()-y.min()).cpu().numpy()), True)
 
 class DistanceLoss(Criterion):
 
@@ -232,12 +257,13 @@ class MedPerceptualLoss(Criterion):
 
 class KLDivergence(Criterion):
     
-    def __init__(self, dim : int = 100, mu : float = 0, std : float = 1) -> None:
+    def __init__(self, shape: list[int], dim : int = 100, mu : float = 0, std : float = 1) -> None:
         super().__init__()
         self.latentDim = dim
         self.mu = torch.Tensor([mu])
         self.std = torch.Tensor([std])
         self.modelDim = 3
+        self.shape = shape
         
     def init(self, model : Network, output_group : str, target_group : str) -> str:
         super().init(model, output_group, target_group)
@@ -246,35 +272,37 @@ class KLDivergence(Criterion):
         last_module = model
         for name in output_group.split(".")[:-1]:
             last_module = last_module[name]
+
         modules = last_module._modules.copy()
+        modulesArgs = last_module._modulesArgs.copy()
         last_module._modules.clear()
-
+        
         for name, value in modules.items():
-            last_module._modules[name] = value
+            last_module.add_module(name, value)
             if name == output_group.split(".")[-1]:
-                last_module.add_module("LatentDistribution", LatentDistribution(out_channels=last_module._modulesArgs[name].out_channels, out_is_channel=last_module._modulesArgs[name].out_is_channel , latentDim=self.latentDim, modelDim=self.modelDim, out_branch=last_module._modulesArgs[name].out_branch))
+                last_module.add_module("LatentDistribution", LatentDistribution(in_channels=modulesArgs[name].out_channels, shape = self.shape, out_is_channel=modulesArgs[name].out_is_channel , latentDim=self.latentDim, modelDim=self.modelDim, out_branch=modulesArgs[name].out_branch))
         return ".".join(output_group.split(".")[:-1])+".LatentDistribution.Concat"
-
-    def setDevice(self, device: torch.device):
-        super().setDevice(device)
-        self.mu = self.mu.to(self.device)
-        self.std = self.std.to(self.device)
     
     def forward(self, input : torch.Tensor) -> torch.Tensor:
         mu = input[:, 0, :]
-        std = torch.exp(input[:, 1, :]/2)
-        z = input[:, 2, :]
+        log_std = input[:, 1, :]
+        """z = input[:, 2, :]
+
         q = torch.distributions.Normal(mu, std)
         
-        target_mu = torch.ones((self.latentDim)).to(self.device)*self.mu
-        
-        p = torch.distributions.Normal(target_mu, torch.ones((self.latentDim)).to(self.device)*self.std)
+        target_mu = torch.ones((self.latentDim)).to(input.device)*self.mu.to(input.device)
+        target_std = torch.ones((self.latentDim)).to(input.device)*self.std.to(input.device)
+
+        p = torch.distributions.Normal(target_mu, target_std)
         log_pz = p.log_prob(z)
 
         log_qzx = q.log_prob(z)
-        kl = (log_qzx - log_pz)
-        kl = kl.sum(-1)
-        return kl.mean()
+
+        
+
+        kl = (log_pz - log_qzx)
+        kl = kl.sum(-1)"""
+        return torch.mean(-0.5 * torch.sum(1 + log_std - mu**2 - torch.exp(log_std), dim= 0))
 
 class Accuracy(Criterion):
 
@@ -314,3 +342,5 @@ class Contrastive(Criterion):
             negative_index = [a for a in range(target.shape[0]) if target[a] != target[i]]
             loss += torch.pow(torch.relu(self.J_ij(D, i, j, negative_index)), 2)
         return loss*1/(2*len(positive_pair))
+    
+

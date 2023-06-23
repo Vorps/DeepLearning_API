@@ -11,7 +11,6 @@ from DeepLearning_API import CONFIG_FILE
 
 yaml = ruamel.yaml.YAML()
 
-
 class ConfigError(Exception):
 
     def __init__(self, message : str = "The config only supports types : config(Object), int, str, bool, float, list[int], list[str], list[bool], list[float], dict[str, Object]") -> None:

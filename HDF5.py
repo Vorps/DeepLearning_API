@@ -8,12 +8,12 @@ import torch.nn.functional as F
 from typing import Iterator
 
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import DatasetUtils, NeedDevice, dataset_to_data, Attribute, get_patch_slices_from_shape
+from DeepLearning_API.utils import DatasetUtils, dataset_to_data, Attribute, get_patch_slices_from_shape
 from DeepLearning_API.transform import Transform, Save
 from DeepLearning_API.augmentation import DataAugmentationsList
 from typing import Union, Callable
 
-class PathCombine(NeedDevice, ABC):
+class PathCombine(ABC):
 
     def __init__(self) -> None:
         self.model = None
@@ -67,16 +67,19 @@ class Patch(ABC):
         self.nb_patch_per_dim: list[tuple[int, bool]] = None
         self.path_mask = path_mask
         self.mask = None
-        if self.path_mask is not None and os.path.exists(self.path_mask):
-            self.mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path_mask)))
-
+        if self.path_mask is not None:
+            if os.path.exists(self.path_mask):
+                self.mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path_mask)))
+            else:
+                raise NameError('Mask file not found')
+            
     def load(self, shape : list[int]) -> None:
         self.patch_slices, self.nb_patch_per_dim = get_patch_slices_from_shape(self.patch_size, shape, self.overlap)
 
     def getData(self, data : torch.Tensor, index : int) -> torch.Tensor:
         if len(self.patch_slices) == 1:
             return data
-            
+        
         slices = []
         for max in data.shape[:-len(self.patch_slices[index])]:
             slices.append(slice(max))
@@ -91,7 +94,6 @@ class Patch(ABC):
             padding.append(0 if _slice.start+self.patch_size[dim] <= data.shape[dim] else _slice.start+self.patch_size[dim]-_slice.stop)
 
         data = F.pad(data, tuple(padding), "constant", 0)
-
         if self.mask is not None:
             data = torch.where(self.mask == 0, torch.zeros((1), dtype=data.dtype), data)
 
@@ -121,19 +123,21 @@ class ModelPatch(Patch):
 
 class Dataset():
 
-    def __init__(self, group : str, name: str, datasetUtils : DatasetUtils, patch : Union[DatasetPatch, None], pre_transforms : list[Transform]) -> None:
-        self.group = group
+    def __init__(self, group_src, group_dest : str, name: str, datasetUtils : DatasetUtils, patch : Union[DatasetPatch, None], pre_transforms : list[Transform]) -> None:
+        self.group_src = group_src
+        self.group_dest = group_dest
         self.name = name
         self.datasetUtils = datasetUtils
         self.loaded = False
-        self._shape, self.cache_attribute =  self.datasetUtils.getInfos(group, name)
+
+        self._shape, self.cache_attribute =  self.datasetUtils.getInfos(self.group_src, name)
         self._shape = list(self._shape[1:])
         
         self.data : list[torch.Tensor] = list()
         for transformFunction in pre_transforms:
             self._shape = transformFunction.transformShape(self._shape, self.cache_attribute)
 
-        self.patch = DatasetPatch(patch_size=patch.patch_size, overlap=patch.overlap, mask=patch.path_mask) if patch else DatasetPatch(self._shape, mask=patch.path_mask)
+        self.patch = DatasetPatch(patch_size=patch.patch_size, overlap=patch.overlap, mask=patch.path_mask) if patch else DatasetPatch(self._shape)
         self.patch.load(self._shape)
     
     def load(self, index : int, pre_transform : list[Transform], dataAugmentationsList : list[DataAugmentationsList]) -> None:
@@ -145,22 +149,22 @@ class Dataset():
         for transformFunction in reversed(pre_transform):
             if isinstance(transformFunction, Save) and os.path.exists(transformFunction.save):
                 datasetUtils = DatasetUtils(transformFunction.save if not transformFunction.save.endswith("/") else transformFunction.save[:-1])
-                if datasetUtils.isExist(self.group, self.name):
-                    data, attrib = datasetUtils.readData(self.group, self.name)
+                if datasetUtils.isExist(self.group_dest, self.name):
+                    data, attrib = datasetUtils.readData(self.group_dest, self.name)
                     self.cache_attribute.update(attrib)
                     break
             i-=1
         
         if i==0:
-            data, _ = self.datasetUtils.readData(self.group, self.name)
+            data, _ = self.datasetUtils.readData(self.group_src, self.name)
 
         data = torch.from_numpy(data)
         if len(pre_transform):
             for transformFunction in pre_transform[i:]:
-                data = transformFunction(data, self.cache_attribute)
+                data = transformFunction(self.name, data, self.cache_attribute)
                 if isinstance(transformFunction, Save):
                     datasetUtils = DatasetUtils(transformFunction.save if not transformFunction.save.endswith("/") else transformFunction.save[:-1], is_directory=transformFunction.save.endswith("/"))
-                    datasetUtils.writeData(self.group, self.name, data.numpy(), self.cache_attribute)
+                    datasetUtils.writeData(self.group_dest, self.name, data.numpy(), self.cache_attribute)
         self.data : list[torch.Tensor] = list()
         if not dataAugmentationsList:
             self.data.append(data)
@@ -179,7 +183,7 @@ class Dataset():
     def getData(self, index : int, a : int, post_transforms : list[Transform]) -> torch.Tensor:
         data = self.patch.getData(self.data[a], index)
         for transformFunction in post_transforms:
-            data = transformFunction(data, self.cache_attribute)
+            data = transformFunction(self.name, data, self.cache_attribute)
         return data
 
     def __len__(self) -> int:

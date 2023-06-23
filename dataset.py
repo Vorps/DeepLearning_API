@@ -12,7 +12,7 @@ from typing import Union, Iterator
 
 from DeepLearning_API.HDF5 import DatasetPatch, Dataset
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, NeedDevice, DatasetUtils
+from DeepLearning_API.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, DatasetUtils, NeedDevice
 from DeepLearning_API.transform import TransformLoader, Transform
 from DeepLearning_API.augmentation import DataAugmentationsList
 
@@ -28,16 +28,18 @@ class GroupTransform:
         self.pre_transforms : list[Transform] = []
         self.post_transforms : list[Transform] = []
         
-    def load(self, group_src : str, group_dest : str, device : torch.device):
+    def load(self, group_src : str, group_dest : str, device : torch.device, datasetUtils: DatasetUtils):
         if self._pre_transforms is not None:
             if isinstance(self._pre_transforms, dict):
                 for classpath, transform in self._pre_transforms.items():
                     transform = transform.getTransform(classpath, DL_args =  "{}.Dataset.groups_src.{}.groups_dest.{}.pre_transforms".format(os.environ["DEEP_LEARNING_API_ROOT"], group_src, group_dest))
                     transform.setDevice(device)
+                    transform.setDatasetUtils(datasetUtils)
                     self.pre_transforms.append(transform)
             else:
                 for transform in self._pre_transforms:
                     transform.setDevice(device)
+                    transform.setDatasetUtils(datasetUtils)
                     self.pre_transforms.append(transform)
 
         if self._post_transforms is not None:
@@ -45,10 +47,12 @@ class GroupTransform:
                 for classpath, transform in self._post_transforms.items():
                     transform = transform.getTransform(classpath, DL_args = "{}.Dataset.groups_src.{}.groups_dest.{}.post_transforms".format(os.environ["DEEP_LEARNING_API_ROOT"], group_src, group_dest))
                     transform.setDevice(device)
+                    transform.setDatasetUtils(datasetUtils)
                     self.post_transforms.append(transform)
             else:
                 for transform in self._post_transforms:
                     transform.setDevice(device)
+                    transform.setDatasetUtils(datasetUtils)
                     self.post_transforms.append(transform)
 
 class Group(dict):
@@ -80,7 +84,7 @@ class CustomSampler(Sampler[int]):
 
 class DataSet(data.Dataset):
 
-    def __init__(self, dataset : DatasetUtils, index : list[int], patch : Union[DatasetPatch, None], groups_src : dict[str, Group], dataAugmentationsList : list[DataAugmentationsList], sampler: CustomSampler, use_cache = True, buffer_size: float = 0.1, nb_process: int = 4) -> None:
+    def __init__(self, dataset : DatasetUtils, index : list[int], patch : Union[DatasetPatch, None], groups_src : dict[str, Group], dataAugmentationsList : list[DataAugmentationsList], sampler: CustomSampler, num_workers: int, use_cache = True, buffer_size: float = 0.1, nb_process: int = 4) -> None:
         self.use_cache = use_cache
         self.buffer_size = buffer_size if buffer_size < 1 else 1 
         self.nb_process = nb_process
@@ -94,8 +98,7 @@ class DataSet(data.Dataset):
         nb_dataset_list = []
         nb_patch_list = []
         self.sampler = sampler
-        self.MPICommExecutor = MPICommExecutor(max_workers=self.nb_process)
-        self.MPICommExecutor.__exit__()
+        self.MPICommExecutor = MPICommExecutor(max_workers=self.nb_process) if num_workers == 0 and not self.use_cache else None
         self.executor = None
         self.dataset = dataset
         self.it = 0
@@ -105,7 +108,7 @@ class DataSet(data.Dataset):
             nb_dataset_list.append(len(datasets_name))
             
             for group_dest in self.groups_src[group_src]:
-                self.data[group_dest] = [Dataset(group_dest, name, dataset, patch = self.patch, pre_transforms = self.groups_src[group_src][group_dest].pre_transforms) for name in datasets_name]
+                self.data[group_dest] = [Dataset(group_src, group_dest, name, dataset, patch = self.patch, pre_transforms = self.groups_src[group_src][group_dest].pre_transforms) for name in datasets_name]
                 nb_patch_list.append([len(dataset) for dataset in self.data[group_dest]])
         
         self.nb_dataset = nb_dataset_list[0]
@@ -124,7 +127,6 @@ class DataSet(data.Dataset):
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 self.loadData(group_src, group_dest, index)
-        print("Loaded : {}".format(index))
         self.cached.append(index)
         
 
@@ -138,6 +140,7 @@ class DataSet(data.Dataset):
                         with MPICommExecutor(max_workers=self.nb_process) as executor:                        
                             for index in range((i)*self.nb_process, min((i+1)*self.nb_process, self.nb_dataset)):
                                 self.cache.append(index)
+                                #self._loadData(index)
                                 executor.submit(self._loadData, index)
                     except KeyboardInterrupt:
                         pbar.close()
@@ -147,28 +150,32 @@ class DataSet(data.Dataset):
     def init(self):
         self.sampler.init()
         self.it = 0
-        self.executor = self.MPICommExecutor.__enter__()
-        memory_init = getMemory()
-        description = lambda i : "Buffering : {} | {} | {}".format(memoryInfo(), memoryForecast(memory_init, i, int(np.ceil(self.buffer_size*self.nb_dataset/self.nb_process))), cpuInfo())
-        with tqdm.tqdm(range(int(np.ceil(self.buffer_size*self.nb_dataset/self.nb_process))), desc=description(0)) as pbar:
-            for i in pbar:
-                it = 0
-                try:
-                    with MPICommExecutor(max_workers=self.nb_process) as executor:
-                        while it < self.nb_process and len(self.cache) < np.ceil(self.buffer_size*self.nb_dataset):
-                            index, _, _ = self.map[self.sampler.index[self.it]]
-                            self.it += 1
-                            if index not in self.cache:
-                                self.cache.append(index)
-                                executor.submit(self._loadData, index)
-                                it+= 1
-                except KeyboardInterrupt:
-                    pbar.close()
-                    exit(0)
-                pbar.set_description(description(i))
+        if not self.use_cache:
+            if self.MPICommExecutor:
+                self.executor = self.MPICommExecutor.__enter__()
+            memory_init = getMemory()
+            description = lambda i : "Buffering : {} | {} | {}".format(memoryInfo(), memoryForecast(memory_init, i, int(np.ceil(self.buffer_size*self.nb_dataset/self.nb_process))), cpuInfo())
+            
+            with tqdm.tqdm(range(int(np.ceil(self.buffer_size*self.nb_dataset/self.nb_process))), desc=description(0)) as pbar:
+                for i in pbar:
+                    it = 0
+                    try:
+                        with MPICommExecutor(max_workers=self.nb_process) as executor:
+                            while it < self.nb_process and len(self.cache) < np.ceil(self.buffer_size*self.nb_dataset):
+                                index, _, _ = self.map[self.sampler.index[self.it]]
+                                self.it += 1
+                                if index not in self.cache:
+                                    self.cache.append(index)
+                                    executor.submit(self._loadData, index)
+                                    it+= 1
+                    except KeyboardInterrupt:
+                        pbar.close()
+                        exit(0)
+                    pbar.set_description(description(i))
     
     def close(self):
-        self.MPICommExecutor.__exit__()
+        if self.MPICommExecutor:
+            self.MPICommExecutor.__exit__()
 
     def loadData(self, group_src: str, group_dest : str, index : int) -> None:
         dataset = self.data[group_dest][index]
@@ -190,27 +197,36 @@ class DataSet(data.Dataset):
     def __getitem__(self, index : int) -> dict[str, tuple[torch.Tensor, int, int, int]]:
         data = {}
         x, p, a = self.map[index]
-        if x not in self.cached:
-            self.MPICommExecutor.__exit__()
-            self.executor = self.MPICommExecutor.__enter__()
+        if not self.use_cache:
+            if len(self.cache) - len(self.cached) >= self.nb_process:
+                if self.MPICommExecutor:
+                    self.MPICommExecutor.__exit__()
+                    self.executor = self.MPICommExecutor.__enter__()
             if x not in self.cached:
-                self.cache.append(x)
-                self._loadData(x)
+                if self.MPICommExecutor:
+                    self.MPICommExecutor.__exit__()
+                    self.executor = self.MPICommExecutor.__enter__()
+                if x not in self.cached:
+                    self.cache.append(x)
+                    self._loadData(x)
 
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 dataset = self.data[group_dest][x]
                 data["{}".format(group_dest)] = (dataset.getData(p, a, self.groups_src[group_src][group_dest].post_transforms), x, p, a)
 
-        x, _, _ = self.map[self.sampler.index[self.it]]
-        if x not in self.cache:
-            self.cache.append(x)
-            self.executor.submit(self._loadData, x)
-            if len(self.cache) > np.ceil(self.buffer_size*self.nb_dataset+10):
-                self._unloadData(self.cache[0])
-
-        self.it += 1
-        print(self.it)
+        if not self.use_cache:
+            if self.it < len(self.sampler.index):
+                x, _, _ = self.map[self.sampler.index[self.it]]
+                if x not in self.cache:
+                    self.cache.append(x)
+                    if self.MPICommExecutor:
+                        self.executor.submit(self._loadData, x)
+                    else:
+                        self._loadData(x)
+                    if len(self.cache) > np.ceil(self.buffer_size*self.nb_dataset+10):
+                        self._unloadData(self.cache[0])
+            self.it += 1
         return data
 
 class Data(NeedDevice, ABC):
@@ -231,7 +247,7 @@ class Data(NeedDevice, ABC):
         self.dataAugmentationsList: dict[str, DataAugmentationsList] = {}
         self.dataset = DatasetUtils(dataset_filename)
 
-        self.dataSet_args = dict(dataset=self.dataset, patch = patch, groups_src=self.groups_src, dataAugmentationsList = list(self.dataAugmentationsList.values()), use_cache = use_cache, buffer_size = buffer_size, nb_process = nb_process)
+        self.dataSet_args = dict(dataset=self.dataset, patch = patch, groups_src=self.groups_src, dataAugmentationsList = list(self.dataAugmentationsList.values()), use_cache = use_cache, buffer_size = buffer_size, nb_process = nb_process, num_workers=num_workers)
         self.dataLoader_args = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
 
     def __enter__(self):
@@ -254,7 +270,7 @@ class Data(NeedDevice, ABC):
         assert self.device, "No device set"
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
-                self.groups_src[group_src][group_dest].load(group_src, group_dest, self.device)
+                self.groups_src[group_src][group_dest].load(group_src, group_dest, self.device, self.dataset)
 
         for key, dataAugmentations in self.dataAugmentationsList.items():
             dataAugmentations.load(key, self.device)

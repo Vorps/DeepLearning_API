@@ -80,7 +80,7 @@ class TargetCriterionsLoader():
             targetsCriterions[target_group] = criterionsLoader.getCriterions(model_classname, output_group, target_group, train)
         return targetsCriterions
 
-class Measure(NeedDevice):
+class Measure():
 
     def __init__(self, model_classname : str, outputsCriterions: dict[str, TargetCriterionsLoader], train : bool) -> None:
         super().__init__()
@@ -91,14 +91,6 @@ class Measure(NeedDevice):
         self.loss : Union[torch.Tensor, None] = None
         self._it = 0
         self._nb_loss = 0
-
-    def setDevice(self, device: torch.device) -> None:
-        super().setDevice(device)
-        for output_group in self.outputsCriterions:
-            for target_group in self.outputsCriterions[output_group]:
-                for criterion in self.outputsCriterions[output_group][target_group]:
-                    if isinstance(criterion, NeedDevice):
-                        criterion.setDevice(device)
 
     def init(self, model : torch.nn.Module) -> None:
         outputs_group_rename = {}
@@ -121,13 +113,13 @@ class Measure(NeedDevice):
 
     def update(self, output_group: str, output : torch.Tensor, data_dict: dict[str, torch.Tensor], it: int) -> None:
         for target_group in self.outputsCriterions[output_group]:
-            target = [data_dict[group].to(self.device, non_blocking=False) for group in target_group.split("/") if group in data_dict]
+            target = [data_dict[group].to(output.device) for group in target_group.split("/") if group in data_dict]
             for criterion, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
                 
                 if it >= criterionsAttr.stepStart and (criterionsAttr.stepStop is None or it <= criterionsAttr.stepStop):
                     result = criterion(output, *target)
                     if criterionsAttr.isLoss:
-                        self.loss = self.loss+criterionsAttr.l*result
+                        self.loss = self.loss.to(result.device)+criterionsAttr.l*result
                         self._it +=1
                     self.values["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)].append(criterionsAttr.l*result.item())
                 elif criterionsAttr.isLoss:
@@ -138,8 +130,8 @@ class Measure(NeedDevice):
     
     def resetLoss(self) -> None:
         self._it = 0
-        self.loss = torch.zeros((1), requires_grad = True).to(self.device, non_blocking=False)
-
+        self.loss = torch.zeros((1), requires_grad = True)
+        
     def getLastValue(self) -> float:
         return self.loss.item() if self.loss is not None else 0
     
@@ -406,7 +398,6 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
         self.init_gain  = init_gain
         self.dim = dim
         
-        self.scaler : Union[torch.cuda.amp.grad_scaler.GradScaler, None] = None
         self._it = 0
         
     @_function_network
@@ -424,10 +415,6 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
             if hook_result is not None:
                 destination = hook_result
         return destination
-
-    @_function_network
-    def setDevice(self, device: torch.device):
-        super().setDevice(device)
     
     def load_state_dict(self, state_dict: dict[str, torch.Tensor]):
         missing_keys: list[str] = []
@@ -488,7 +475,7 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
             self.load_state_dict(model_state_dict)
         if "{}_optimizer_state_dict".format(name) in state_dict and self.optimizer:
             self.optimizer.load_state_dict(state_dict['{}_optimizer_state_dict'.format(name)])
-
+        
     def _compute_channels_trace(self, module : ModuleArgsDict, in_channels : int, gradient_checkpoints: Union[list[str], None], name: Union[str, None] = None, in_is_channel = True, out_channels : Union[int, None] = None, out_is_channel = True) -> tuple[int, bool, int, bool]:
         for k, v in module.items():
             if hasattr(v, "in_channels"):
@@ -537,15 +524,13 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
             if self.optimizerLoader:
                 self.optimizer = self.optimizerLoader.getOptimizer(key, self.parameters(state == State.TRANSFER_LEARNING))
                 self.optimizer.zero_grad()
+
             if self.schedulersLoader and self.optimizer:
                 self.schedulers = self.schedulersLoader.getShedulers(key, self.optimizer)
         if self.outputsCriterionsLoader:
             self.measure = Measure(key, self.outputsCriterionsLoader, state != State.PREDICTION)
-            if self.device:
-                self.measure.setDevice(self.device)
-                self.measure.init(self)
-        
-        
+            self.measure.init(self)
+
     def named_forward(self, *inputs: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:
         if self.patch:
             self.patch.load(inputs[0].shape[2:])
@@ -612,12 +597,10 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
 
     def forward(self, data_dict: dict[tuple[str, bool], torch.Tensor], output_layers: list[str] = []) -> list[tuple[str, torch.Tensor]]:
         metric_tmp = {network : network.measure.outputsCriterions.keys() for network in self.getNetworks().values() if network.measure}
-
         outputsGroup : dict[str, Self]= {}
         for k, v in metric_tmp.items():
             for a in v:
                 outputsGroup[a] = k
-
         if not len(outputsGroup) and not len(output_layers):
             return []
 
@@ -628,7 +611,7 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
                 outputsGroup[name]._layer_function(name, layer, data_dict)
             if name in output_layers:
                 results.append((name, layer))
-        return results 
+        return results
 
     @_function_network
     def resetLoss(self):

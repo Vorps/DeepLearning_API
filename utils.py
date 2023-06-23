@@ -12,7 +12,6 @@ from enum import Enum
 from typing import Callable, Any, Union, Optional
 from functools import partial
 
-
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
 
 class Attribute(dict[str, Any]):
@@ -144,6 +143,11 @@ class DatasetUtils():
     
     def _write(self, group : str, name : str, func : Callable[[Union[h5py.File, h5py.Group], sitk.Image, Union[Attribute, None]], None], attributes : Union[Attribute, None] = None):
         if self.is_directory:
+            s_group = group.split("/")
+            if len(s_group) > 1:
+                subDirectory = "/".join(s_group[:-1])
+                name = "{}/{}".format(subDirectory, name)
+                group = s_group[-1]
             with DatasetUtils.H5File("{}/{}".format(self.filename, name), False, self.parallel) as h5:
                 func(h5 = h5.h5, name = group, attributes = attributes)
         else:
@@ -158,8 +162,39 @@ class DatasetUtils():
     def writeData(self, group : str, name : str, data : np.ndarray, attributes : Union[Attribute, None] = None) -> None:
         self._write(group, name, partial(data_to_dataset, data = data), attributes)
     
-    def readData(self, group : str, name : str):
+    def writeTransform(self, group : str, name : str, transform: sitk.Transform, attributes : Union[Attribute, None] = None) -> None:
+        if isinstance(transform, sitk.Euler3DTransform):
+            transform_type = "Euler3DTransform_double_3_3"
+        if isinstance(transform, sitk.AffineTransform):
+            transform_type = "AffineTransform_double_3_3"
+        if isinstance(transform, sitk.BSplineTransform):
+            transform_type = "BSplineTransform_double_3_3"
+        if attributes is None:
+            attribute = Attribute()
+        attribute["Transform"] = transform_type
+        attribute["FixedParameters"] = transform.GetFixedParameters()
+        self._write(group, name, partial(data_to_dataset, data = np.asarray(transform.GetParameters())), attribute)
+
+    def readTransform(self, group : str, name : str) -> sitk.Transform: 
+        transformParameters, attribute = self.readData(group, name)
+        transform_type = attribute["Transform"]
+        if transform_type == "Euler3DTransform_double_3_3":
+            transform = sitk.Euler3DTransform(3)
+        if transform_type == "AffineTransform_double_3_3":
+            transform = sitk.AffineTransform(3)
+        if transform_type == "BSplineTransform_double_3_3":
+            transform = sitk.BSplineTransform(3)
+        transform.SetFixedParameters(eval(attribute["FixedParameters"]))
+        transform.SetParameters(tuple(transformParameters))
+        return transform
+    
+    def readData(self, group : str, name : str) -> tuple[np.ndarray, Attribute]:
         if self.is_directory:
+            s_group = group.split("/")
+            if len(s_group) > 1:
+                subDirectory = "/".join(s_group[:-1])
+                name = "{}/{}".format(subDirectory, name)
+                group = s_group[-1]
             with DatasetUtils.H5File("{}/{}".format(self.filename, name), False, self.parallel) as h5:
                 return dataset_to_data(h5.h5[group])
         else:
@@ -207,19 +242,32 @@ class DatasetUtils():
                     self.writeImage(path, file, sitk.ReadImage("{}/{}".format(root, file)))
                 print("Compute in progress : {} {:.2f} %".format(path, (i+1)/len(files)*100))
     
-    def getSize(self, group):
+    def getSize(self, group) -> int:
         if self.is_directory:
-            return len(os.listdir(self.filename))  
+            name = self.filename
+            s_group = group.split("/")
+            if len(s_group) > 1:
+                subDirectory = "/".join(s_group[:-1])
+                name = "{}/{}".format(name, subDirectory)
+            return len(os.listdir(name))  
         else:
             with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:
-                len(h5.h5[group].keys())
-            return 
+                return len(h5.h5[group].keys())
 
     def isExist(self, group, name: str) -> bool:
         if self.is_directory:
             if os.path.exists("{}/{}".format(self.filename, name)):
-                with DatasetUtils.H5File("{}/{}".format(self.filename, name), True, self.parallel) as h5:            
-                    return group in h5.h5
+                s_group = group.split("/")
+                if len(s_group) > 1:
+                    subDirectory = "/".join(s_group[:-1])
+                    name = "{}/{}".format(subDirectory, name)
+                    group = s_group[-1]
+                try:
+                    with DatasetUtils.H5File("{}/{}".format(self.filename, name), True, self.parallel) as h5:            
+                        return group in h5.h5
+                except:
+                    os.remove("{}/{}".format(self.filename, name))
+                    return False   
             else:
                 return False
         else:
@@ -228,13 +276,23 @@ class DatasetUtils():
     
     def getNames(self, group, index: Optional[list[int]] = None) -> list[str]:
         if self.is_directory:
-            return [name for i, name in enumerate(sorted(os.listdir(self.filename))) if index is None or i in index]
+            name = self.filename
+            s_group = group.split("/")
+            if len(s_group) > 1:
+                subDirectory = "/".join(s_group[:-1])
+                name = "{}/{}".format(subDirectory, name)
+            return [name for i, name in enumerate(sorted(os.listdir(name))) if index is None or i in index]
         else:
             with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:
                 return [dataset.name for i, dataset in enumerate(h5.h5[group].values()) if index is None or i in index]
     
-    def getInfos(self, group, name):
+    def getInfos(self, group, name) -> tuple[list[int], Attribute]:
         if self.is_directory:
+            s_group = group.split("/")
+            if len(s_group) > 1:
+                subDirectory = "/".join(s_group[:-1])
+                name = "{}/{}".format(subDirectory, name)
+                group = s_group[-1]
             if os.path.exists("{}/{}".format(self.filename, name)):
                 with DatasetUtils.H5File("{}/{}".format(self.filename, name), True, self.parallel) as h5:            
                     if group in h5.h5:
@@ -248,7 +306,7 @@ class DatasetUtils():
                 else:
                     assert ValueError()
 
-def _getModule(classpath : str, type : str):
+def _getModule(classpath : str, type : str) -> tuple[str, str]:
     if len(classpath.split("_")) > 1:
         module = ".".join(classpath.split("_")[:-1])
         name = classpath.split("_")[-1] 
@@ -271,31 +329,16 @@ def memoryForecast(memory_init : float, i : float, size : float) -> str:
     forecast = memory_init + ((current_memory-memory_init)*size/i) if i > 0 else 0
     return "Memory forecast ({:.2f}G ({:.2f} %))".format(forecast, forecast/(psutil.virtual_memory()[0]/2**30)*100)
 
-def gpuInfo(device : Union[int, torch.device]) -> str:
-    if isinstance(device, torch.device):
-        if str(device).startswith("cuda:"):
-            device = int(str(device).replace("cuda:", ""))
-        else:
-            return ""
-    if device < pynvml.nvmlDeviceGetCount():
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
-        memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
-    else:
-        return ""
-    return  "GPU({}) Memory GPU ({:.2f}G ({:.2f} %)) | {} | Power {}W | Temperature {}°C".format(device, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
+def gpuInfo(devices : list[torch.device]) -> str:
+    infos : list[tuple[int, float, float]] = []
 
-def gpuMemory(device : Union[int, torch.device]) -> str:
-    if isinstance(device, torch.device):
-        if str(device).startswith("cuda:"):
-            device = int(str(device).replace("cuda:", ""))
-        else:
-            return ""
-    if device < pynvml.nvmlDeviceGetCount():
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+    for device in devices:
+        device_id = int(str(device).replace("cuda:", ""))
+        handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
-    else:
-        return ""
-    return  "Memory GPU ({:.2f}G)".format(float(memory.used)/(10**9))
+        infos.append((device_id, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100))
+    return "GPU({})".format("|".join([str(info[0]) for info in infos]))+" Memory GPU ({})".format("|".join(["{:.2f}G ({:.2f} %)".format(info[1], info[2]) for info in infos]))
+    #float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
 
 def getAvailableDevice() -> list[int]:
     pynvml.nvmlInit()
@@ -310,22 +353,37 @@ def getAvailableDevice() -> list[int]:
     pynvml.nvmlShutdown()
     return available
 
-def getDevice(device : Union[int, None]) -> torch.device:
+def getDevice(devices : Union[list[int], None]) -> Union[list[int], list[torch.device]]:
     if torch.cuda.is_available():
-        if device is None:
-            availableDevice = getAvailableDevice()
-            if len(availableDevice):
-               device = getAvailableDevice()[0]
+        result_devices = []
+        result_ids = []
+        
+        if devices is None:
+            devices = "None"
+
+        for device in devices:
+            if device == "None":
+                availableDevice = getAvailableDevice()
+                if len(availableDevice):
+                    device = "cpu"
+                    for d in availableDevice:
+                        if d not in result_ids:
+                            device = d
+                            break
+                else:
+                    result_devices.append(torch.device("cpu"))
+
+            if device == "cpu":
+                result_devices.append(torch.device("cpu"))
+                result_ids.append(None)
+            if device in getAvailableDevice():
+                result_devices.append(torch.device("cuda:{}".format(device)))
+                result_ids.append(device)
             else:
-                return torch.device("cpu")
-        if device == "cpu":
-            return torch.device("cpu")
-        if device in getAvailableDevice():
-            return torch.device("cuda:{}".format(device))
-        else:
-            raise Exception("GPU : {} is not available !".format(device))
+                raise Exception("GPU : {} is not available !".format(device))
+        return result_ids, result_devices
     else:
-        return torch.device("cpu")
+        return [None], [torch.device("cpu")]
 
 def logImageFormat(input_torch : torch.Tensor):
     input = input_torch[0].detach().cpu().numpy()
@@ -419,15 +477,17 @@ def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overla
                 end = shape[dim]
                 
                 if overlap is None and end-patch_size[dim] >= 0:
-                    start = end-patch_size[dim]   
-                slices[dim].append(slice(start,end))
+                    start = end-patch_size[dim]
+                slices[dim].append(slice(start, end))
                 break
-            slices[dim].append(slice(start,end))
+            
+            slices[dim].append(slice(start, end))
             index += 1
         nb_patch_per_dim.append((index+1, patch_size[dim] == 1))
 
     for chunk in itertools.product(*slices):
         patch_slices.append(tuple(chunk))
+    
     return patch_slices, nb_patch_per_dim
 
 
@@ -475,3 +535,46 @@ def formatMaskLabel(mask: sitk.Image, labels: list[tuple[int, int]]) -> sitk.Ima
     result = sitk.GetImageFromArray(result_data)
     result.CopyInformation(mask)
     return result
+
+def parameterMap_to_ITK_Euler3DTransform(path_src: str, path_dest: str) -> None:
+    transform_rigid = sitk.ReadParameterFile("{}.0.txt".format(path_src))
+    with open("{}.itk.txt".format(path_dest), "w") as f:
+        f.write("#Insight Transform File V1.0\n")
+        f.write("#Transform 0\n")
+        f.write("Transform: Euler3DTransform_double_3_3\n")
+
+        TransformParameters = np.array([float(i) for i in transform_rigid["TransformParameters"]])
+        CenterOfRotationPoint = np.array([float(i) for i in transform_rigid["CenterOfRotationPoint"]])
+            
+        f.write("Parameters: "+" ".join([str(i) for i in TransformParameters])+""+"\n")
+        f.write("FixedParameters: "+" ".join([str(i)+" " for i in CenterOfRotationPoint])+"\n")
+
+def parameterMap_to_ITK_AffineTransform(path_src: str, path_dest: str) -> None:
+    transform_affine = sitk.ReadParameterFile("{}.0.txt".format(path_src))
+    with open("{}.itk.txt".format(path_dest), "w") as f:
+        f.write("#Insight Transform File V1.0\n")
+        f.write("#Transform 0\n")
+        f.write("Transform: AffineTransform_double_3_3\n")
+
+        TransformParameters = np.array([float(i) for i in transform_affine["TransformParameters"]])
+        CenterOfRotationPoint = np.array([float(i) for i in transform_affine["CenterOfRotationPoint"]])
+            
+        f.write("Parameters: "+" ".join([str(i) for i in TransformParameters])+""+"\n")
+        f.write("FixedParameters: "+" ".join([str(i)+" " for i in CenterOfRotationPoint])+"\n")
+
+
+def parameterMap_to_ITK_BSplineTransform(path_src: str, path_dest: str) -> None:
+    transform_rigid = sitk.ReadParameterFile("{}.0.txt".format(path_src))
+    with open("{}.itk.txt".format(path_dest), "w") as f:
+        f.write("#Insight Transform File V1.0\n")
+        f.write("#Transform 0\n")
+        f.write("Transform: BSplineTransform_double_3_3\n")
+        TransformParameters = np.array([float(i) for i in transform_rigid["TransformParameters"]])
+
+        GridSize = np.array([int(i) for i in transform_rigid["GridSize"]])
+        GridOrigin = np.array([float(i) for i in transform_rigid["GridOrigin"]])
+        GridSpacing = np.array([float(i) for i in transform_rigid["GridSpacing"]])
+        GridDirection = np.array(np.array([float(i) for i in transform_rigid["GridDirection"]])).reshape((3,3)).T.flatten() 
+
+        f.write("Parameters: "+" ".join([str(i) for i in TransformParameters])+"\n")
+        f.write("FixedParameters: "+" ".join([str(i) for i in GridSize])+" "+" ".join([str(i) for i in GridOrigin])+" "+" ".join([str(i) for i in GridSpacing])+" "+" ".join([str(i) for i in GridDirection])+"\n")

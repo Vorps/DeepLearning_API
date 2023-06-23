@@ -1,5 +1,4 @@
 import torch
-from torch.cuda.amp.autocast_mode import autocast
 from torch.backends import cudnn
 import tqdm
 import numpy as np
@@ -13,6 +12,7 @@ from DeepLearning_API.networks.network import Network, ModelLoader
 import datetime
 import dill
 from typing import Union
+from torch.cuda.amp.autocast_mode import autocast
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
@@ -29,7 +29,7 @@ class Trainer(NeedDevice):
                     dataset : DataTrain = DataTrain(),
                     groupsInput : list[str] = ["default"],
                     train_name : str = "default",
-                    device : Union[int, None] = None,
+                    devices : Union[list[int], None] = [None],
                     manual_seed : Union[int, None] = None,
                     epochs: int = 100,
                     it_validation : Union[int, None] = None,
@@ -43,7 +43,7 @@ class Trainer(NeedDevice):
         self.manual_seed = manual_seed
         if self.manual_seed is not None:
             torch.manual_seed(self.manual_seed)
-        torch.multiprocessing.set_start_method('spawn')
+
         cudnn.deterministic = self.manual_seed is not None
         cudnn.benchmark = self.manual_seed is None
         
@@ -62,8 +62,9 @@ class Trainer(NeedDevice):
         self.images_log = images_log
         self.gradient_checkpoints = gradient_checkpoints
         self.save_checkpoint_mode = save_checkpoint_mode
-        self.setDevice(getDevice(device))
-
+        self.result_ids, self.result_devices = getDevice(devices)
+        self.setDevice(self.result_devices[0])
+        
     def setDevice(self, device: torch.device):
         super().setDevice(device)
         self.dataset.setDevice(device)
@@ -98,17 +99,18 @@ class Trainer(NeedDevice):
         if state != State.TRAIN:
             state_dict = self._load()
 
+
         self.model.init(self.autocast, state)
         self.model._compute_channels_trace(self.model, self.model.in_channels, self.gradient_checkpoints)
-        self.model.load(state_dict, init = True, ema=False)
+        self.model.load(state_dict, init=True, ema=False)
         self.model.to(self.device)
+        
         if self.ema_decay > 0:
             ema_avg = lambda averaged_model_parameter, model_parameter, num_averaged: (1-self.ema_decay) * averaged_model_parameter + self.ema_decay * model_parameter
-            assert self.device, "No device set"
-            self.modelEMA = torch.optim.swa_utils.AveragedModel(self.model, self.device, ema_avg)
+            self.modelEMA = torch.optim.swa_utils.AveragedModel(self.model, avg_fn=ema_avg)
 
             if state_dict is not None:
-                model = self.modelEMA.module 
+                model = self.modelEMA 
                 if isinstance(model, Network):
                     model.load(state_dict, init=False, ema=True)
         
@@ -135,11 +137,11 @@ class Trainer(NeedDevice):
         assert self.it_validation, "it_validation is None"
         self.model.train()
         self.dataloader_training.dataset.init()
-        description = lambda : "Training : Loss ("+" ".join(["{}({:.6f}) : {:.4f}".format(name, network.optimizer.param_groups[0]['lr'], network.measure.getLastValue()) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.device)
+        description = lambda : "Training : Loss ("+" ".join(["{}({:.6f}) : {:.4f}".format(name, network.optimizer.param_groups[0]['lr'], network.measure.getLastValue()) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.result_devices)
 
         with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = description(), total=len(self.dataloader_training), leave=False) as batch_iter:
             for _, data_dict in batch_iter:
-                with autocast(enabled=self.autocast):            
+                with autocast(enabled=self.autocast):
                     input = self.getInput(data_dict)
                     self.model(input)
                     if self.modelEMA is not None:
@@ -159,11 +161,12 @@ class Trainer(NeedDevice):
                 batch_iter.set_description(description()) 
                 self.it += 1
         self.dataloader_training.dataset.close()
+    
     @torch.no_grad()
     def _validate(self) -> None:
         self.model.measureClear()
         self.model.eval()
-        description = lambda : "Validation : Loss ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.ema.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.device)
+        description = lambda : "Validation : Loss ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.ema.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.result_devices)
         data_dict = None
         self.dataloader_validation.dataset.init()
         with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = description(), total=len(self.dataloader_validation), leave=False) as batch_iter:
@@ -224,9 +227,9 @@ class Trainer(NeedDevice):
                 torch.save({"Model" : self.model.state_dict()}, "{}StateDict/{}".format(path_model, name))
                 
                 if self.modelEMA is not None:
-                    self.modelEMA.module.load(checkpoint, init=False, ema=True)
-                    torch.save(self.modelEMA.module, "{}Serialized/{}".format(path_model, DATE()+"_EMA.pt"))
-                    torch.save({"Model_EMA" : self.modelEMA.module.state_dict()}, "{}StateDict/{}".format(path_model, DATE()+"_EMA.pt"))
+                    self.modelEMA.load(checkpoint, init=False, ema=True)
+                    torch.save(self.modelEMA, "{}Serialized/{}".format(path_model, DATE()+"_EMA.pt"))
+                    torch.save({"Model_EMA" : self.modelEMA.state_dict()}, "{}StateDict/{}".format(path_model, DATE()+"_EMA.pt"))
 
             os.rename(self.config_namefile, self.config_namefile.replace(".yml", "")+"_"+str(self.it)+".yml")
 
@@ -253,7 +256,7 @@ class Trainer(NeedDevice):
         assert self.tb, "SummaryWriter is None"
         models = {"" : self.model}
         if self.modelEMA is not None:
-            models["_EMA"] = self.modelEMA.module
+            models["_EMA"] = self.modelEMA
 
         for label, model in models.items():
             for name, network in model.getNetworks().items():
@@ -290,7 +293,7 @@ class Trainer(NeedDevice):
         assert self.tb, "SummaryWriter is None"
         models = {"" : self.model}
         if self.modelEMA is not None:
-            models["_EMA"] = self.modelEMA.module
+            models["_EMA"] = self.modelEMA
         
         for label, model in models.items():
             for name, network in model.getNetworks().items():
