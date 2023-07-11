@@ -1,6 +1,5 @@
 import argparse
 import os
-import signal
 from subprocess import call
 from DeepLearning_API import CONFIG_FILE
 from DeepLearning_API.trainer import Trainer

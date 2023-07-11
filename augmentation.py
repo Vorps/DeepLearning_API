@@ -53,14 +53,16 @@ class DataAugmentationsList():
         self.dataAugmentations : list[DataAugmentation] = []
         self.dataAugmentationsLoader = dataAugmentations
 
-    def load(self, key: str, device: torch.device):
+    def load(self, key: str):
         for augmentation, prob in self.dataAugmentationsLoader.items():
             module, name = _getModule(augmentation, "augmentation")
             dataAugmentation: DataAugmentation = getattr(importlib.import_module(module), name)(config = None, DL_args="Trainer.Dataset.augmentations.{}.dataAugmentations".format(key))
             dataAugmentation.load(self.nb, prob.prob)
             self.dataAugmentations.append(dataAugmentation)
-            dataAugmentation.setDevice(device)     
-            
+    
+    def to(self, device: torch.device):
+        for dataAugmentation in self.dataAugmentations:
+            dataAugmentation.setDevice(device)
 
 class RandomRotateTransform(DataAugmentation):
 

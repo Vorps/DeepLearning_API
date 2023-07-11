@@ -12,16 +12,16 @@ from DeepLearning_API.config import config
 from DeepLearning_API.utils import DatasetUtils, State, gpuInfo, getDevice, logImageFormat, Attribute, get_patch_slices_from_nb_patch_per_dim, NeedDevice
 from DeepLearning_API.dataset import DataPrediction, DataSet
 from DeepLearning_API.HDF5 import Accumulator
-from DeepLearning_API.networks.network import Measure, ModelLoader
+from DeepLearning_API.networks.network import Measure, ModelLoader, Network
 from DeepLearning_API.transform import Transform, TransformLoader
 
 from torch.utils.tensorboard.writer import SummaryWriter
 from typing import Union
 
-class OutDataset(DatasetUtils, ABC):
+class OutDataset(DatasetUtils, NeedDevice, ABC):
 
     def __init__(self, filename: str, group: str, pre_transforms : dict[str, TransformLoader], post_transforms : dict[str, TransformLoader], patchCombine: Union[str, None]) -> None: 
-        super().__init__(filename, read=False)
+        super().__init__(filename)
         self.group = group
         self._pre_transforms = pre_transforms
         self._post_transforms = post_transforms
@@ -30,6 +30,7 @@ class OutDataset(DatasetUtils, ABC):
         self.post_transforms : list[Transform] = []
         self.output_layer_accumulator: dict[int, Accumulator] = {}
         self.attributes: dict[int, dict[int, Attribute]] = {}
+        self.names: dict[int, str] = {}
 
     def load(self, name_layer: str):
         if self._pre_transforms is not None:
@@ -77,26 +78,29 @@ class OutSameAsGroupDataset(OutDataset):
 
     def addLayer(self, index: int, index_patch: int, layer: torch.Tensor, dataset: DataSet):
         if index not in self.output_layer_accumulator:
-            input_dataset = dataset.getDatasetsFromIndex(self.group_dest, [index])[0]
+            input_dataset = dataset.getDatasetFromIndex(self.group_dest, index)
             self.output_layer_accumulator[index] = Accumulator(input_dataset.patch.patch_slices, self.patchCombine, batch=False)
             self.attributes[index] = {}
+            self.names[index] = input_dataset.name
             for i in range(len(input_dataset.patch.patch_slices)):
                 self.attributes[index][i] = Attribute({k : v for k, v in input_dataset.cache_attribute.items()})
-        
+
         for transform in self.pre_transforms:
-            layer = transform(layer, self.attributes[index][index_patch])
+            layer = transform(self.names[index], layer, self.attributes[index][index_patch])
+
         for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].post_transforms):
-            layer = transform.inverse(layer, self.attributes[index][index_patch])
+            layer = transform.inverse(self.names[index], layer, self.attributes[index][index_patch])
 
         self.output_layer_accumulator[index].addLayer(index_patch, layer)
     
     def getOutput(self, index: int, dataset: DataSet) -> torch.Tensor:
         layer = self.output_layer_accumulator[index].assemble(device=self.device)
+        name = self.names[index]
         for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].pre_transforms):
-            layer = transform.inverse(layer, self.attributes[index][0])
+            layer = transform.inverse(name, layer, self.attributes[index][0])
 
         for transform in self.post_transforms:
-            layer = transform(layer, self.attributes[index][0])
+            layer = transform(name, layer, self.attributes[index][0])
         self.output_layer_accumulator.pop(index)
         return layer
 
@@ -110,9 +114,11 @@ class OutLayerDataset(OutDataset):
     def addLayer(self, index: int, index_patch: int, layer: torch.Tensor, dataset: DataSet):
         if index not in self.output_layer_accumulator:
             group = list(dataset.groups.keys())[0]
-            patch_slices = get_patch_slices_from_nb_patch_per_dim(list(layer.shape[2:]), dataset.getDatasetsFromIndex(group, [index])[0].patch.nb_patch_per_dim, self.overlap)
+            patch_slices = get_patch_slices_from_nb_patch_per_dim(list(layer.shape[2:]), dataset.getDatasetFromIndex(group, index).patch.nb_patch_per_dim, self.overlap)
             self.output_layer_accumulator[index] = Accumulator(patch_slices, self.patchCombine, batch=False)
             self.attributes[index] = Attribute()
+            self.names[index] = dataset.getDatasetFromIndex(group, index).name
+            
 
         for transform in self.pre_transforms:
             layer = transform(layer, self.attributes[index])
@@ -120,9 +126,9 @@ class OutLayerDataset(OutDataset):
 
     def getOutput(self, index: int, dataset: DataSet) -> torch.Tensor:
         layer = self.output_layer_accumulator[index].assemble(device=self.device)
-        
+        name = self.names[index]
         for transform in self.post_transforms:
-            layer = transform(layer,  self.attributes[index])
+            layer = transform(name, layer, self.attributes[index])
 
         self.output_layer_accumulator.pop(index)
         return layer
@@ -166,24 +172,20 @@ class Predictor(NeedDevice):
         for name, outDataset in self.outsDataset.items():
             outDataset.filename = self.predict_path+outDataset.filename
             outDataset.load(name.replace(".", ":"))
-        self.result_ids, self.result_devices = getDevice(devices)
+        self.result_devices = getDevice(devices)
         self.setDevice(self.result_devices[0])
         
     def setDevice(self, device: torch.device):
         super().setDevice(device)
-        self.dataset.setDevice(device)
-        self.model.setDevice(device)
+        for outDataset in self.outsDataset.values():
+            outDataset.setDevice(device)
 
     def __enter__(self):
         pynvml.nvmlInit()
-        self.dataset.__enter__()
-        self.dataloader_prediction = self.dataset.getData()
+        self.dataloader_prediction = self.dataset.getData()[0][0]
         return self
     
     def __exit__(self, type, value, traceback):
-        self.dataset.__exit__(type, value, traceback)
-        for outDataset in self.outsDataset.values():
-            outDataset.__exit__(type, value, traceback)
         if self.tb is not None:
             self.tb.close()
         pynvml.nvmlShutdown()
@@ -192,6 +194,22 @@ class Predictor(NeedDevice):
         inputs = {(k, True) : data_dict[k][0].to(self.device) for k in self.groupsInput}
         inputs.update({(k, False) : v[0].to(self.device) for k, v in data_dict.items() if k not in self.groupsInput})
         return inputs
+    
+    def _getOutput_name_layers(self) -> dict[str, Network]:
+        metric_tmp = {network : network.measure.outputsCriterions.keys() for network in self.model.getNetworks().values() if network.measure}
+        output_name_layers : dict[str, Network]= {}
+        for k, v in metric_tmp.items():
+            for a in v:
+                output_name_layers[a] = k
+        return output_name_layers
+    
+    def forward(self, data_dict: dict[tuple[str, bool], torch.Tensor], layers_name: list[str]):
+        self.model.resetLoss()
+        results: dict[str, torch.Tensor] = self.model(data_dict, list(self.output_name_layers.keys())+layers_name)
+        for name, layer in results.items():
+            if name in self.output_name_layers.keys():
+                self.output_name_layers[name]._layer_function(name, layer, data_dict)
+        return results
 
     @torch.no_grad()
     def predict(self) -> None:
@@ -218,37 +236,34 @@ class Predictor(NeedDevice):
         else:
             raise Exception("Model : {} does not exist !".format(self.train_name))
 
-        for outDataset in self.outsDataset.values():    
-            outDataset.__enter__()
-
         self.model.init(autocast=False, state = State.PREDICTION)
 
         self.model._compute_channels_trace(self.model, self.model.in_channels, None)
 
         self.model.load(state_dict, init=False)
         self.model.to(self.device)
-        self.dataset.load()
+        self.dataloader_prediction.dataset.load()
         self.model.eval()
 
         if len(list(self.outsDataset.keys())) or len([network for network in self.model.getNetworks().values() if network.measure is not None]):
             self.tb = SummaryWriter(log_dir = self.predict_path+"/Metric/")
         
-        description = lambda : "Prediction : Metric ("+" ".join(["{} : ".format(name)+" ".join(["{} : {:.4f}".format(nameMetric, value) for nameMetric, value in network.measure.getLastMetrics().items()]) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+gpuInfo(self.device)
+        description = lambda : "Prediction : Metric ("+" ".join(["{} : ".format(name)+" ".join(["{} : {:.4f}".format(nameMetric, value) for nameMetric, value in network.measure.getLastMetrics().items()]) for name, network in self.model.getNetworks().items() if network.measure is not None])+") "+gpuInfo(self.result_devices)
 
         measures : list[Measure] = [network.measure for name, network in self.model.getNetworks().items() if network.measure is not None]
-        
+        self.output_name_layers = self._getOutput_name_layers()
         dataset: DataSet = self.dataloader_prediction.dataset
         it_image = 0
         with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), desc = description(), total=len(self.dataloader_prediction)) as batch_iter:
             for _, data_dict in batch_iter:
                 input = self.getInput(data_dict)
-                for name, output in self.model(input, list(self.outsDataset.keys())):
+                for name, output in self.forward(input, list(self.outsDataset.keys())):
                     self._predict_log(data_dict)
                     outDataset = self.outsDataset[name]
                     for i, (index, patch_index) in enumerate([(int(index), int(patch_index)) for index, patch_index in zip(list(data_dict.values())[0][1], list(data_dict.values())[0][2])]):    
                         outDataset.addLayer(index, patch_index, output[i], dataset)
                         if outDataset.isDone(index):
-                            name_data = dataset.getDatasetsFromIndex(list(data_dict.keys())[0], [index])[0].name.split("/")[-1]
+                            name_data = dataset.getDatasetFromIndex(list(data_dict.keys())[0], index).name.split("/")[-1]
                             layer_output = outDataset.getOutput(index, dataset)
                             measure_result = {}
                             for measure in [measure for measure in measures if name in measure.outputsCriterions.keys()]:

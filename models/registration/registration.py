@@ -34,7 +34,7 @@ class VoxelMorph(network.Network):
         if int_steps > 0 and int_downsize > 1:
             self.add_module("DownSample", ResizeTransform(int_downsize))
 
-        self.add_module("NegativeFlow", blocks.ApplyFunction(lambda input : -input), out_branch=["neg_flow"])
+        self.add_module("NegativeFlow", blocks.Negative(), out_branch=["neg_flow"])
         if int_steps > 0:
             self.add_module("Integrate_pos_flow", VecInt([int(dim / int_downsize) for dim in shape], int_steps))
             self.add_module("Integrate_neg_flow", VecInt([int(dim / int_downsize) for dim in shape], int_steps), in_branch=["neg_flow"], out_branch=["neg_flow"])

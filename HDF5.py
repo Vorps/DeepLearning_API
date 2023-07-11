@@ -42,11 +42,11 @@ class Accumulator():
     def isFull(self) -> bool:
         return len(self.patch_slices) == len([v for v in self._layer_accumulator if v is not None])
 
-    def assemble(self, device: torch.device) -> torch.Tensor:
+    def assemble(self) -> torch.Tensor:
         patch_size = [sl.stop-sl.start for sl in self.patch_slices[0]]
         if all([self._layer_accumulator[0].shape[i-len(patch_size)] == size for i, size in enumerate(patch_size)]): 
             N = 2 if self.batch else 1
-            result = torch.empty((list(self._layer_accumulator[0].shape[:N])+list(self.shape)), dtype=self._layer_accumulator[0].dtype).to(device)
+            result = torch.empty((list(self._layer_accumulator[0].shape[:N])+list(self.shape)), dtype=self._layer_accumulator[0].dtype).to(self._layer_accumulator[0].device)
             for patch_slice, data in zip(self.patch_slices, self._layer_accumulator):
                 slices = tuple([slice(result.shape[i]) for i in range(N)] + list(patch_slice))
                 for dim, s in enumerate(patch_slice):
@@ -76,24 +76,22 @@ class Patch(ABC):
     def load(self, shape : list[int]) -> None:
         self.patch_slices, self.nb_patch_per_dim = get_patch_slices_from_shape(self.patch_size, shape, self.overlap)
 
-    def getData(self, data : torch.Tensor, index : int) -> torch.Tensor:
-        if len(self.patch_slices) == 1:
-            return data
-        
+    def getData(self, data : torch.Tensor, index : int) -> torch.Tensor:        
         slices = []
         for max in data.shape[:-len(self.patch_slices[index])]:
             slices.append(slice(max))
-
+        
         slices += list(self.patch_slices[index])
-        data = data[slices]
         padding = []
         nb_dim = len(self.patch_size)
         for dim_it, _slice in enumerate(reversed(self.patch_slices[index])):
             dim = nb_dim-dim_it-1
             padding.append(0)
-            padding.append(0 if _slice.start+self.patch_size[dim] <= data.shape[dim] else _slice.start+self.patch_size[dim]-_slice.stop)
+            padding.append(0 if _slice.start+self.patch_size[dim] <= data.shape[dim+1] else self.patch_size[dim]-(data.shape[dim+1]-_slice.start))
 
+        data = data[slices]
         data = F.pad(data, tuple(padding), "constant", 0)
+
         if self.mask is not None:
             data = torch.where(self.mask == 0, torch.zeros((1), dtype=data.dtype), data)
 

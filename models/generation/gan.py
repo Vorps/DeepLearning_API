@@ -228,7 +228,6 @@ class DiscriminatorV2(network.Network):
             for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], [2]*(len(channels)-2)+[1])):
                 self.add_module("Layer_{}".format(i), DiscriminatorV2.DiscriminatorLayers(in_channels, out_channels, stride, norm_layer, bias, dim))
 
-
     @config("Discriminator")
     def __init__(self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
@@ -240,7 +239,7 @@ class DiscriminatorV2(network.Network):
                     in_channels : int = 1) -> None:
         super().__init__(in_channels = in_channels, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim, nb_batch_per_step=nb_batch_per_step)
         
-        ndf = 32
+        ndf = 16
         n_layers=3
         norm_layer = partial(blocks.getNorm, blocks.NormMode._member_map_[normMode], dim=dim)
         bias = True
@@ -248,7 +247,6 @@ class DiscriminatorV2(network.Network):
         self.add_module("Stem", DiscriminatorV2.DiscriminatorStem(in_channels, ndf, dim))
         self.add_module("Layers", DiscriminatorV2.DiscriminatorNLayers(channels, norm_layer, bias, dim))
         self.add_module("Head", DiscriminatorV2.DiscriminatorHead(channels=channels[-1], dim=dim))
-
 
     def getName(self):
         return "Discriminator"
@@ -262,7 +260,7 @@ class GeneratorV2(network.Network):
             self.add_module("Reflection", blocks.getTorchModule("ReflectionPad", dim)(3))
             self.add_module("Conv", blocks.getTorchModule("Conv", dim)(in_channels, out_channels, kernel_size=7, padding=0, bias=bias))
             self.add_module("Norm", norm_layer(out_channels))
-            self.add_module("Relu", torch.nn.ReLU(True)) 
+            self.add_module("Relu", torch.nn.ReLU(True))
 
     class GeneratorHead(network.ModuleArgsDict):
 
@@ -326,7 +324,7 @@ class GeneratorV2(network.Network):
         def __init__(self, channels: int, norm_layer: Callable[[int], torch.nn.Module], bias: bool, dim: int) -> None:
             super().__init__()
             dropout = False
-            n_blocks=6
+            n_blocks=5
             padding_type="Reflection"
             for i in range(n_blocks):
                 self.add_module("ResnetBlock_{}".format(i), GeneratorV2.GeneratorResnetBlock(channels=channels, padding_type=padding_type, norm_layer=norm_layer, dropout=dropout, bias=bias, dim=dim))

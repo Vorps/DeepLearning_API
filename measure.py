@@ -114,9 +114,9 @@ class GradientImages(Criterion):
             dx, dy, dz = GradientImages._image_gradient3D(input)
             if target is not None:
                 dx_tmp, dy_tmp, dz_tmp = GradientImages._image_gradient3D(target)
-            dx -= dx_tmp
-            dy -= dy_tmp
-            dz -= dz_tmp
+                dx -= dx_tmp
+                dy -= dy_tmp
+                dz -= dz_tmp
             return dx.norm() + dy.norm() + dz.norm()
         else:
             dx, dy = GradientImages._image_gradient2D(input)
@@ -156,7 +156,7 @@ class BCE(Criterion):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         target = self._buffers["target"]
-        return self.loss(input, target.to(self.device).expand_as(input))
+        return self.loss(input, target.to(input.device).expand_as(input))
 
 class WGP(Criterion):
 
@@ -278,7 +278,7 @@ class KLDivergence(Criterion):
         last_module._modules.clear()
         
         for name, value in modules.items():
-            last_module.add_module(name, value)
+            last_module._modules[name] = value
             if name == output_group.split(".")[-1]:
                 last_module.add_module("LatentDistribution", LatentDistribution(in_channels=modulesArgs[name].out_channels, shape = self.shape, out_is_channel=modulesArgs[name].out_is_channel , latentDim=self.latentDim, modelDim=self.modelDim, out_branch=modulesArgs[name].out_branch))
         return ".".join(output_group.split(".")[:-1])+".LatentDistribution.Concat"

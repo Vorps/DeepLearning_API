@@ -232,7 +232,7 @@ class DatasetUtils():
                         sitk.WriteImage(im, path_dest+name, True)
                         print("Write image : {}{}".format(path_dest, name))
             with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:            
-                h5.h5.visititems(partial(write, None))
+                h5.h5.visititems(write)
 
     def directory_to_dataset(self, src_path : str):
         for root, dirs, files in os.walk(src_path):
@@ -308,7 +308,10 @@ class DatasetUtils():
 
 def _getModule(classpath : str, type : str) -> tuple[str, str]:
     if len(classpath.split("_")) > 1:
-        module = ".".join(classpath.split("_")[:-1])
+        if classpath.startswith("DeepLearning_API"):
+            module = "DeepLearning_API."+".".join(classpath.split("_")[2:-1])
+        else:
+            module = ".".join(classpath.split("_")[:-1])
         name = classpath.split("_")[-1] 
     else:
         module = "DeepLearning_API."+type
@@ -329,7 +332,20 @@ def memoryForecast(memory_init : float, i : float, size : float) -> str:
     forecast = memory_init + ((current_memory-memory_init)*size/i) if i > 0 else 0
     return "Memory forecast ({:.2f}G ({:.2f} %))".format(forecast, forecast/(psutil.virtual_memory()[0]/2**30)*100)
 
-def gpuInfo(devices : list[torch.device]) -> str:
+def gpuInfo(device : torch.device) -> str:
+    if str(device).startswith("cuda:"):
+        device = int(str(device).replace("cuda:", ""))
+    else:
+        return ""
+    if device < pynvml.nvmlDeviceGetCount():
+        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+        memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+    else:
+        return ""
+    return  "GPU({}) Memory GPU ({:.2f}G ({:.2f} %)) | {} | Power {}W | Temperature {}°C".format(device, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
+
+
+"""def gpuInfo(devices : torch.device) -> str:
     infos : list[tuple[int, float, float]] = []
 
     for device in devices:
@@ -339,7 +355,7 @@ def gpuInfo(devices : list[torch.device]) -> str:
         infos.append((device_id, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100))
     return "GPU({})".format("|".join([str(info[0]) for info in infos]))+" Memory GPU ({})".format("|".join(["{:.2f}G ({:.2f} %)".format(info[1], info[2]) for info in infos]))
     #float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
-
+"""
 def getAvailableDevice() -> list[int]:
     pynvml.nvmlInit()
     available = []
@@ -353,7 +369,7 @@ def getAvailableDevice() -> list[int]:
     pynvml.nvmlShutdown()
     return available
 
-def getDevice(devices : Union[list[int], None]) -> Union[list[int], list[torch.device]]:
+def getDevice(devices : Union[list[int], None]) -> list[torch.device]:
     if torch.cuda.is_available():
         result_devices = []
         result_ids = []
@@ -381,9 +397,9 @@ def getDevice(devices : Union[list[int], None]) -> Union[list[int], list[torch.d
                 result_ids.append(device)
             else:
                 raise Exception("GPU : {} is not available !".format(device))
-        return result_ids, result_devices
+        return result_devices
     else:
-        return [None], [torch.device("cpu")]
+        return [torch.device("cpu")]
 
 def logImageFormat(input_torch : torch.Tensor):
     input = input_torch[0].detach().cpu().numpy()
@@ -451,9 +467,9 @@ def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: list[int], nb_patch_p
     return patch_slices
 
 def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overlap: Union[list[int], None]) -> tuple[list[tuple[slice]], list[tuple[int, bool]]]:
-    if len(shape) != len(patch_size) or not all(a >= b for a, b in zip(shape, patch_size)):
+    if len(shape) != len(patch_size):
         return [tuple([slice(0, s) for s in shape])], [(1, True)]*len(shape)
-
+    
     patch_slices = []
     nb_patch_per_dim = []
     slices : list[list[slice]] = []

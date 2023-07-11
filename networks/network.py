@@ -10,7 +10,7 @@ import numpy as np
 from torch._jit_internal import _copy_to_script_wrapper
 
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import NeedDevice, State, _getModule
+from DeepLearning_API.utils import State, _getModule
 from DeepLearning_API.HDF5 import Accumulator, ModelPatch
 from collections import OrderedDict
 from torch.utils.checkpoint import checkpoint
@@ -64,7 +64,7 @@ class CriterionsLoader():
         criterions = {}
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
             module, name = _getModule(module_classpath, "measure")
-            criterionsAttr.isTorchCriterion = not module.startswith("DeepLearning_API.measure")
+            criterionsAttr.isTorchCriterion = module.startswith("torch")
             criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format("Trainer" if train else "Predictor", model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
         return criterions
 
@@ -178,7 +178,6 @@ class ModuleArgsDict(torch.nn.Module, ABC):
     def __init__(self) -> None:
         super().__init__()
         self._modulesArgs : dict[str, ModuleArgsDict.ModuleArgs] = dict()
-        
 
     def _addindent(self, s_: str, numSpaces : int):
         s = s_.split('\n')
@@ -215,6 +214,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             desc += ", out_channels={}".format(self._modulesArgs[key].out_channels)
             desc += ", out_is_channel={}".format(self._modulesArgs[key].out_is_channel)
             desc += ", isInCheckpoint={}".format(self._modulesArgs[key].isCheckpoint)
+            desc += ", requires_grad={}".format(self._modulesArgs[key].requires_grad)
             
             child_lines.append("({}{}) {}".format(key, desc, mod_str))
             
@@ -295,45 +295,46 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     torch.nn.init.constant_(module.bias, 0.0)
 
             elif isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
-                torch.nn.init.normal_(module.weight, 0.0, std = init_gain)
-                torch.nn.init.constant_(module.bias, 0.0)
+                if module.weight:
+                    torch.nn.init.normal_(module.weight, 0.0, std = init_gain)
+                if module.bias:
+                    torch.nn.init.constant_(module.bias, 0.0)
 
     def named_forward(self, *inputs: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:    
-        branchs: dict[str, torch.Tensor] = {}
-        for i, sinput in enumerate(inputs):
-            branchs[str(i)] = sinput
-        out = inputs[0]
-        for name, module in self.items():
-            requires_grad = self._modulesArgs[name].requires_grad
-            if requires_grad is not None and module:
-                module.requires_grad_(requires_grad)
-            for ib in self._modulesArgs[name].in_branch:
-                if ib not in branchs:
-                    branchs[ib] = inputs[0]
-            if self._modulesArgs[name].isCheckpoint:
-                out = checkpoint(module, *[branchs[i] for i in self._modulesArgs[name].in_branch])
-                yield name, out
-            else:
-                if isinstance(module, ModuleArgsDict):
-                    for k, out in module.named_forward(*[branchs[i] for i in self._modulesArgs[name].in_branch]):
-                        yield name+"."+k, out
-                elif isinstance(module, torch.nn.Module):
-                    out = module(*[branchs[i] for i in self._modulesArgs[name].in_branch])
+        if len(inputs) > 0:
+            branchs: dict[str, torch.Tensor] = {}
+            for i, sinput in enumerate(inputs):
+                branchs[str(i)] = sinput
+            out = inputs[0]
+            for name, module in self.items():
+                requires_grad = self._modulesArgs[name].requires_grad
+                if requires_grad is not None and module:
+                    module.requires_grad_(requires_grad)
+                for ib in self._modulesArgs[name].in_branch:
+                    if ib not in branchs:
+                        branchs[ib] = inputs[0]
+                if self._modulesArgs[name].isCheckpoint:
+                    out = checkpoint(module, *[branchs[i] for i in self._modulesArgs[name].in_branch])
                     yield name, out
-            for ob in self._modulesArgs[name].out_branch:
-                branchs[ob] = out
-        del branchs
+                else:
+                    if isinstance(module, ModuleArgsDict):
+                        for k, out in module.named_forward(*[branchs[i] for i in self._modulesArgs[name].in_branch]):
+                            yield name+"."+k, out
+                    elif isinstance(module, torch.nn.Module):
+                        out = module(*[branchs[i] for i in self._modulesArgs[name].in_branch])                    
+                        yield name, out
+                for ob in self._modulesArgs[name].out_branch:
+                    branchs[ob] = out
+            del branchs
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, *input: torch.Tensor) -> torch.Tensor:
         v = input
-        for _, v in self.named_forward(input):
+        for k, v in self.named_forward(*input):
             pass
         return v
 
     def named_parameters(self, pretrained: bool = False) -> Iterator[tuple[str, torch.nn.parameter.Parameter]]:
         for name, moduleArgs in self._modulesArgs.items():
-            if isinstance(self[name], Network):
-                continue
             module = self[name]
             if isinstance(module, ModuleArgsDict):
                 for k, v in module.named_parameters(pretrained):
@@ -347,7 +348,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
         for _, v in self.named_parameters(pretrained):
             yield v
         
-class Network(ModuleArgsDict, NeedDevice, ABC):
+class Network(ModuleArgsDict, ABC):
 
     def _apply_network(self, networks: list[torch.nn.Module], key: str, function: Callable, *args, **kwargs) -> dict[str, object]:
         results : dict[str, object] = {}
@@ -397,7 +398,6 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
         self.init_type  = init_type
         self.init_gain  = init_gain
         self.dim = dim
-        
         self._it = 0
         
     @_function_network
@@ -541,7 +541,7 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
                 for (name, output_layer) in super().named_forward(*patch_input):
                     yield "{}{}".format("accu:", name), output_layer
                 acc.addLayer(i, output_layer)
-            yield name, acc.assemble(self.device)
+            yield name, acc.assemble()
         else:
             for (name, output_layer) in super().named_forward(*inputs):
                 yield name, output_layer
@@ -578,7 +578,7 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
                     del output_layer
                     output_layer_index[name] += 1
                     if output_layer_accumulator[name].isFull():
-                        output_layer = output_layer_accumulator[name].assemble(self.device)
+                        output_layer = output_layer_accumulator[name].assemble()
                         output_layer_accumulator.pop(name)
                         output_layer_index.pop(name)
                         layers_name.remove(name)
@@ -595,23 +595,12 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
         if self.training:
             self._backward()
 
-    def forward(self, data_dict: dict[tuple[str, bool], torch.Tensor], output_layers: list[str] = []) -> list[tuple[str, torch.Tensor]]:
-        metric_tmp = {network : network.measure.outputsCriterions.keys() for network in self.getNetworks().values() if network.measure}
-        outputsGroup : dict[str, Self]= {}
-        for k, v in metric_tmp.items():
-            for a in v:
-                outputsGroup[a] = k
-        if not len(outputsGroup) and not len(output_layers):
-            return []
-
-        self.resetLoss()
-        results = []
-        for name, layer in self.get_layers([v for k, v in data_dict.items() if k[1]], list(set(list(outputsGroup.keys())+output_layers))):
-            if name in outputsGroup:
-                outputsGroup[name]._layer_function(name, layer, data_dict)
-            if name in output_layers:
-                results.append((name, layer))
-        return results
+    def forward(self, data_dict: dict[tuple[str, bool], torch.Tensor], output_name_layers: list[str]) -> list[tuple[str, torch.Tensor]]:        
+        output_layers = {}
+        for name, layer in self.get_layers([v for k, v in data_dict.items() if k[1]], list(set(output_name_layers))):
+            if name in output_name_layers:
+                output_layers[name] = layer
+        return output_layers
 
     @_function_network
     def resetLoss(self):
@@ -626,7 +615,7 @@ class Network(ModuleArgsDict, NeedDevice, ABC):
                     if self._it % self.nb_batch_per_step == 0:
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
-                        self.optimizer.zero_grad()
+                        self.optimizer.zero_grad(set_to_none=True)
                 self._it += 1
 
     @_function_network
