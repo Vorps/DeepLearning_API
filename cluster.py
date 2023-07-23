@@ -186,7 +186,7 @@ def main():
     args = parser.parse_args()
     config = vars(args)
 
-    clusterSubmit = cluster.ClusterSubmit("{} {}--config {} -models_dir {} -checkpoints_dir {} -url {} -predictions_dir {} -statistics_dir {} -setups_dir {} {}".format(config["type"], "-y " if config["y"] else "", config["config"], config["MODELS_DIRECTORY"], config["CHECKPOINTS_DIRECTORY"], config["URL_MODEL"], config["PREDICTIONS_DIRECTORY"], config["STATISTICS_DIRECTORY"], config["SETUPS_DIRECTORY"], "--resubmit" if config["resubmit"] else ""), time_limit=config["time_limit"], num_gpus=config["devices"], num_workers=config["num_workers"], memory=config["memory"], resubmit=config["resubmit"], email=config["email"])
+    clusterSubmit = cluster.ClusterSubmit("{} {}--config {} -models_dir {} -checkpoints_dir {} -url {} -predictions_dir {} -statistics_dir {} -setups_dir {} {}".format(config["type"], "-y " if config["y"] else "", config["config"], config["MODELS_DIRECTORY"], config["CHECKPOINTS_DIRECTORY"], config["URL_MODEL"], config["PREDICTIONS_DIRECTORY"], config["STATISTICS_DIRECTORY"], config["SETUPS_DIRECTORY"], "--resubmit" if config["resubmit"] else ""), time_limit=config["time_limit"], num_nodes=config["num_nodes"], num_gpus=config["devices"], num_workers=config["num_workers"], memory=config["memory"], resubmit=config["resubmit"], email=config["email"])
     clusterSubmit.submit(job_display_name=config["name"] + '_')
 
 if __name__ == "__main__":

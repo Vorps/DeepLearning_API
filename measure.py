@@ -52,18 +52,27 @@ class MSE(MaskedLoss):
 
 class MAE(MaskedLoss):
 
+    def _loss(reduction: str, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return torch.nn.L1Loss(reduction=reduction)(x, y)
+    
     def __init__(self, reduction: str = "mean") -> None:
-        super().__init__(lambda x, y : torch.nn.L1Loss(reduction=reduction)(x, y), False)
+        super().__init__(partial(MAE._loss, reduction), False)
 
 class PSNR(MaskedLoss):
 
+    def _loss(dynamic_range: Union[float, None], x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return peak_signal_noise_ratio(x[0].cpu().numpy(), y[0].cpu().numpy(), data_range=dynamic_range if dynamic_range else (y.max()-y.min()).cpu().numpy())
+    
     def __init__(self, dynamic_range: Union[float, None] = None) -> None:
-        super().__init__(lambda x, y : peak_signal_noise_ratio(x[0].cpu().numpy(), y[0].cpu().numpy(), data_range=dynamic_range if dynamic_range else (y.max()-y.min()).cpu().numpy()), False)
+        super().__init__(partial(PSNR._loss, dynamic_range), False)
     
 class SSIM(MaskedLoss):
-
+    
+    def _loss(dynamic_range: Union[float, None], x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return structural_similarity(x[0].cpu().numpy(), y[0].cpu().numpy(), data_range=dynamic_range if dynamic_range else (y.max()-y.min()).cpu().numpy())
+    
     def __init__(self, dynamic_range: Union[float, None] = None) -> None:
-        super().__init__(lambda x, y : structural_similarity(x[0].cpu().numpy(), y[0].cpu().numpy(), data_range=dynamic_range if dynamic_range else (y.max()-y.min()).cpu().numpy()), True)
+        super().__init__(partial(SSIM._loss, dynamic_range), True)
 
 class DistanceLoss(Criterion):
 
@@ -187,7 +196,7 @@ class Gram(Criterion):
     
     def __init__(self) -> None:
         super().__init__()
-        self.loss = torch.nn.L1Loss(reduction='mean')
+        self.loss = torch.nn.L1Loss(reduction='sum')
 
     def forward(self, input : torch.Tensor, target : torch.Tensor) -> torch.Tensor:
         return self.loss(computeGram(input), computeGram(target))
@@ -220,20 +229,14 @@ class MedPerceptualLoss(Criterion):
             self.losses.append(config(DEEP_LEARNING_API_CONFIG_PATH)(getattr(importlib.import_module(module), name))(config = None))
         self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
-
-    def setDevice(self, device: torch.device):
-        super().setDevice(device)
-        self.model.setDevice(self.device)
-        self.model.to(self.device)
         self.model.eval()
         self.model.requires_grad_(False)
-        self.mean = self.mean.to(self.device)
-        self.std = self.std.to(self.device)
+        self.initdevice = False
 
     def preprocessing(self, input: torch.Tensor) -> torch.Tensor:
         input = input.repeat(1, 3, *[1 for _ in range(len(input.shape)-2)])
         input = (input-torch.min(input))/(torch.max(input)-torch.min(input))
-        input = (input-self.mean)/self.std
+        input = (input-self.mean.to(input.device))/self.std.to(input.device)
         return input
 
         #if not all([input.shape[-i-1] == size for i, size in enumerate(reversed(self.shape[2:]))]):
@@ -241,7 +244,10 @@ class MedPerceptualLoss(Criterion):
         return input
 
     def forward(self, input : torch.Tensor, *targets_tmp : torch.Tensor) -> torch.Tensor:
-        loss = torch.zeros((1), requires_grad = True).to(self.device, non_blocking=False).type(torch.float32)
+        if not self.initdevice:
+            self.model = Network.to(self.model, input.device.index)
+            self.initdevice = True
+        loss = torch.zeros((1), requires_grad = True).to(input.device, non_blocking=False).type(torch.float32)
         input = self.preprocessing(input)
         targets = [self.preprocessing(target) for target in targets_tmp]
         

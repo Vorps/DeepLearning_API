@@ -7,10 +7,11 @@ import numpy as np
 import os
 import torch
 import datetime
-from abc import ABC
+from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Callable, Any, Union, Optional
+from typing import Callable, Any, Union, Optional, Iterator
 from functools import partial
+import copy
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
 
@@ -19,7 +20,7 @@ class Attribute(dict[str, Any]):
     def __init__(self, attributes : dict[str, Any] = {}) -> None:
         super().__init__()
         for k, v in attributes.items():
-            super().__setitem__(k, v)
+            super().__setitem__(copy.deepcopy(k), copy.deepcopy(v))
     
     def __getitem__(self, key: str) -> Any:
         i = len([k for k in super().keys() if k.startswith(key)])
@@ -42,80 +43,66 @@ class Attribute(dict[str, Any]):
         else:
             raise NameError("{} not in cache_attribute".format(key))
 
-
     def __contains__(self, key: str) -> bool:
         return len([k for k in super().keys() if k.startswith(key)]) > 0
 
-def dataset_to_data(dataset : h5py.Dataset) -> tuple[np.ndarray, Attribute]:
-    data = np.zeros(dataset.shape, dataset.dtype)
-    dataset.read_direct(data)
-    attrs = Attribute()
-    attrs.update(dataset.attrs)
-    return data, attrs
-
 def data_to_image(data : np.ndarray, attributes: Attribute) -> sitk.Image:
+    if "Origin" not in attributes or "Spacing" not in attributes or "Direction" not in attributes:
+        raise NameError("Data is not an image")
     if data.shape[0] == 1:
         image = sitk.GetImageFromArray(data[0])
     else:
         data = data.transpose(tuple([i+1 for i in range(len(data.shape)-1)]+[0]))
         image = sitk.GetImageFromArray(data, isVector=True)
-    if "Origin" in attributes:
-        image.SetOrigin(attributes["Origin"].tolist())
-    if "Spacing" in attributes:
-        image.SetSpacing(attributes["Spacing"].tolist())
-    if "Direction" in attributes:
-        image.SetDirection(attributes["Direction"].tolist())
+    image.SetOrigin(attributes["Origin"].tolist())
+    image.SetSpacing(attributes["Spacing"].tolist())
+    image.SetDirection(attributes["Direction"].tolist())
     return image
-
-def dataset_to_image(dataset : h5py.Dataset) -> sitk.Image:
-    data, attributes = dataset_to_data(dataset)
-    return data_to_image(data, attributes)
-
-def data_to_dataset(h5 : Union[h5py.File, h5py.Group], name : str, data : np.ndarray, attributes : Union[Attribute, None] = None) -> None:
-    if name in h5:
-        del h5[name]
-    if attributes is None:
-        attributes = Attribute()
-    dataset = h5.create_dataset(name, data=data, dtype=data.dtype, chunks=None)
-    dataset.attrs.update({k : (v if isinstance(v.numpy() if isinstance(v, torch.Tensor) else v, np.ndarray) else str(v)) for k, v in attributes.items()})
-
-def image_to_dataset(h5 : Union[h5py.File, h5py.Group], name : str, image : sitk.Image, attributes : Union[Attribute, None] = None) -> None:
-    if attributes is None:
-        attributes = Attribute()
-    attributes["Origin"] = torch.tensor(image.GetOrigin())
-    attributes["Spacing"] = torch.tensor(image.GetSpacing())
-    attributes["Direction"] = torch.tensor(image.GetDirection())
-
-    data = sitk.GetArrayFromImage(image)
-    if image.GetNumberOfComponentsPerPixel() == 1:
-        data = np.expand_dims(data, 0)
-    else:
-        data = np.transpose(data, (len(data.shape)-1, *[i for i in range(len(data.shape)-1)]))
-    data_to_dataset(h5, name, data, attributes)
 
 class DatasetUtils():
 
-    class H5File():
+    class AbstractFile(ABC):
 
-        def __init__(self, filename: str, read: bool, parallel : bool = False) -> None:
+        def __init__(self) -> None:
+            pass
+        
+        def __enter__(self):
+            pass
+
+        def __exit__(self, type, value, traceback):
+            pass
+
+        @abstractmethod
+        def file_to_data(self):
+            pass
+
+        @abstractmethod
+        def data_to_file(self):
+            pass
+
+        @abstractmethod
+        def getNames(self, group: Union[str, None] = None) -> list[str]:
+            pass
+        
+        @abstractmethod
+        def getInfos(self, group: Union[str, None], name: str) -> tuple[list[int], Attribute]:
+            pass
+
+    class H5File(AbstractFile):
+
+        def __init__(self, filename: str, read: bool) -> None:
             self.h5: Union[h5py.File, None] = None
             self.filename = filename
             self.read = read
-            self.parallel = parallel
 
         def __enter__(self):
             args = {}
-            if self.parallel:
-                try:
-                    from mpi4py import MPI
-                    args.update(dict(driver='mpio', comm=MPI.COMM_WORLD))
-                except:
-                    print("Module importation error mpi4py")
-
+            if self.filename.endswith("/"):
+                self.filename = self.filename[:-1]
             if self.read:
                 self.h5 = h5py.File(self.filename, 'r', **args)
             else:
-                if not os.path.exists(self.filename) or self.parallel:
+                if not os.path.exists(self.filename):
                     if len(self.filename.split("/")) > 1 and not os.path.exists("/".join(self.filename.split("/")[:-1])):
                         os.makedirs("/".join(self.filename.split("/")[:-1]))
                     self.h5 = h5py.File(self.filename, 'w', **args)
@@ -123,58 +110,168 @@ class DatasetUtils():
                     self.h5 = h5py.File(self.filename, 'r+', **args)
                 self.h5.attrs["Date"] = DATE()
             self.h5.__enter__()
-            return self
+            return self.h5
     
         def __exit__(self, type, value, traceback):
             if self.h5 is not None:
                 self.h5.close()
+        
+        def file_to_data(self, name: str) -> tuple[np.ndarray, Attribute]:
+            dataset = self.h5[name]
+            data = np.zeros(dataset.shape, dataset.dtype)
+            dataset.read_direct(data)
+            attrs = Attribute()
+            attrs.update(dataset.attrs)
+            return data, attrs
 
-    def __init__(self, filename : str, parallel : bool = False, is_directory: bool = False) -> None:
+        def data_to_file(self, name : str, data : Union[sitk.Image, sitk.Transform, np.ndarray], attributes : Union[Attribute, None] = None) -> None:
+            if attributes is None:
+                attributes = Attribute()
+            if isinstance(data, sitk.Image):
+                image = data
+                attributes["Origin"] = torch.tensor(image.GetOrigin())
+                attributes["Spacing"] = torch.tensor(image.GetSpacing())
+                attributes["Direction"] = torch.tensor(image.GetDirection())
+                data = sitk.GetArrayFromImage(image)
+
+                if image.GetNumberOfComponentsPerPixel() == 1:
+                    data = np.expand_dims(data, 0)
+                else:
+                    data = np.transpose(data, (len(data.shape)-1, *[i for i in range(len(data.shape)-1)]))
+            elif isinstance(data, sitk.Transform):
+                if isinstance(data, sitk.Euler3DTransform):
+                    transform_type = "Euler3DTransform_double_3_3"
+                if isinstance(data, sitk.AffineTransform):
+                    transform_type = "AffineTransform_double_3_3"
+                if isinstance(data, sitk.BSplineTransform):
+                    transform_type = "BSplineTransform_double_3_3"
+                attributes["Transform"] = transform_type
+                attributes["FixedParameters"] = data.GetFixedParameters()
+                data = np.asarray(data.GetParameters())
+
+            h5_group = self.h5
+            if len(name.split("/")) > 1:
+                group = "/".join(name.split("/")[:-1])
+                if group not in self.h5:
+                    self.h5.create_group(group)
+                h5_group = self.h5[group]
+
+            name = name.split("/")[-1]
+            if name in h5_group:
+                del h5_group[name]
+
+            dataset = h5_group.create_dataset(name, data=data, dtype=data.dtype, chunks=None)
+            dataset.attrs.update({k : (v if isinstance(v.numpy() if isinstance(v, torch.Tensor) else v, np.ndarray) else str(v)) for k, v in attributes.items()})
+        
+        def getNames(self, group: Union[str, None] = None) -> list[str]:
+            return [dataset.name for dataset in self.h5[group].values()] if group in self.h5[group] else []
+        
+        def getInfos(self, group: Union[str, None], name: str) -> tuple[list[int], Attribute]:
+            h5Group = self.h5
+            if group is not None:
+                h5Group = self.h5[group]
+            return h5Group[name].shape, Attribute({k : torch.tensor(v) if isinstance(v, np.ndarray) else v for k, v in h5Group[name].attrs.items()})
+
+    class SitkFile(AbstractFile):
+
+        def __init__(self, filename: str, read: bool) -> None:
+            self.filename = filename
+            if not os.path.exists(self.filename):
+                os.makedirs(self.filename)
+            self.read = read
+            self.format = self.filename.split(".")[-1][:-1]
+
+        def file_to_data(self, name: str) -> tuple[np.ndarray, Attribute]:
+            image = sitk.ReadImage("{}{}".format(self.filename, name))
+            if attributes is None:
+                attributes = Attribute()
+            attributes["Origin"] = torch.tensor(image.GetOrigin())
+            attributes["Spacing"] = torch.tensor(image.GetSpacing())
+            attributes["Direction"] = torch.tensor(image.GetDirection())
+
+            data = sitk.GetArrayFromImage(image)
+            if image.GetNumberOfComponentsPerPixel() == 1:
+                data = np.expand_dims(data, 0)
+            else:
+                data = np.transpose(data, (len(data.shape)-1, *[i for i in range(len(data.shape)-1)]))
+            return data, attributes
+                
+        def data_to_file(self, name : str, data : Union[sitk.Image, sitk.Transform, np.ndarray], attributes : Union[Attribute, None] = None) -> None:
+            if isinstance(data, sitk.Image):
+                sitk.WriteImage(data, "{}{}.{}".format(self.filename, name, self.format))
+            elif isinstance(data, sitk.Transform):
+                sitk.WriteTransform(data, "{}{}.itk.txt".format(self.filename, name))
+            else:
+                self.data_to_file(name, data_to_image(data, attributes), attributes)
+        
+        def getNames(self, group: Union[str, None] = None) -> list[str, ]:
+            return sorted(os.listdir("{}{}/".format(self.filename, group))) if os.path.exists("{}{}/".format(self.filename, group)) else []
+
+        def getInfos(self, group: Union[str, None], name: str) -> tuple[list[int], Attribute]:
+            file_reader = sitk.ImageFileReader()
+            file_reader.SetFileName("{}{}/{}".format(self.filename, group if group is not None else "", name))
+            file_reader.ReadImageInformation()
+            attributes = Attribute()
+            attributes["Origin"] = torch.tensor(file_reader.GetOrigin())
+            attributes["Spacing"] = torch.tensor(file_reader.GetSpacing())
+            attributes["Direction"] = torch.tensor(file_reader.GetDirection())
+            return list(file_reader.GetSize()), attributes
+
+    class File(ABC):
+
+        def __init__(self, filename: str, read: bool) -> None:
+            self.filename = filename
+            self.read = read
+            self.file = None
+
+        def __enter__(self):
+            if ".h5" in self.filename:
+                self.file = DatasetUtils.H5File(self.filename, self.read)
+            else: 
+                self.file = DatasetUtils.SitkFile(self.filename, self.read)
+            self.file.__enter__()
+            return self.file
+
+        def __exit__(self, type, value, traceback):
+            self.file.__exit__(type, value, traceback)
+
+    def __init__(self, filename : str) -> None:
+        if ".h5" not in filename and not filename.endswith("/"):
+            filename = "{}/".format(filename)
         self.filename = filename
-        if os.path.exists(filename) and os.path.isdir(filename):
-            self.is_directory = True
-        else:
-            self.is_directory = is_directory
+        self.is_directory = filename.endswith("/") 
         self.data = {}
-        self.parallel = parallel
+    
+    def write(self, group : str, name : str, data : Union[sitk.Image, sitk.Transform, np.ndarray], attributes : Union[Attribute, None] = None):
         if self.is_directory:
             if not os.path.exists(self.filename):
                 os.makedirs(self.filename)
-    
-    def _write(self, group : str, name : str, func : Callable[[Union[h5py.File, h5py.Group], sitk.Image, Union[Attribute, None]], None], attributes : Union[Attribute, None] = None):
         if self.is_directory:
             s_group = group.split("/")
             if len(s_group) > 1:
                 subDirectory = "/".join(s_group[:-1])
                 name = "{}/{}".format(subDirectory, name)
                 group = s_group[-1]
-            with DatasetUtils.H5File("{}/{}".format(self.filename, name), False, self.parallel) as h5:
-                func(h5 = h5.h5, name = group, attributes = attributes)
+            with DatasetUtils.File("{}{}/".format(self.filename, name), False) as file:
+                file.data_to_file(group, data, attributes)
         else:
-            with DatasetUtils.H5File(self.filename, False, self.parallel) as h5:
-                if group not in h5.h5:
-                    h5.h5.create_group(group)
-                func(h5 = h5.h5[group], name = name, attributes = attributes)
-
-    def writeImage(self, group : str, name : str, image : sitk.Image, attributes : Union[Attribute, None] = None) -> None:
-        self._write(group, name, partial(image_to_dataset, image = image), attributes)
-
-    def writeData(self, group : str, name : str, data : np.ndarray, attributes : Union[Attribute, None] = None) -> None:
-        self._write(group, name, partial(data_to_dataset, data = data), attributes)
+            with DatasetUtils.File(self.filename, False) as file:
+                file.data_to_file("{}/{}".format(group, name), data, attributes)
     
-    def writeTransform(self, group : str, name : str, transform: sitk.Transform, attributes : Union[Attribute, None] = None) -> None:
-        if isinstance(transform, sitk.Euler3DTransform):
-            transform_type = "Euler3DTransform_double_3_3"
-        if isinstance(transform, sitk.AffineTransform):
-            transform_type = "AffineTransform_double_3_3"
-        if isinstance(transform, sitk.BSplineTransform):
-            transform_type = "BSplineTransform_double_3_3"
-        if attributes is None:
-            attribute = Attribute()
-        attribute["Transform"] = transform_type
-        attribute["FixedParameters"] = transform.GetFixedParameters()
-        self._write(group, name, partial(data_to_dataset, data = np.asarray(transform.GetParameters())), attribute)
-
+    def readData(self, group : str, name : str) -> tuple[np.ndarray, Attribute]:
+        if self.is_directory:
+            s_group = group.split("/")
+            if len(s_group) > 1:
+                subDirectory = "/".join(s_group[:-1])
+                name = "{}/{}".format(subDirectory, name)
+                group = s_group[-1]
+            with DatasetUtils.File("{}{}".format(self.filename, name), False) as file:
+                result = file.file_to_data(group)
+        else:
+            with DatasetUtils.File(self.filename, False) as file:
+                result = file.file_to_data("{}/{}".format(group, name))
+        return result
+    
     def readTransform(self, group : str, name : str) -> sitk.Transform: 
         transformParameters, attribute = self.readData(group, name)
         transform_type = attribute["Transform"]
@@ -188,73 +285,24 @@ class DatasetUtils():
         transform.SetParameters(tuple(transformParameters))
         return transform
     
-    def readData(self, group : str, name : str) -> tuple[np.ndarray, Attribute]:
-        if self.is_directory:
-            s_group = group.split("/")
-            if len(s_group) > 1:
-                subDirectory = "/".join(s_group[:-1])
-                name = "{}/{}".format(subDirectory, name)
-                group = s_group[-1]
-            with DatasetUtils.H5File("{}/{}".format(self.filename, name), False, self.parallel) as h5:
-                return dataset_to_data(h5.h5[group])
-        else:
-            with DatasetUtils.H5File(self.filename, False, self.parallel) as h5:
-                return dataset_to_data(h5.h5[group][name])
-    
-    def readImages(self, path_dest : str, function: Callable[[np.ndarray, Attribute, str], np.ndarray] = lambda x, y, z: x) -> None:
-        if not os.path.exists(path_dest):
-            os.makedirs(path_dest)
-
-        if self.is_directory:
-            def write(name, group, obj):
-                if isinstance(obj, h5py.Dataset):
-                    if not os.path.exists("{}{}".format(path_dest, group)):
-                        os.makedirs("{}{}".format(path_dest, group))
-                    if not os.path.exists("{}{}/{}".format(path_dest, group, name)):
-                        data, attrs = dataset_to_data(obj)
-                        data = function(data, attrs, name)
-                        im = data_to_image(data, attrs)
-                        sitk.WriteImage(im, "{}{}/{}".format(path_dest, group, name), True)
-                        print("Write image : {}{}/{}".format(path_dest, group, name))
-            names = sorted(os.listdir(self.filename))
-            for name in names:
-                with DatasetUtils.H5File("{}/{}".format(self.filename, name), True, self.parallel) as h5:
-                    h5.h5.visititems(partial(write, name))
-        else:
-            def write(name, obj):
-                if isinstance(obj, h5py.Dataset):
-                    if len(name.split("/")) > 1 and not os.path.exists(path_dest+"/".join(name.split("/")[:-1])):
-                        os.makedirs(path_dest+"/".join(name.split("/")[:-1]))
-                    if not os.path.exists(path_dest+name):
-                        data, attrs = dataset_to_data(obj)
-                        data = function(data, attrs, name)
-                        im = data_to_image(data, attrs)
-                        sitk.WriteImage(im, path_dest+name, True)
-                        print("Write image : {}{}".format(path_dest, name))
-            with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:            
-                h5.h5.visititems(write)
-
-    def directory_to_dataset(self, src_path : str):
-        for root, dirs, files in os.walk(src_path):
-            path = root.replace(src_path, "")
-            for i, file in enumerate(files):
-                if file.endswith(".mha"):
-                    self.writeImage(path, file, sitk.ReadImage("{}/{}".format(root, file)))
-                print("Compute in progress : {} {:.2f} %".format(path, (i+1)/len(files)*100))
-    
-    def getSize(self, group) -> int:
+    def readImage(self, group : str, name : str):
+         data, attribute = self.readData(group, name)
+         return data_to_image(data, attribute)
+            
+    def getSize(self, group: str) -> int:
         if self.is_directory:
             name = self.filename
             s_group = group.split("/")
             if len(s_group) > 1:
                 subDirectory = "/".join(s_group[:-1])
-                name = "{}/{}".format(name, subDirectory)
-            return len(os.listdir(name))  
+                name = "{}{}".format(name, subDirectory)
+            result = len(os.listdir(name))  
         else:
-            with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:
-                return len(h5.h5[group].keys())
+            with DatasetUtils.File(self.filename, True) as file:
+                result = len(file.getNames(group))
+        return result
 
-    def isExist(self, group, name: str) -> bool:
+    def isExist(self, group: str, name: str) -> bool:
         if self.is_directory:
             if os.path.exists("{}/{}".format(self.filename, name)):
                 s_group = group.split("/")
@@ -263,48 +311,44 @@ class DatasetUtils():
                     name = "{}/{}".format(subDirectory, name)
                     group = s_group[-1]
                 try:
-                    with DatasetUtils.H5File("{}/{}".format(self.filename, name), True, self.parallel) as h5:            
-                        return group in h5.h5
+                    with DatasetUtils.File("{}{}".format(self.filename, name), True) as file:
+                        result = group in file.getNames()
                 except:
-                    os.remove("{}/{}".format(self.filename, name))
-                    return False   
+                    os.remove("{}{}".format(self.filename, name))
+                    result = False   
             else:
-                return False
+                result = False
         else:
-            with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:
-                return group in h5.h5 and name in h5.h5[group]
+            with DatasetUtils.File(self.filename, True) as file:
+                result = name in file.getNames(group)
+        return result
     
-    def getNames(self, group, index: Optional[list[int]] = None) -> list[str]:
+    def getNames(self, group: str, index: Optional[list[int]] = None) -> list[str]:
         if self.is_directory:
             name = self.filename
             s_group = group.split("/")
             if len(s_group) > 1:
                 subDirectory = "/".join(s_group[:-1])
                 name = "{}/{}".format(subDirectory, name)
-            return [name for i, name in enumerate(sorted(os.listdir(name))) if index is None or i in index]
+            result = [name for i, name in enumerate(sorted(os.listdir(name))) if index is None or i in index]
         else:
-            with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:
-                return [dataset.name for i, dataset in enumerate(h5.h5[group].values()) if index is None or i in index]
+            with DatasetUtils.File(self.filename, True) as file:
+                result = [name for i, name in enumerate(file.getNames(group)) if index is None or i in index]
+        return result
     
-    def getInfos(self, group, name) -> tuple[list[int], Attribute]:
+    def getInfos(self, group: str, name: str) -> tuple[list[int], Attribute]:
         if self.is_directory:
             s_group = group.split("/")
             if len(s_group) > 1:
                 subDirectory = "/".join(s_group[:-1])
                 name = "{}/{}".format(subDirectory, name)
                 group = s_group[-1]
-            if os.path.exists("{}/{}".format(self.filename, name)):
-                with DatasetUtils.H5File("{}/{}".format(self.filename, name), True, self.parallel) as h5:            
-                    if group in h5.h5:
-                        return h5.h5[group].shape, Attribute({k : torch.tensor(v) if isinstance(v, np.ndarray) else v for k, v in h5.h5[group].attrs.items()})
-            else:
-                assert ValueError()
+            with DatasetUtils.File("{}{}".format(self.filename, name), True) as file:
+                result = file.getInfos(None, group)      
         else:
-            with DatasetUtils.H5File(self.filename, True, self.parallel) as h5:
-                if group in h5.h5 and name in h5.h5[group]:
-                    return h5.h5[group][name].shape, Attribute({k : torch.tensor(v) if isinstance(v, np.ndarray) else v for k, v in h5.h5[group][name].attrs.items()})
-                else:
-                    assert ValueError()
+            with DatasetUtils.File(self.filename, True) as file:
+                result = file.getInfos(group, name)
+        return result
 
 def _getModule(classpath : str, type : str) -> tuple[str, str]:
     if len(classpath.split("_")) > 1:
@@ -438,6 +482,7 @@ class State(Enum):
     TRANSFER_LEARNING = "TRANSFER_LEARNING"
     FINE_TUNNING = "FINE_TUNNING"
     PREDICTION = "PREDICTION"
+    METRIC = "METRIC"
     
     def __str__(self) -> str:
         return self.value
@@ -481,6 +526,10 @@ def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overla
                 overlap_tmp[i] = np.mod(patch_size[i]-np.mod(shape[i], patch_size[i]), patch_size[i])//(size[i]-1)
     else:
         overlap_tmp = overlap
+    
+    for dim in range(len(shape)):
+        assert overlap_tmp[dim] < patch_size[dim],  "Overlap must be less than patch size"
+            
 
     for dim in range(len(shape)):
         slices.append([])
@@ -491,12 +540,8 @@ def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overla
             end = start + patch_size[dim]
             if end >= shape[dim]:
                 end = shape[dim]
-                
-                if overlap is None and end-patch_size[dim] >= 0:
-                    start = end-patch_size[dim]
                 slices[dim].append(slice(start, end))
                 break
-            
             slices[dim].append(slice(start, end))
             index += 1
         nb_patch_per_dim.append((index+1, patch_size[dim] == 1))

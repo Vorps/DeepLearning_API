@@ -176,7 +176,6 @@ def config(key : Union[str, None] = None):
                 key_tmp =  kwargs["DL_args"]+("."+key if key is not None else "") if "DL_args" in kwargs else key
                 without =  kwargs["DL_without"] if "DL_without" in kwargs else []
                 os.environ['DEEP_LEARNING_API_CONFIG_PATH'] = key_tmp
-                    
                 with Config(filename, key_tmp) as config:
                     os.environ['DEEP_LEARNING_API_CONFIG_VARIABLE'] = "False"
                     kwargs = {} 

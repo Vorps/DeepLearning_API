@@ -1,9 +1,9 @@
 import argparse
 import os
-from subprocess import call
 from DeepLearning_API import CONFIG_FILE
 from DeepLearning_API.trainer import Trainer
 from DeepLearning_API.predictor import Predictor
+from DeepLearning_API.metric import Metric
 from DeepLearning_API.utils import State
 
 def train(state : State):
@@ -15,6 +15,11 @@ def predict():
     os.environ["DEEP_LEARNING_API_ROOT"] = "Predictor"
     with Predictor(config = CONFIG_FILE()) as predictor:
         predictor.predict()
+
+def metric():
+    os.environ["DEEP_LEARNING_API_ROOT"] = "Metric"
+    with Metric(config = CONFIG_FILE()) as metric:
+        metric.measure()
 
 def main():
     parser = argparse.ArgumentParser(description="DeepLearing API",
@@ -46,14 +51,21 @@ def main():
     os.environ["DEEP_LEANING_API_CONFIG_MODE"] = "Done"
     
     if config["config"] == "None":
-        os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Config.yml" if config["type"]  is not State.PREDICTION else "Prediction.yml"
+        if config["type"] is State.PREDICTION:
+             os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Prediction.yml"
+        elif config["type"] is State.METRIC:
+            os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Metric.yml"
+        else:
+            os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Config.yml"
     else:
         os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = config["config"]
     
-    if config["type"] is not State.PREDICTION:
-        train(config["type"])
-    else:
+    if config["type"] is State.PREDICTION:
         predict()
+    elif config["type"] is State.METRIC:
+        metric()
+    else:
+        train(config["type"])
 
 if __name__ == "__main__":
     main()

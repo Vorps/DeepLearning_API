@@ -14,19 +14,19 @@ import datetime
 import dill
 from typing import Union, Callable
 from torch.cuda.amp.autocast_mode import autocast
-from torch.nn.parallel import DistributedDataParallel as DDP
 import random
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 import shutil
 import pynvml
 from functools import partial
 from torch.utils.tensorboard.writer import SummaryWriter
-
+from torch.optim.swa_utils import AveragedModel
 import torch.distributed as dist
 
-os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
+
 def setup(rank: int, world_size: int):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
@@ -37,7 +37,7 @@ def cleanup():
 
 class _Trainer():
 
-    def __init__(self, train_name: str, images_log: Union[list[str], None] , save_checkpoint_mode: str, epochs: int, epoch: int, groupsInput: list[str], autocast: bool, it_validation: Union[int, None], it: int, rank: int, model: DDP, dataloader_training: DataLoader, dataloader_validation: Union[DataLoader, None] = None) -> None:
+    def __init__(self, train_name: str, images_log: Union[list[str], None] , save_checkpoint_mode: str, epochs: int, epoch: int, groupsInput: list[str], autocast: bool, it_validation: Union[int, None], it: int, rank: int, model: DDP, modelEMA: AveragedModel, dataloader_training: DataLoader, dataloader_validation: Union[DataLoader, None] = None) -> None:
         self.rank = rank
         self.save_checkpoint_mode = save_checkpoint_mode
         self.train_name = train_name
@@ -48,7 +48,9 @@ class _Trainer():
         self.dataloader_training = dataloader_training
         self.dataloader_validation = dataloader_validation
         self.autocast = autocast
-        self.modelEMA = None
+        self.modelEMA = modelEMA
+        if self.modelEMA is not None:
+            self.modelEMA.eval()
         self.it_validation = it_validation
         if self.it_validation is None:
             self.it_validation = len(dataloader_training)
@@ -56,7 +58,6 @@ class _Trainer():
         self.tb = SummaryWriter(log_dir = STATISTICS_DIRECTORY()+self.train_name+"/")
         self.images_log = images_log
         self.device = self.model.device
-        self.output_name_layers = self._getOutput_name_layers()
 
     def __enter__(self):
         return self
@@ -75,39 +76,23 @@ class _Trainer():
         inputs.update({(k, False) : v[0] for k, v in data_dict.items() if k not in self.groupsInput})
         return inputs
 
-    def _getOutput_name_layers(self) -> dict[str, Network]:
-        metric_tmp = {network : network.measure.outputsCriterions.keys() for network in self.model.module.getNetworks().values() if network.measure}
-        output_name_layers : dict[str, Network]= {}
-        for k, v in metric_tmp.items():
-            for a in v:
-                output_name_layers[a] = k
-        return output_name_layers
-        
-    def forward(self, data_dict: dict[tuple[str, bool], torch.Tensor]):
-        self.model.module.resetLoss()
-        results: dict[str, torch.Tensor] = self.model(data_dict, self.output_name_layers.keys())
-        for name, layer in results.items():
-            self.output_name_layers[name]._layer_function(name, layer, data_dict)
-        return results
-
     def train(self) -> None:
         self.model.train()
-        self.dataloader_training.dataset.init()
         description = lambda : "Training : Loss ("+" ".join(["{}({:.6f}) : {:.4f}".format(name, network.optimizer.param_groups[0]['lr'], network.measure.getLastValue()) for name, network in self.model.module.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "")+gpuInfo(self.device)
         
         with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = description(), total=len(self.dataloader_training)) as batch_iter:
             for _, data_dict in batch_iter:
                 with autocast(enabled=self.autocast):
                     input = self.getInput(data_dict)
-                    self.forward(input)
-        
-                    if self.modelEMA is not None:
-                        self.modelEMA.update_parameters(self.model)
-                        self.modelEMA(input)
-
-                    self.model.module.update_lr()
-
+                    self.model(input)
+                    self.model.module.backward(self.model.module)
+                    if self.rank == 0:
+                        if self.modelEMA is not None:
+                            self.modelEMA.update_parameters(self.model)
+                            self.modelEMA.module(input)
+                            
                     if (self.it+1) % self.it_validation == 0:
+                        self.model.module.update_lr()
                         if self.rank == 0:
                             self._train_log(data_dict)
                         if self.dataloader_validation is not None:
@@ -119,29 +104,26 @@ class _Trainer():
 
                 batch_iter.set_description(description()) 
                 self.it += 1
-        self.dataloader_training.dataset.close()
     
 
     @torch.no_grad()
     def _validate(self) -> None:
         self.model.module.measureClear()
         self.model.eval()
-        description = lambda : "Validation : Loss ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.model.module.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.ema.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.device)
+        description = lambda : "Validation : Loss ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.model.module.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.device)
         data_dict = None
-        self.dataloader_validation.dataset.init()
         with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = description(), total=len(self.dataloader_validation), leave=False) as batch_iter:
             for _, data_dict in batch_iter:
                 input = self.getInput(data_dict)
-                self.forward(input)
-        
-                if self.modelEMA is not None:
-                    self.modelEMA.update_parameters(self.model.module)
-                    self.modelEMA(input) 
+                self.model(input)
+                if self.rank == 0:
+                    if self.modelEMA is not None:
+                        self.modelEMA.update_parameters(self.model.module)
+                        self.modelEMA.module(input)
 
                 batch_iter.set_description(description())
             if self.rank == 0:
                 self._validation_log(data_dict)
-        self.dataloader_validation.dataset.close()
 
     def checkpoint_save(self, loss) -> None:
         path = CHECKPOINTS_DIRECTORY()+self.train_name+"/"
@@ -181,11 +163,6 @@ class _Trainer():
                 if network.measure is not None:
                     self.tb.add_scalars("{}{}/Loss/Trainning".format(name, label), network.measure.format(isLoss=True), self.it)
                     self.tb.add_scalars("{}{}/Metric/Trainning".format(name, label), network.measure.format(isLoss=False), self.it)
-
-            """for name, weight in model.named_parameters():
-                self.tb.add_histogram("{}{}".format(name, label), weight, self.it)
-                if weight.grad is not None:
-                    self.tb.add_histogram("{}{}.grad".format(name, label), weight.grad, self.it)"""
             
             if self.images_log:
                 images_log = []
@@ -232,16 +209,26 @@ class _Trainer():
                 for name, layer in model.get_layers([v.to(self.rank) for k, v in self.getInput(data_dict).items() if k[1]], images_log):
                     addImageFunction(name, layer)
 
-def train(rank: int, world_size: int, trainer: Callable[[int, DDP, DataLoader, DataLoader], _Trainer], dataloaders_list: list[list[DataLoader]], model: Network, devices: list[torch.device]):
+def train(rank: int, world_size: int, size: int, manual_seed: int, trainer: Callable[[int, DDP, DataLoader, DataLoader], _Trainer], dataloaders_list: list[list[DataLoader]], model: Network, modelEMA: AveragedModel, devices: list[torch.device]):
     setup(rank, world_size)
     pynvml.nvmlInit()
+    if manual_seed is not None:
+        np.random.seed(manual_seed * world_size + rank)
+        random.seed(manual_seed * world_size + rank)
+        torch.manual_seed(manual_seed * world_size + rank)
+    torch.backends.cudnn.benchmark = manual_seed is None
+    torch.backends.cudnn.deterministic = manual_seed is not None
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     dataloaders = dataloaders_list[rank]
     for dataloader in dataloaders:
         dataloader.dataset.to(devices[rank])
         dataloader.dataset.load()
-    model = model.to(rank)
-    model = DDP(model, device_ids=[rank])
-    with trainer(rank, model, *dataloaders) as t:
+    model = Network.to(model, rank*size)
+    if modelEMA is not None:
+        modelEMA.module = Network.to(modelEMA.module, rank*size)
+    model = DDP(model)
+    with trainer(rank*size, model, modelEMA, *dataloaders) as t:
         t.run()
     pynvml.nvmlShutdown()
     cleanup()
@@ -260,18 +247,13 @@ class Trainer():
                     it_validation : Union[int, None] = None,
                     autocast : bool = False,
                     gradient_checkpoints: Union[list[str], None] = None,
+                    gpu_checkpoints: Union[list[str], None] = None,
                     ema_decay : float = 0,
                     images_log: Union[list[str], None] = None,
                     save_checkpoint_mode: str= "BEST") -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)
-        if manual_seed is not None:
-            torch.manual_seed(manual_seed)
-            random.seed(manual_seed)
-
-        cudnn.deterministic = manual_seed is not None
-        cudnn.benchmark = manual_seed is None
-        
+        self.manual_seed = manual_seed        
         self.train_name = train_name
         self.dataset = dataset
         self.groupsInput = groupsInput
@@ -285,9 +267,10 @@ class Trainer():
         self.modelEMA : Union[torch.optim.swa_utils.AveragedModel, None] = None
         self.images_log = images_log
         self.gradient_checkpoints = gradient_checkpoints
+        self.gpu_checkpoints = gpu_checkpoints
         self.save_checkpoint_mode = save_checkpoint_mode
         self.devices = getDevice(devices)
-        self.world_size = len(self.devices)
+        self.world_size = len(self.devices)//(len(self.gpu_checkpoints)+1 if self.gpu_checkpoints else 1)
     
     def __enter__(self):
         return self
@@ -330,11 +313,14 @@ class Trainer():
                 torch.save({"Model" : self.model.state_dict()}, "{}StateDict/{}".format(path_model, name))
                 
                 if self.modelEMA is not None:
-                    self.modelEMA.modlule.load(checkpoint, init=False, ema=True)
+                    self.modelEMA.module.load(checkpoint, init=False, ema=True)
                     torch.save(self.modelEMA.module, "{}Serialized/{}".format(path_model, DATE()+"_EMA.pt"))
                     torch.save({"Model_EMA" : self.modelEMA.module.state_dict()}, "{}StateDict/{}".format(path_model, DATE()+"_EMA.pt"))
 
             os.rename(self.config_namefile, self.config_namefile.replace(".yml", "")+"_"+str(self.it)+".yml")
+    
+    def _avg_fn(self, averaged_model_parameter, model_parameter, num_averaged):
+        return (1-self.ema_decay) * averaged_model_parameter + self.ema_decay * model_parameter
     
     def train(self, state : State) -> None:
         if state == State.TRAIN and os.path.exists(STATISTICS_DIRECTORY()+self.train_name+"/"):
@@ -352,17 +338,14 @@ class Trainer():
 
 
         self.model.init(self.autocast, state)
-        self.model._compute_channels_trace(self.model, self.model.in_channels, self.gradient_checkpoints)
+        self.model.init_outputsGroup()
+        self.model._compute_channels_trace(self.model, self.model.in_channels, self.gradient_checkpoints, self.gpu_checkpoints)
         self.model.load(state_dict, init=True, ema=False)
         
         if self.ema_decay > 0:
-            ema_avg = lambda averaged_model_parameter, model_parameter, num_averaged: (1-self.ema_decay) * averaged_model_parameter + self.ema_decay * model_parameter
-            self.modelEMA = torch.optim.swa_utils.AveragedModel(self.model, avg_fn=ema_avg)
-
+            self.modelEMA = AveragedModel(self.model, avg_fn=self._avg_fn)
             if state_dict is not None:
-                model = self.modelEMA 
-                if isinstance(model, Network):
-                    model.load(state_dict, init=False, ema=True)
+                self.modelEMA.module.load(state_dict, init=False, ema=True)
         
         config_namefile_src = CONFIG_FILE().replace(".yml", "")
         self.config_namefile = SETUPS_DIRECTORY()+self.train_name+"/"+config_namefile_src.split("/")[-1]+"_"+str(self.it)+".yml"
@@ -372,5 +355,4 @@ class Trainer():
 
         self.dataloader = self.dataset.getData(self.world_size)
         trainer = partial(_Trainer, self.train_name, self.images_log, self.save_checkpoint_mode, self.epochs, self.epoch, self.groupsInput, self.autocast, self.it_validation, self.it)
-        mp.spawn(train, args=(self.world_size, trainer, self.dataloader, self.model, self.devices), nprocs=self.world_size)
-
+        mp.spawn(train, args=(self.world_size, (len(self.gpu_checkpoints)+1 if self.gpu_checkpoints else 1), self.manual_seed, trainer, self.dataloader, self.model, self.modelEMA, self.devices), nprocs=self.world_size)

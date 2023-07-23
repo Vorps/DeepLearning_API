@@ -150,36 +150,34 @@ class TensorCast(Transform):
 class Padding(Transform):
 
     @config("Padding")
-    def __init__(self, padding : list[int] = [0,0], mode : str = "default:constant,reflect,replicate,circular", dim: int = 0) -> None:
+    def __init__(self, padding : list[int] = [0,0,0,0,0,0], mode : str = "default:constant,reflect,replicate,circular") -> None:
         self.padding = padding
         self.mode = mode
-        self.dim = dim
 
     def __call__(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute and self.dim > 0:
+        if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute:
             origin = cache_attribute["Origin"]
             matrix = cache_attribute["Direction"].reshape((len(origin),len(origin)))
-            origin = origin.dot(matrix)
-            origin[-self.dim+1] -= self.padding[0]*cache_attribute["Spacing"][-self.dim+1]
-            cache_attribute["Origin"] = origin.dot(np.linalg.inv(matrix))
-        return F.pad(input.unsqueeze(0), tuple([0, 0]*(len(input.shape)-self.dim-1)+self.padding+[0, 0]*(self.dim)), self.mode.split(":")[0], float(self.mode.split(":")[1]) if len(self.mode.split(":")) == 2 else 0).squeeze()
-
-    def transformShape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        if self.dim > 0:
-            shape[self.dim-1] += sum(self.padding)
+            origin = torch.matmul(origin, matrix)
+            for dim in range(len(self.padding)//2):
+                origin[-dim-1] -= self.padding[dim*2]*cache_attribute["Spacing"][-dim-1]
+            cache_attribute["Origin"] = torch.matmul(origin, torch.inverse(matrix))
+        result = F.pad(input.unsqueeze(0), tuple(self.padding), self.mode.split(":")[0], float(self.mode.split(":")[1]) if len(self.mode.split(":")) == 2 else 0).squeeze(0)
+        return result
+    
+    def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        for dim in range(len(self.padding)//2):
+            shape[-dim-1] += sum(self.padding[dim*2:dim*2+2])
         return shape
 
     def inverse(self, name: str, input : torch.Tensor, cache_attribute: dict[str, torch.Tensor]) -> torch.Tensor:
-        if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute and self.dim > 0:
+        if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute:
             cache_attribute.pop("Origin")
-        slices = []
-        for i, shape in enumerate(input.shape):
-            if self.dim == i:
-                slices.append(slice(self.padding[0], shape-self.padding[1]))
-            else:
-                slices.append(slice(0, shape))
-
-        return input[slices]
+        slices = [slice(0, shape) for shape in input.shape]
+        for dim in range(len(self.padding)//2):
+            slices[-dim-1] = slice(self.padding[dim*2], input.shape[-dim-1]-self.padding[dim*2+1])
+        result = input[slices]
+        return result
 
 class Squeeze(Transform):
 

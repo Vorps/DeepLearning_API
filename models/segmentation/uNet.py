@@ -26,7 +26,7 @@ class UNet(network.Network):
 
         def __init__(self, in_channels: int, nb_class: int, dim: int) -> None:
             super().__init__()
-            self.add_module("Conv", blocks.getTorchModule("Conv", dim)(in_channels = in_channels, out_channels = nb_class, kernel_size = 3, stride = 1, padding = 1))
+            self.add_module("Conv", blocks.getTorchModule("Conv", dim)(in_channels = in_channels, out_channels = nb_class, kernel_size = 1, stride = 1, padding = 0))
             self.add_module("Softmax", torch.nn.Softmax(dim=1))
             self.add_module("Argmax", blocks.ArgMax(dim=1))
 

@@ -15,7 +15,7 @@ class MappingNetwork(network.ModuleArgsDict):
         if c_dim > 0:
             self.add_module("Linear", torch.nn.Linear(c_dim, embed_features), out_branch=["Embed"])
 
-        self.add_module("Noise", blocks.Noise(z_dim), in_branch=["Embed"])
+        self.add_module("Noise", blocks.NormalNoise(z_dim), in_branch=["Embed"])
         if c_dim > 0:
             self.add_module("Concat", blocks.Concat(), in_branch=[0,"Embed"])
         

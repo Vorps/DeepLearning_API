@@ -8,6 +8,7 @@ from scipy.interpolate import interp1d
 import numpy as np
 import ast
 from typing import Union
+from functools import partial
 
 class NormMode(Enum):
     NONE = 0,
@@ -23,7 +24,7 @@ def getNorm(normMode: Enum, channels : int, dim: int) -> torch.nn.Module:
     if normMode == NormMode.INSTANCE:
         return getTorchModule("InstanceNorm", dim = dim)(channels, affine=False, track_running_stats=False)
     if normMode == NormMode.SYNCBATCH:
-        return torch.nn.SyncBatchNorm(channels, affine=False, track_running_stats=True)
+        return torch.nn.SyncBatchNorm(channels, affine=True, track_running_stats=True)
     if normMode == NormMode.GROUP:
         return torch.nn.GroupNorm(num_groups=32, num_channels=channels)
     if normMode == NormMode.LAYER:
@@ -49,23 +50,28 @@ def getTorchModule(name_fonction : str, dim : Union[int, None] = None) -> torch.
 class BlockConfig():
 
     @config("BlockConfig")
-    def __init__(self, kernel_size : int = 3, stride : int = 1, padding : int = 1, bias = True, activation : str = "ReLU", normMode : str = "NONE") -> None:
+    def __init__(self, kernel_size : int = 3, stride : int = 1, padding : int = 1, bias = True, activation : Union[str, Callable[[], torch.nn.Module]] = "ReLU", normMode : Union[str, NormMode, Callable[[int], torch.nn.Module]] = "NONE") -> None:
         self.kernel_size = kernel_size
         self.bias = bias
         self.stride = stride
         self.padding = padding
         self.activation = activation
-        self.normMode = NormMode._member_map_[normMode]
+        if isinstance(normMode, str):
+            self.norm = NormMode._member_map_[normMode]
+        elif isinstance(normMode, NormMode):
+            self.norm = normMode
 
     def getConv(self, in_channels : int, out_channels : int, dim : int) -> torch.nn.Conv3d:
         return getTorchModule("Conv", dim = dim)(in_channels = in_channels, out_channels = out_channels, kernel_size = self.kernel_size, stride = self.stride, padding = self.padding, bias=self.bias)
     
-    def getNorm(self, channels : int, dim: int):
-        return getNorm(self.normMode, channels, dim)
+    def getNorm(self, channels : int, dim: int) -> torch.nn.Module:
+        return getNorm(self.norm, channels, dim) if isinstance(self.norm, NormMode) else self.norm(channels)
 
     def getActivation(self) -> torch.nn.Module:
-        return getTorchModule(self.activation.split(";")[0])(*[ast.literal_eval(value) for value in self.activation.split(";")[1:]], inplace=True) if self.activation != "None" else torch.nn.Identity()
-
+        if isinstance(self.activation, str):
+            return getTorchModule(self.activation.split(";")[0])(*[ast.literal_eval(value) for value in self.activation.split(";")[1:]], inplace=True) if self.activation != "None" else torch.nn.Identity()
+        return self.activation()
+    
 class ConvBlock(network.ModuleArgsDict):
     
     def __init__(self, in_channels : int, out_channels : int, nb_conv: int, blockConfig : BlockConfig, dim : int, alias : list[list[str]]=[[], [], []]) -> None:
@@ -81,9 +87,7 @@ class ResBlock(network.ModuleArgsDict):
     def __init__(self, in_channels : int, out_channels : int, nb_conv: int, blockConfig : BlockConfig, dim : int, alias : list[list[str]]=[[], [], [], []]) -> None:
         super().__init__()
         for i in range(nb_conv):
-            self.add_module("Conv_{}".format(i), blockConfig.getConv(in_channels, out_channels, dim), alias=alias[0])
-            self.add_module("Norm_{}".format(i), blockConfig.getNorm(out_channels, dim), alias=alias[1])
-            self.add_module("Activation_{}".format(i), blockConfig.getActivation(), alias=alias[2])
+            self.add_module("ConvBlock_{}".format(i), ConvBlock(in_channels, out_channels, nb_conv=1, blockConfig=blockConfig, dim=dim, alias=alias[:3]))
             if in_channels != out_channels:
                 self.add_module("Conv_skip_{}".format(i), blockConfig.getConv(in_channels, out_channels, dim), alias=alias[3], in_branch=[1], out_branch=[1])    
             in_channels = out_channels
@@ -134,7 +138,7 @@ class Permute(torch.nn.Module):
         super().__init__()
         self.dims = dims
 
-    def forward(self, *input : torch.Tensor) -> torch.Tensor:
+    def forward(self, input : torch.Tensor) -> torch.Tensor:
         return torch.permute(input, self.dims)
     
     def extra_repr(self):
@@ -218,11 +222,15 @@ class ArgMax(torch.nn.Module):
 
 class NormalNoise(torch.nn.Module):
 
-    def __init__(self) -> None:
+    def __init__(self, dim: Union[int, None] = None) -> None:
         super().__init__()
+        self.dim = dim
     
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return torch.randn_like(input).to(input.device)
+        if self.dim is not None:
+            return torch.randn(self.dim).to(input.device)
+        else:
+            return torch.randn_like(input).to(input.device)
     
 class Const(torch.nn.Module):
 

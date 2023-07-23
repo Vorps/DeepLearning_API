@@ -5,15 +5,49 @@ import torch
 from DeepLearning_API.config import config
 from DeepLearning_API.networks import network, blocks
 from DeepLearning_API.HDF5 import ModelPatch
+from DeepLearning_API.models.generation.ddpm import DDPM
+from DeepLearning_API.utils import State
+import numpy as np
 
 class Discriminator(network.Network):
 
+    class DDPM_TE(torch.nn.Module):
+
+        def __init__(self, in_channels: int, out_channels: int) -> None:
+            super().__init__()
+            self.linear_0 = torch.nn.Linear(in_channels, out_channels)
+            self.siLU = torch.nn.SiLU()
+            self.linear_1 = torch.nn.Linear(out_channels, out_channels)
+        
+        def forward(self, input: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+            return input + self.linear_1(self.siLU(self.linear_0(t))).reshape(input.shape[0], -1, *[1 for _ in range(len(input.shape)-2)])
+        
+    class Discriminator_SampleT(torch.nn.Module):
+
+        def __init__(self, noise_step: int) -> None:
+            super().__init__()
+            self.noise_step_C = noise_step
+            self.noise_step = noise_step
+            self.measure = None
+            self.C = 10
+
+        def setMeasure(self, measure: network.Measure):
+            self.measure = measure
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            if self.measure is not None:
+                self.noise_step += np.sign(1- self.measure.saved_loss)*self.C
+            self.noise_step = int(np.clip(self.noise_step, 1, self.noise_step_C))
+            result = torch.randint(0, self.noise_step, (input.shape[0],)).to(input.device)
+            return result
+        
     class DiscriminatorNLayers(network.ModuleArgsDict):
 
-        def __init__(self, channels: list[int], strides: list[int], dim: int) -> None:
+        def __init__(self, channels: list[int], strides: list[int], time_embedding_dim: int, dim: int) -> None:
             super().__init__()
             blockConfig = partial(blocks.BlockConfig, kernel_size=4, padding=1, bias=False, activation=partial(torch.nn.LeakyReLU, negative_slope = 0.2, inplace=True), normMode=blocks.NormMode.SYNCBATCH)
             for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], strides)):
+                self.add_module("Te_{}".format(i), Discriminator.DDPM_TE(time_embedding_dim, in_channels), in_branch=[0, 1])
                 self.add_module("Layer_{}".format(i), blocks.ConvBlock(in_channels, out_channels, 1, blockConfig(stride=stride), dim))
     
     class DiscriminatorHead(network.ModuleArgsDict):
@@ -30,12 +64,24 @@ class Discriminator(network.Network):
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     nb_batch_per_step: int = 64,
+                    noise_step: int = 1000,
+                    beta_start: float = 1e-4, 
+                    beta_end: float = 0.02,
+                    time_embedding_dim: int = 100,
                     dim : int = 3) -> None:
         super().__init__(in_channels = 1, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim, nb_batch_per_step=nb_batch_per_step)
         channels = [1, 16, 32, 64, 64]
         strides = [2,2,2,1]
-        self.add_module("Layers", Discriminator.DiscriminatorNLayers(channels, strides, dim))
+        self.add_module("Noise", blocks.NormalNoise(), out_branch=["eta"])
+        self.add_module("Sample", Discriminator.Discriminator_SampleT(noise_step), out_branch=["t"])
+        self.add_module("Forward", DDPM.DDPM_ForwardProcess(noise_step, beta_start, beta_end), in_branch=[0, "t", "eta"])
+        self.add_module("t", DDPM.DDPM_TimeEmbedding(noise_step, time_embedding_dim), in_branch=["t"], out_branch=["te"])
+            
+        self.add_module("Layers", Discriminator.DiscriminatorNLayers(channels, strides, time_embedding_dim, dim), in_branch=[0, "te"])
         self.add_module("Head", Discriminator.DiscriminatorHead(channels[-1], dim))
+    
+    def initialized(self):
+        self["Sample"].setMeasure(self.measure)
 
 class Generator(network.Network):
 
@@ -102,7 +148,7 @@ class Generator(network.Network):
             self.add_module("Encoder", Generator.GeneratorEncoder(channels, dim))
             self.add_module("NResBlock", Generator.GeneratorNResnetBlock(channels=channels[-1], nb_conv=6, dim=dim))
             self.add_module("Decoder", Generator.GeneratorDecoder(channels, dim))
-            
+
     @config("Generator")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
@@ -117,19 +163,43 @@ class Generator(network.Network):
         self.add_module("AutoEncoder", Generator.GeneratorAutoEncoder(ngf, dim))
         self.add_module("Head", Generator.GeneratorHead(in_channels=ngf, out_channels=1, dim=dim))
 
-    def getName(self):
-        return "Generator"
+class DiffusionGan(network.Network):
 
-class Gan(network.Network):
-
-    @config("Gan")
+    @config("DiffusionGan")
     def __init__(self, generator : Generator = Generator(), discriminator : Discriminator = Discriminator()) -> None:
         super().__init__()
         self.add_module("Discriminator_B", discriminator, in_branch=[1], out_branch=[-1], requires_grad=True)
         self.add_module("Generator_A_to_B", generator, in_branch=[0], out_branch=["pB"])
-        
         self.add_module("detach", blocks.Detach(), in_branch=["pB"], out_branch=["pB_detach"])
         self.add_module("Discriminator_pB_detach", discriminator, in_branch=["pB_detach"], out_branch=[-1])
-          
         self.add_module("Discriminator_pB", discriminator, in_branch=["pB"], out_branch=[-1], requires_grad=False)
 
+class DiffusionCycleGan(network.Network):
+
+    @config("DiffusionCycleGan")
+    def __init__(self, generator : Generator = Generator(), discriminator : Discriminator = Discriminator()) -> None:
+        super().__init__()
+        self.add_module("Discriminator_A", discriminator.setName("Discriminator_A"), in_branch=[0], out_branch=[-1], requires_grad=True)
+        self.add_module("Discriminator_B", copy.deepcopy(discriminator).setName("Discriminator_B"), in_branch=[1], out_branch=[-1], requires_grad=True)
+
+        self.add_module("Generator_A_to_B", generator.setName("Generator_A_to_B"), in_branch=[0], out_branch=["pB"])
+        self.add_module("Generator_B_to_A", copy.deepcopy(generator).setName("Generator_B_to_A"), in_branch=[1], out_branch=["pA"])
+        
+        self.add_module("detach", blocks.Detach(), in_branch=["pB"], out_branch=["pB_detach"])
+        self.add_module("Discriminator_pB_detach", self["Discriminator_B"], in_branch=["pB_detach"], out_branch=[-1])
+        
+        self.add_module("detach", blocks.Detach(), in_branch=["pA"], out_branch=["pA_detach"])
+        self.add_module("Discriminator_pA_detach", self["Discriminator_A"], in_branch=["pA_detach"], out_branch=[-1])
+
+        self.add_module("Generator_pA_to_B", self["Generator_A_to_B"], in_branch=["pA"], out_branch=[-1])
+        self.add_module("Generator_pB_to_A", self["Generator_B_to_A"], in_branch=["pB"], out_branch=[-1])
+        
+        self.add_module("Discriminator_pA", self["Discriminator_A"], in_branch=["pA"], out_branch=[-1], requires_grad=False)
+        self.add_module("Discriminator_pB", self["Discriminator_B"], in_branch=["pB"], out_branch=[-1], requires_grad=False)
+    
+    def initialized(self):
+        if self["Discriminator_A"].optimizer:
+            self["Discriminator_A"].optimizer.add_param_group({'params': self["Discriminator_B"].parameters()})
+        if self["Generator_A_to_B"].optimizer:
+            self["Generator_A_to_B"].optimizer.add_param_group({'params': self["Generator_B_to_A"].parameters()})
+        self["Discriminator_B"]["Sample"].setMeasure(self["Discriminator_A"].measure)

@@ -91,6 +91,7 @@ class Measure():
         self.loss : Union[torch.Tensor, None] = None
         self._it = 0
         self._nb_loss = 0
+        self.saved_loss = 0
 
     def init(self, model : torch.nn.Module) -> None:
         outputs_group_rename = {}
@@ -130,6 +131,7 @@ class Measure():
     
     def resetLoss(self) -> None:
         self._it = 0
+        self.saved_loss = self.getLastValue()
         self.loss = torch.zeros((1), requires_grad = True)
         
     def getLastValue(self) -> float:
@@ -174,6 +176,8 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             self.out_is_channel = True
             self.requires_grad = requires_grad
             self.isCheckpoint = False
+            self.isGPU_Checkpoint = False
+            self.gpu = "CPU"
 
     def __init__(self) -> None:
         super().__init__()
@@ -214,7 +218,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             desc += ", out_channels={}".format(self._modulesArgs[key].out_channels)
             desc += ", out_is_channel={}".format(self._modulesArgs[key].out_is_channel)
             desc += ", isInCheckpoint={}".format(self._modulesArgs[key].isCheckpoint)
+            desc += ", isInGPU_Checkpoint={}".format(self._modulesArgs[key].isGPU_Checkpoint)
             desc += ", requires_grad={}".format(self._modulesArgs[key].requires_grad)
+            desc += ", device={}".format(self._modulesArgs[key].gpu)
             
             child_lines.append("({}{}) {}".format(key, desc, mod_str))
             
@@ -295,9 +301,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     torch.nn.init.constant_(module.bias, 0.0)
 
             elif isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
-                if module.weight:
+                if module.weight is not None:
                     torch.nn.init.normal_(module.weight, 0.0, std = init_gain)
-                if module.bias:
+                if module.bias is not None:
                     torch.nn.init.constant_(module.bias, 0.0)
 
     def named_forward(self, *inputs: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:    
@@ -313,6 +319,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                 for ib in self._modulesArgs[name].in_branch:
                     if ib not in branchs:
                         branchs[ib] = inputs[0]
+                for branchs_key in branchs.keys():
+                    if str(branchs[branchs_key].device) != "cuda:"+self._modulesArgs[name].gpu:
+                        branchs[branchs_key] = branchs[branchs_key].to(int(self._modulesArgs[name].gpu))
                 if self._modulesArgs[name].isCheckpoint:
                     out = checkpoint(module, *[branchs[i] for i in self._modulesArgs[name].in_branch])
                     yield name, out
@@ -347,28 +356,48 @@ class ModuleArgsDict(torch.nn.Module, ABC):
     def parameters(self, pretrained: bool = False):
         for _, v in self.named_parameters(pretrained):
             yield v
+    
+    def named_ModuleArgsDict(self) -> Iterator[tuple[str, torch.nn.Module, ModuleArgs]]:
+        for name, module in self._modules.items():
+            yield name, module, self._modulesArgs[name]
+            if isinstance(module, ModuleArgsDict):
+                for k, v, u in module.named_ModuleArgsDict():
+                    yield name+"."+k, v, u
+            
+
+    def _requires_grad(self, keys: list[str]):
+        keys = keys.copy()
+        for name, module, args in self.named_ModuleArgsDict():
+            requires_grad = args.requires_grad
+            if requires_grad is not None:
+                module.requires_grad_(requires_grad)
+            if name in keys:
+                keys.remove(name)
+                if len(keys) == 0:
+                    break
         
 class Network(ModuleArgsDict, ABC):
 
-    def _apply_network(self, networks: list[torch.nn.Module], key: str, function: Callable, *args, **kwargs) -> dict[str, object]:
+    def _apply_network(self, name_function : Callable[[Self], str], networks: list[str], key: str, function: Callable, *args, **kwargs) -> dict[str, object]:
         results : dict[str, object] = {}
         for module in self.values():
             if isinstance(module, Network):
-                if module not in networks:
-                    networks.append(module)
-                    for k, v in module._apply_network(networks, key+"."+module.getName(), function, *args, **kwargs).items():
-                        results.update({self.getName()+"."+k : v})
-
+                if name_function(module) not in networks:
+                    networks.append(name_function(module))
+                    for k, v in module._apply_network(name_function, networks, key+"."+name_function(module), function, *args, **kwargs).items():
+                        results.update({name_function(self)+"."+k : v})
         if len([param.name for param in list(inspect.signature(function).parameters.values()) if param.name == "key"]):
             function = partial(function, key=key)
 
-        results[self.getName()] = function(self, *args, **kwargs)
+        results[name_function(self)] = function(self, *args, **kwargs)
         return results
-
-    def _function_network(function : Callable): # type: ignore
-        def new_function(self : Self, *args, **kwargs) -> dict[str, object]:
-            return self._apply_network([], self.getName(), function, *args, **kwargs)
-        return new_function
+    
+    def _function_network(t : bool = False):
+        def _function_network_d(function : Callable):
+            def new_function(self : Self, *args, **kwargs) -> dict[str, object]:
+                return self._apply_network(lambda network: network._getName() if t else network.getName(), [], self.getName(), function, *args, **kwargs)
+            return new_function
+        return _function_network_d
 
     def __init__(   self,
                     in_channels : int = 1,
@@ -381,7 +410,7 @@ class Network(ModuleArgsDict, ABC):
                     init_gain : float = 0.02,
                     dim : int = 3) -> None:
         super().__init__()
-        self.name : str = ""
+        self.name = self.__class__.__name__
         self.in_channels = in_channels
         self.optimizerLoader  = optimizer
         self.optimizer : Union[torch.optim.Optimizer, None] = None
@@ -399,8 +428,9 @@ class Network(ModuleArgsDict, ABC):
         self.init_gain  = init_gain
         self.dim = dim
         self._it = 0
-        
-    @_function_network
+        self.outputsGroup : dict[str, Self]= {}
+
+    @_function_network(True)
     def state_dict(self) -> dict[str, OrderedDict]:
         destination = OrderedDict()
         destination._metadata = OrderedDict()
@@ -451,13 +481,13 @@ class Network(ModuleArgsDict, ABC):
             raise RuntimeError('Error(s) in loading state_dict for {}:\n\t{}'.format(
                                self.__class__.__name__, "\n\t".join(error_msgs)))
         
-    @_function_network
+    @_function_network(True)
     def load(self, state_dict : dict[str, dict[str, torch.Tensor]], init: bool = True, ema : bool =False):
         if init:
             self.apply(partial(ModuleArgsDict.init_func, init_type=self.init_type, init_gain=self.init_gain))
         name = "Model" + ("_EMA" if ema else "")
         if name in state_dict:
-            model_state_dict_tmp = {k.split(".")[-1] : v for k, v in state_dict[name].items()}[self.getName()]
+            model_state_dict_tmp = {k.split(".")[-1] : v for k, v in state_dict[name].items()}[self._getName()]
 
             map = self.getMap()
             model_state_dict : OrderedDict[str, torch.Tensor] = OrderedDict()
@@ -475,8 +505,9 @@ class Network(ModuleArgsDict, ABC):
             self.load_state_dict(model_state_dict)
         if "{}_optimizer_state_dict".format(name) in state_dict and self.optimizer:
             self.optimizer.load_state_dict(state_dict['{}_optimizer_state_dict'.format(name)])
-        
-    def _compute_channels_trace(self, module : ModuleArgsDict, in_channels : int, gradient_checkpoints: Union[list[str], None], name: Union[str, None] = None, in_is_channel = True, out_channels : Union[int, None] = None, out_is_channel = True) -> tuple[int, bool, int, bool]:
+        self.initialized()
+
+    def _compute_channels_trace(self, module : ModuleArgsDict, in_channels : int, gradient_checkpoints: Union[list[str], None], gpu_checkpoints: Union[list[str], None], name: Union[str, None] = None, in_is_channel = True, out_channels : Union[int, None] = None, out_is_channel = True) -> tuple[int, bool, int, bool]:
         for k, v in module.items():
             if hasattr(v, "in_channels"):
                 if v.in_channels:
@@ -486,15 +517,19 @@ class Network(ModuleArgsDict, ABC):
                     in_channels = v.in_features
             key = name+"."+k if name else k
             isCheckpoint = False
+            isGPU_Checkpoint = False
             if gradient_checkpoints:
                 isCheckpoint = key in gradient_checkpoints
+            if gpu_checkpoints:
+                isGPU_Checkpoint = key in gpu_checkpoints
 
             module._modulesArgs[k].isCheckpoint = isCheckpoint
+            module._modulesArgs[k].isGPU_Checkpoint = isGPU_Checkpoint
             module._modulesArgs[k].in_channels = in_channels
             module._modulesArgs[k].in_is_channel = in_is_channel
             
             if isinstance(v, ModuleArgsDict):
-                in_channels, in_is_channel, out_channels, out_is_channel = self._compute_channels_trace(v, in_channels, gradient_checkpoints, key, in_is_channel, out_channels, out_is_channel)
+                in_channels, in_is_channel, out_channels, out_is_channel = self._compute_channels_trace(v, in_channels, gradient_checkpoints, gpu_checkpoints, key, in_is_channel, out_channels, out_is_channel)
             
             if v.__class__.__name__ == "ToChannels":
                 out_is_channel = True
@@ -517,7 +552,7 @@ class Network(ModuleArgsDict, ABC):
             
         return in_channels, in_is_channel, out_channels, out_is_channel
 
-    @_function_network
+    @_function_network()
     def init(self, autocast : bool, state : State, key: str) -> None:
         if state != State.PREDICTION:
             self.scaler = torch.cuda.amp.grad_scaler.GradScaler(enabled=autocast)
@@ -530,11 +565,15 @@ class Network(ModuleArgsDict, ABC):
         if self.outputsCriterionsLoader:
             self.measure = Measure(key, self.outputsCriterionsLoader, state != State.PREDICTION)
             self.measure.init(self)
+    
+    def initialized(self):
+        pass
 
     def named_forward(self, *inputs: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:
         if self.patch:
             self.patch.load(inputs[0].shape[2:])
             acc = Accumulator(self.patch.patch_slices, self.patch.patchCombine)
+
 
             patchIterator = self.patch.disassemble(*inputs)
             for i, patch_input in enumerate(patchIterator):
@@ -592,25 +631,37 @@ class Network(ModuleArgsDict, ABC):
             
     def _layer_function(self, name: str, output_layer: torch.Tensor, data_dict: dict[tuple[str, bool], torch.Tensor]):
         self.measure.update(name, output_layer, {k[0] : v for k, v in data_dict.items()}, self._it)
-        if self.training:
-            self._backward()
 
-    def forward(self, data_dict: dict[tuple[str, bool], torch.Tensor], output_name_layers: list[str]) -> list[tuple[str, torch.Tensor]]:        
-        output_layers = {}
-        for name, layer in self.get_layers([v for k, v in data_dict.items() if k[1]], list(set(output_name_layers))):
-            if name in output_name_layers:
-                output_layers[name] = layer
-        return output_layers
+    def init_outputsGroup(self):
+        metric_tmp = {network : network.measure.outputsCriterions.keys() for network in self.getNetworks().values() if network.measure}
+        for k, v in metric_tmp.items():
+            for a in v:
+                self.outputsGroup[a] = k
 
-    @_function_network
+    def forward(self, data_dict: dict[tuple[str, bool], torch.Tensor], output_layers: list[str] = []) -> list[tuple[str, torch.Tensor]]:
+        if not len(self.outputsGroup) and not len(output_layers):
+            return []
+
+        self.resetLoss()
+        results = []
+        for name, layer in self.get_layers([v for k, v in data_dict.items() if k[1]], list(set(list(self.outputsGroup.keys())+output_layers))):
+            if name in self.outputsGroup:
+                self.outputsGroup[name]._layer_function(name, layer, data_dict)
+            if name in output_layers:
+                results.append((name, layer))
+        return results
+
+    @_function_network()
     def resetLoss(self):
         if self.measure:
             self.measure.resetLoss()
 
-    def _backward(self):
+    @_function_network()
+    def backward(self, model: Self):
         if self.measure:
             if self.measure.isDone() and self.measure.loss is not None:
                 if self.scaler and self.optimizer:
+                    model._requires_grad(list(self.measure.outputsCriterions.keys()))
                     self.scaler.scale(self.measure.loss / self.nb_batch_per_step).backward()
                     if self._it % self.nb_batch_per_step == 0:
                         self.scaler.step(self.optimizer)
@@ -618,7 +669,7 @@ class Network(ModuleArgsDict, ABC):
                         self.optimizer.zero_grad(set_to_none=True)
                 self._it += 1
 
-    @_function_network
+    @_function_network()
     def update_lr(self):
         step = 0
         scheduler = None
@@ -634,17 +685,36 @@ class Network(ModuleArgsDict, ABC):
             else:
                 scheduler.step()     
 
-    @_function_network
+    @_function_network()
     def measureClear(self):
         if self.measure:
             self.measure.clear()
     
-    @_function_network
+    @_function_network()
     def getNetworks(self) -> Self:
         return self
 
-    def getName(self):
+    def to(module : ModuleArgsDict, device: int):
+        for k, v in module.items():
+            if module._modulesArgs[k].isGPU_Checkpoint:
+                device+=1
+            module._modulesArgs[k].gpu = str(device)
+
+            if isinstance(v, ModuleArgsDict):
+                v = Network.to(v, device)
+            else:
+                v = v.to(device)
+        return module
+                
+    def getName(self) -> str:
         return self.__class__.__name__
+    
+    def setName(self, name: str) -> Self:
+        self.name = name
+        return self
+    
+    def _getName(self) -> str:
+        return self.name
 
 class ModelLoader():
 
@@ -659,3 +729,4 @@ class ModelLoader():
         if not train: 
             model = partial(model, DL_without = DL_without)
         return model()
+    

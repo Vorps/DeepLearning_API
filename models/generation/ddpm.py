@@ -59,7 +59,7 @@ class DDPM(network.Network):
             super().__init__()
             self.betas = torch.linspace(beta_start, beta_end, noise_step)
             self.alphas = 1 - self.betas
-            self.alpha_hat = torch.cumprod(1.-self.betas, dim=0)
+            self.alpha_hat = torch.concat((torch.ones(1), torch.cumprod(1.-self.betas, dim=0)))
 
         def forward(self, input: torch.Tensor, t: torch.Tensor, eta: torch.Tensor) -> torch.Tensor:
             alpha_hat_t = self.alpha_hat[t.cpu()].to(input.device).reshape(input.shape[0], *[1 for _ in range(len(input.shape)-1)])
@@ -175,7 +175,10 @@ class DDPM(network.Network):
             self.add_module("Noise_optim", blocks.Concat(), in_branch=[0, "eta"])
         else:
             self.add_module("UNet", DDPM.DDPM_UNet(noise_step, channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, time_embedding_dim, dim), in_branch=[])
-            self.add_module("Inference", DDPM.DDPM_Inference(lambda x, t: self._modules["UNet"](x, t), noise_step, beta_start, beta_end), in_branch=[0])
+            self.add_module("Inference", DDPM.DDPM_Inference(self.inference, noise_step, beta_start, beta_end), in_branch=[0])
+    
+    def inference(self, input: torch.Tensor, t: torch.Tensor):
+        return self._modules["UNet"](input, t)
 
 class MSE(Criterion):
 
