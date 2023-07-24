@@ -60,12 +60,12 @@ class CriterionsLoader():
     def __init__(self, criterionsLoader: dict[str, CriterionsAttr] = {"default:torch_nn_CrossEntropyLoss:Dice:NCC": CriterionsAttr()}) -> None:
         self.criterionsLoader = criterionsLoader
 
-    def getCriterions(self, model_classname : str, output_group : str, target_group : str, train : bool) -> dict[torch.nn.Module, CriterionsAttr]:
+    def getCriterions(self, model_classname : str, output_group : str, target_group : str) -> dict[torch.nn.Module, CriterionsAttr]:
         criterions = {}
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
             module, name = _getModule(module_classpath, "measure")
             criterionsAttr.isTorchCriterion = module.startswith("torch")
-            criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format("Trainer" if train else "Predictor", model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
+            criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(os.environ["DEEP_LEARNING_API_ROOT"], model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
         return criterions
 
 class TargetCriterionsLoader():
@@ -74,19 +74,19 @@ class TargetCriterionsLoader():
     def __init__(self, targetsCriterions : dict[str, CriterionsLoader] = {"default" : CriterionsLoader()}) -> None:
         self.targetsCriterions = targetsCriterions
         
-    def getTargetsCriterions(self, output_group : str, model_classname : str, train : bool) -> dict[str, dict[torch.nn.Module, float]]:
+    def getTargetsCriterions(self, output_group : str, model_classname : str) -> dict[str, dict[torch.nn.Module, float]]:
         targetsCriterions = {}
         for target_group, criterionsLoader in self.targetsCriterions.items():
-            targetsCriterions[target_group] = criterionsLoader.getCriterions(model_classname, output_group, target_group, train)
+            targetsCriterions[target_group] = criterionsLoader.getCriterions(model_classname, output_group, target_group)
         return targetsCriterions
 
 class Measure():
 
-    def __init__(self, model_classname : str, outputsCriterions: dict[str, TargetCriterionsLoader], train : bool) -> None:
+    def __init__(self, model_classname : str, outputsCriterions: dict[str, TargetCriterionsLoader]) -> None:
         super().__init__()
         self.outputsCriterions = {}
         for output_group, targetCriterionsLoader in outputsCriterions.items():
-            self.outputsCriterions[output_group.replace(":", ".")] = targetCriterionsLoader.getTargetsCriterions(output_group, model_classname, train)
+            self.outputsCriterions[output_group.replace(":", ".")] = targetCriterionsLoader.getTargetsCriterions(output_group, model_classname)
         self.values : dict[str, list[float]] = dict()
         self.loss : Union[torch.Tensor, None] = None
         self._it = 0
@@ -563,7 +563,7 @@ class Network(ModuleArgsDict, ABC):
             if self.schedulersLoader and self.optimizer:
                 self.schedulers = self.schedulersLoader.getShedulers(key, self.optimizer)
         if self.outputsCriterionsLoader:
-            self.measure = Measure(key, self.outputsCriterionsLoader, state != State.PREDICTION)
+            self.measure = Measure(key, self.outputsCriterionsLoader)
             self.measure.init(self)
     
     def initialized(self):

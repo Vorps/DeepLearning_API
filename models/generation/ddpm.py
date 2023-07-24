@@ -188,8 +188,3 @@ class MSE(Criterion):
     
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return self.loss(input[:, 0, ...], input[:, 1, ...])
-
-
-#model = DDPM()
-#model._compute_channels_trace(model, model.in_channels, None)
-#print(model)

@@ -223,8 +223,9 @@ class Dataset():
         data = None
         for transformFunction in reversed(pre_transform):
             if isinstance(transformFunction, Save) and os.path.exists(transformFunction.save):
-                datasetUtils = DatasetUtils(transformFunction.save if not transformFunction.save.endswith("/") else transformFunction.save[:-1])
-                if datasetUtils.isExist(self.group_dest, self.name):
+                filename, format = transformFunction.save.split(":")
+                datasetUtils = DatasetUtils(filename, format)
+                if datasetUtils.isDatasetExist(self.group_dest, self.name):
                     data, attrib = datasetUtils.readData(self.group_dest, self.name)
                     self.cache_attributes[0].update(attrib)
                     break
@@ -238,7 +239,8 @@ class Dataset():
             for transformFunction in pre_transform[i:]:
                 data = transformFunction(self.name, data, self.cache_attributes[0])
                 if isinstance(transformFunction, Save):
-                    datasetUtils = DatasetUtils(transformFunction.save if not transformFunction.save.endswith("/") else transformFunction.save[:-1])
+                    filename, format = transformFunction.save.split(":")
+                    datasetUtils = DatasetUtils(filename, format)
                     datasetUtils.write(self.group_dest, self.name, data.numpy(), self.cache_attributes[0])
         self.data : list[torch.Tensor] = list()
         self.data.append(data)

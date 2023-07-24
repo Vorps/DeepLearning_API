@@ -9,8 +9,7 @@ import torch
 import datetime
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Callable, Any, Union, Optional, Iterator
-from functools import partial
+from typing import Any, Union, Optional
 import copy
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
@@ -45,9 +44,12 @@ class Attribute(dict[str, Any]):
 
     def __contains__(self, key: str) -> bool:
         return len([k for k in super().keys() if k.startswith(key)]) > 0
+    
+def isAnImage(attributes: Attribute):
+    return "Origin" in attributes and "Spacing" in attributes and "Direction" in attributes
 
 def data_to_image(data : np.ndarray, attributes: Attribute) -> sitk.Image:
-    if "Origin" not in attributes or "Spacing" not in attributes or "Direction" not in attributes:
+    if not isAnImage(attributes):
         raise NameError("Data is not an image")
     if data.shape[0] == 1:
         image = sitk.GetImageFromArray(data[0])
@@ -81,7 +83,11 @@ class DatasetUtils():
             pass
 
         @abstractmethod
-        def getNames(self, group: Union[str, None] = None) -> list[str]:
+        def getNames(self, group: str) -> list[str]:
+            pass
+
+        @abstractmethod
+        def isExist(self, group: str, name: Union[str, None] = None) -> bool:
             pass
         
         @abstractmethod
@@ -93,12 +99,12 @@ class DatasetUtils():
         def __init__(self, filename: str, read: bool) -> None:
             self.h5: Union[h5py.File, None] = None
             self.filename = filename
+            if not self.filename.endswith(".h5"):
+                self.filename += ".h5"
             self.read = read
 
         def __enter__(self):
             args = {}
-            if self.filename.endswith("/"):
-                self.filename = self.filename[:-1]
             if self.read:
                 self.h5 = h5py.File(self.filename, 'r', **args)
             else:
@@ -163,8 +169,18 @@ class DatasetUtils():
             dataset = h5_group.create_dataset(name, data=data, dtype=data.dtype, chunks=None)
             dataset.attrs.update({k : (v if isinstance(v.numpy() if isinstance(v, torch.Tensor) else v, np.ndarray) else str(v)) for k, v in attributes.items()})
         
-        def getNames(self, group: Union[str, None] = None) -> list[str]:
-            return [dataset.name for dataset in self.h5[group].values()] if group in self.h5[group] else []
+        def isExist(self, group: str, name: Union[str, None] = None) -> bool:
+            if group in self.h5:
+                if isinstance(self.h5[group], h5py.Dataset):
+                    return True
+                elif name is not None:
+                    return name in self.h5[group]
+                else:
+                    return False
+            return False
+
+        def getNames(self, group: str) -> list[str]:
+            return [dataset.name.split("/")[-1] for dataset in self.h5[group].values() if isinstance(dataset, h5py.Dataset)] if group in self.h5 else []
         
         def getInfos(self, group: Union[str, None], name: str) -> tuple[list[int], Attribute]:
             h5Group = self.h5
@@ -174,74 +190,95 @@ class DatasetUtils():
 
     class SitkFile(AbstractFile):
 
-        def __init__(self, filename: str, read: bool) -> None:
+        def __init__(self, filename: str, read: bool, format: str) -> None:
             self.filename = filename
-            if not os.path.exists(self.filename):
-                os.makedirs(self.filename)
             self.read = read
-            self.format = self.filename.split(".")[-1][:-1]
+            self.format = format
 
         def file_to_data(self, name: str) -> tuple[np.ndarray, Attribute]:
-            image = sitk.ReadImage("{}{}".format(self.filename, name))
-            if attributes is None:
-                attributes = Attribute()
-            attributes["Origin"] = torch.tensor(image.GetOrigin())
-            attributes["Spacing"] = torch.tensor(image.GetSpacing())
-            attributes["Direction"] = torch.tensor(image.GetDirection())
+            attributes = Attribute()
+            if os.path.exists("{}{}.{}".format(self.filename, name, self.format)):
+                image = sitk.ReadImage("{}{}.{}".format(self.filename, name, self.format))
+                
+                attributes["Origin"] = torch.tensor(image.GetOrigin())
+                attributes["Spacing"] = torch.tensor(image.GetSpacing())
+                attributes["Direction"] = torch.tensor(image.GetDirection())
 
-            data = sitk.GetArrayFromImage(image)
-            if image.GetNumberOfComponentsPerPixel() == 1:
-                data = np.expand_dims(data, 0)
-            else:
-                data = np.transpose(data, (len(data.shape)-1, *[i for i in range(len(data.shape)-1)]))
+                data = sitk.GetArrayFromImage(image)
+                if image.GetNumberOfComponentsPerPixel() == 1:
+                    data = np.expand_dims(data, 0)
+                else:
+                    data = np.transpose(data, (len(data.shape)-1, *[i for i in range(len(data.shape)-1)]))
+            elif os.path.exists("{}{}.itk.txt".format(self.filename, name)): 
+                transform = sitk.ReadTransform("{}{}.itk.txt".format(self.filename, name))
+                transform_type = None
+                with open("{}{}.itk.txt".format(self.filename, name), "r") as f:
+                    for line in f:
+                        if line.startswith("Transform"):
+                            transform_type = line.split(": ")[1].strip("\n")
+                            break
+                attributes["Transform"] = transform_type
+                attributes["FixedParameters"] = str(transform.GetFixedParameters())
+                data = np.asarray(transform.GetParameters())
+
             return data, attributes
                 
         def data_to_file(self, name : str, data : Union[sitk.Image, sitk.Transform, np.ndarray], attributes : Union[Attribute, None] = None) -> None:
+            if not os.path.exists(self.filename) and (isinstance(data, sitk.Image) or isinstance(data, sitk.Transform) or isAnImage(attributes)):
+                os.makedirs(self.filename)
             if isinstance(data, sitk.Image):
                 sitk.WriteImage(data, "{}{}.{}".format(self.filename, name, self.format))
             elif isinstance(data, sitk.Transform):
                 sitk.WriteTransform(data, "{}{}.itk.txt".format(self.filename, name))
-            else:
+            else:   
                 self.data_to_file(name, data_to_image(data, attributes), attributes)
+                 
+        def isExist(self, group: str, name: Union[str, None] = None) -> bool:
+            return os.path.exists("{}{}.{}".format(self.filename, group, self.format)) or os.path.exists("{}{}.itk.txt".format(self.filename, group))
         
-        def getNames(self, group: Union[str, None] = None) -> list[str, ]:
-            return sorted(os.listdir("{}{}/".format(self.filename, group))) if os.path.exists("{}{}/".format(self.filename, group)) else []
+        def getNames(self, group: str) -> list[str]:
+            raise NotImplementedError()
 
         def getInfos(self, group: Union[str, None], name: str) -> tuple[list[int], Attribute]:
             file_reader = sitk.ImageFileReader()
-            file_reader.SetFileName("{}{}/{}".format(self.filename, group if group is not None else "", name))
+            file_reader.SetFileName("{}{}{}.{}".format(self.filename, group if group is not None else "", name, self.format))
             file_reader.ReadImageInformation()
             attributes = Attribute()
             attributes["Origin"] = torch.tensor(file_reader.GetOrigin())
             attributes["Spacing"] = torch.tensor(file_reader.GetSpacing())
             attributes["Direction"] = torch.tensor(file_reader.GetDirection())
-            return list(file_reader.GetSize()), attributes
+            size = list(file_reader.GetSize())
+            if len(size) == 3:
+                size = list(reversed(size))
+            size = [file_reader.GetNumberOfComponents()]+size
+            return tuple(size), attributes
 
     class File(ABC):
 
-        def __init__(self, filename: str, read: bool) -> None:
+        def __init__(self, filename: str, read: bool, format: str) -> None:
             self.filename = filename
             self.read = read
             self.file = None
+            self.format = format
 
         def __enter__(self):
-            if ".h5" in self.filename:
+            if self.format == "h5":
                 self.file = DatasetUtils.H5File(self.filename, self.read)
-            else: 
-                self.file = DatasetUtils.SitkFile(self.filename, self.read)
+            else:
+                self.file = DatasetUtils.SitkFile(self.filename+"/", self.read, self.format)
             self.file.__enter__()
             return self.file
 
         def __exit__(self, type, value, traceback):
             self.file.__exit__(type, value, traceback)
 
-    def __init__(self, filename : str) -> None:
-        if ".h5" not in filename and not filename.endswith("/"):
+    def __init__(self, filename : str, format: str) -> None:
+        if format != "h5" and not filename.endswith("/"):
             filename = "{}/".format(filename)
-        self.filename = filename
         self.is_directory = filename.endswith("/") 
-        self.data = {}
-    
+        self.filename = filename
+        self.format = format
+        
     def write(self, group : str, name : str, data : Union[sitk.Image, sitk.Transform, np.ndarray], attributes : Union[Attribute, None] = None):
         if self.is_directory:
             if not os.path.exists(self.filename):
@@ -252,10 +289,10 @@ class DatasetUtils():
                 subDirectory = "/".join(s_group[:-1])
                 name = "{}/{}".format(subDirectory, name)
                 group = s_group[-1]
-            with DatasetUtils.File("{}{}/".format(self.filename, name), False) as file:
+            with DatasetUtils.File("{}{}".format(self.filename, name), False, self.format) as file:
                 file.data_to_file(group, data, attributes)
         else:
-            with DatasetUtils.File(self.filename, False) as file:
+            with DatasetUtils.File(self.filename, False, self.format) as file:
                 file.data_to_file("{}/{}".format(group, name), data, attributes)
     
     def readData(self, group : str, name : str) -> tuple[np.ndarray, Attribute]:
@@ -265,10 +302,10 @@ class DatasetUtils():
                 subDirectory = "/".join(s_group[:-1])
                 name = "{}/{}".format(subDirectory, name)
                 group = s_group[-1]
-            with DatasetUtils.File("{}{}".format(self.filename, name), False) as file:
+            with DatasetUtils.File("{}{}".format(self.filename, name), False, self.format) as file:
                 result = file.file_to_data(group)
         else:
-            with DatasetUtils.File(self.filename, False) as file:
+            with DatasetUtils.File(self.filename, False, self.format) as file:
                 result = file.file_to_data("{}/{}".format(group, name))
         return result
     
@@ -276,7 +313,7 @@ class DatasetUtils():
         transformParameters, attribute = self.readData(group, name)
         transform_type = attribute["Transform"]
         if transform_type == "Euler3DTransform_double_3_3":
-            transform = sitk.Euler3DTransform(3)
+            transform = sitk.Euler3DTransform()
         if transform_type == "AffineTransform_double_3_3":
             transform = sitk.AffineTransform(3)
         if transform_type == "BSplineTransform_double_3_3":
@@ -290,49 +327,31 @@ class DatasetUtils():
          return data_to_image(data, attribute)
             
     def getSize(self, group: str) -> int:
-        if self.is_directory:
-            name = self.filename
-            s_group = group.split("/")
-            if len(s_group) > 1:
-                subDirectory = "/".join(s_group[:-1])
-                name = "{}{}".format(name, subDirectory)
-            result = len(os.listdir(name))  
-        else:
-            with DatasetUtils.File(self.filename, True) as file:
-                result = len(file.getNames(group))
-        return result
-
-    def isExist(self, group: str, name: str) -> bool:
-        if self.is_directory:
-            if os.path.exists("{}/{}".format(self.filename, name)):
-                s_group = group.split("/")
-                if len(s_group) > 1:
-                    subDirectory = "/".join(s_group[:-1])
-                    name = "{}/{}".format(subDirectory, name)
-                    group = s_group[-1]
-                try:
-                    with DatasetUtils.File("{}{}".format(self.filename, name), True) as file:
-                        result = group in file.getNames()
-                except:
-                    os.remove("{}{}".format(self.filename, name))
-                    result = False   
-            else:
-                result = False
-        else:
-            with DatasetUtils.File(self.filename, True) as file:
-                result = name in file.getNames(group)
-        return result
+        return len(self.getNames(group))
+    
+    def isGroupExist(self, group: str) -> bool:
+        return self.getSize(group) > 0
+    
+    def isDatasetExist(self, group: str, name: str) -> bool:
+        return name in self.getNames(group)
     
     def getNames(self, group: str, index: Optional[list[int]] = None) -> list[str]:
+        names = []
         if self.is_directory:
-            name = self.filename
+            subDirectory = ""
             s_group = group.split("/")
             if len(s_group) > 1:
-                subDirectory = "/".join(s_group[:-1])
-                name = "{}/{}".format(subDirectory, name)
-            result = [name for i, name in enumerate(sorted(os.listdir(name))) if index is None or i in index]
+                subDirectory = "/".join(s_group[:-1])+"/"
+                group = s_group[-1]
+            if os.path.exists("{}{}".format(self.filename, subDirectory)):
+                for name in os.listdir("{}{}".format(self.filename, subDirectory)):
+                    if os.path.isfile("{}{}{}".format(self.filename, subDirectory, name)) or self.format != "h5":
+                        with DatasetUtils.File("{}{}{}".format(self.filename, subDirectory, name), True, self.format) as file:
+                            if file.isExist(group):
+                                names.append(name.replace(".h5", "") if self.format == "h5" else name)
+            result = [name for i, name in enumerate(sorted(names)) if index is None or i in index]
         else:
-            with DatasetUtils.File(self.filename, True) as file:
+            with DatasetUtils.File(self.filename, True, self.format) as file:
                 result = [name for i, name in enumerate(file.getNames(group)) if index is None or i in index]
         return result
     
@@ -343,10 +362,10 @@ class DatasetUtils():
                 subDirectory = "/".join(s_group[:-1])
                 name = "{}/{}".format(subDirectory, name)
                 group = s_group[-1]
-            with DatasetUtils.File("{}{}".format(self.filename, name), True) as file:
+            with DatasetUtils.File("{}{}".format(self.filename, name), True, self.format) as file:
                 result = file.getInfos(None, group)      
         else:
-            with DatasetUtils.File(self.filename, True) as file:
+            with DatasetUtils.File(self.filename, True, self.format) as file:
                 result = file.getInfos(group, name)
         return result
 
@@ -625,17 +644,17 @@ def parameterMap_to_ITK_AffineTransform(path_src: str, path_dest: str) -> None:
 
 
 def parameterMap_to_ITK_BSplineTransform(path_src: str, path_dest: str) -> None:
-    transform_rigid = sitk.ReadParameterFile("{}.0.txt".format(path_src))
+    transform_BSpline = sitk.ReadParameterFile("{}.0.txt".format(path_src))
     with open("{}.itk.txt".format(path_dest), "w") as f:
         f.write("#Insight Transform File V1.0\n")
         f.write("#Transform 0\n")
         f.write("Transform: BSplineTransform_double_3_3\n")
-        TransformParameters = np.array([float(i) for i in transform_rigid["TransformParameters"]])
+        TransformParameters = np.array([float(i) for i in transform_BSpline["TransformParameters"]])
 
-        GridSize = np.array([int(i) for i in transform_rigid["GridSize"]])
-        GridOrigin = np.array([float(i) for i in transform_rigid["GridOrigin"]])
-        GridSpacing = np.array([float(i) for i in transform_rigid["GridSpacing"]])
-        GridDirection = np.array(np.array([float(i) for i in transform_rigid["GridDirection"]])).reshape((3,3)).T.flatten() 
+        GridSize = np.array([int(i) for i in transform_BSpline["GridSize"]])
+        GridOrigin = np.array([float(i) for i in transform_BSpline["GridOrigin"]])
+        GridSpacing = np.array([float(i) for i in transform_BSpline["GridSpacing"]])
+        GridDirection = np.array(np.array([float(i) for i in transform_BSpline["GridDirection"]])).reshape((3,3)).T.flatten() 
 
         f.write("Parameters: "+" ".join([str(i) for i in TransformParameters])+"\n")
         f.write("FixedParameters: "+" ".join([str(i) for i in GridSize])+" "+" ".join([str(i) for i in GridOrigin])+" "+" ".join([str(i) for i in GridSpacing])+" "+" ".join([str(i) for i in GridDirection])+"\n")

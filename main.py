@@ -32,6 +32,7 @@ def main():
     api_args.add_argument("-checkpoints_dir", "--CHECKPOINTS_DIRECTORY", type=str, default="./Checkpoints/", help="Checkpoints location")
     api_args.add_argument("-url", "--URL_MODEL", type=str, default="", help="URL Model")
     api_args.add_argument("-predictions_dir", "--PREDICTIONS_DIRECTORY", type=str, default="./Predictions/", help="Predictions location")
+    api_args.add_argument("-metrics_dir", "--METRICS_DIRECTORY", type=str, default="./Metrics/", help="Metrics location")
     api_args.add_argument("-statistics_dir", "--STATISTICS_DIRECTORY", type=str, default="./Statistics/", help="Statistics location")
     api_args.add_argument("-setups_dir", "--SETUPS_DIRECTORY", type=str, default="./Setups/", help="Setups location")
     api_args.add_argument('--resubmit', action='store_true', help='Automatically resubmit job just before timout')
@@ -42,7 +43,9 @@ def main():
     os.environ["DL_API_MODELS_DIRECTORY"] = config["MODELS_DIRECTORY"]
     os.environ["DL_API_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]
     os.environ["DL_API_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
+    os.environ["DL_API_METRICS_DIRECTORY"] = config["METRICS_DIRECTORY"]
     os.environ["DL_API_STATISTICS_DIRECTORY"] = config["STATISTICS_DIRECTORY"]
+    
     os.environ["DL_API_URL_MODEL"] = config["URL_MODEL"]
 
     os.environ["DL_API_SETUPS_DIRECTORY"] = config["SETUPS_DIRECTORY"]

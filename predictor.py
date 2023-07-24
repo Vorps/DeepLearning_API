@@ -37,7 +37,8 @@ def cleanup():
 class OutDataset(DatasetUtils, NeedDevice, ABC):
 
     def __init__(self, filename: str, group: str, pre_transforms : dict[str, TransformLoader], post_transforms : dict[str, TransformLoader], patchCombine: Union[str, None]) -> None: 
-        super().__init__(filename)
+        filename, format = filename.split(":")
+        super().__init__(filename, format)
         self.group = group
         self._pre_transforms = pre_transforms
         self._post_transforms = post_transforms
@@ -66,9 +67,12 @@ class OutDataset(DatasetUtils, NeedDevice, ABC):
             module, name = _getModule(self._patchCombine, "HDF5")
             self.patchCombine = getattr(importlib.import_module(module), name)(config = None, DL_args =  "{}.outsDataset.{}.OutDataset".format(os.environ["DEEP_LEARNING_API_ROOT"], name_layer))
     
-    def setPatchConfig(self, patchSize: list[int], overlap: list[int], nb_data_augmentation: int) -> None:
-        if self.patchCombine is not None:
-            self.patchCombine.setPatchConfig(patchSize, overlap)
+    def setPatchConfig(self, patchSize: Union[list[int], None], overlap: Union[list[int], None], nb_data_augmentation: int) -> None:
+        if patchSize is not None and overlap is not None:
+            if self.patchCombine is not None:
+                self.patchCombine.setPatchConfig(patchSize, overlap)
+        else:
+            self.patchCombine = None
         self.nb_data_augmentation = nb_data_augmentation
     
     def setDevice(self, device: torch.device):
@@ -101,7 +105,7 @@ class OutSameAsGroupDataset(OutDataset):
     @config("OutDataset")
     def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, redution: str = "mean") -> None:
         super().__init__(dataset_filename, group, pre_transforms, post_transforms, patchCombine)
-        self.group_src, self.group_dest = sameAsGroup.split("/")
+        self.group_src, self.group_dest = sameAsGroup.split(":")
         self.redution = redution
 
     def addLayer(self, index_dataset: int, index_augmentation: int, index_patch: int, layer: torch.Tensor, dataset: DataSet):
@@ -238,9 +242,7 @@ class _Predictor():
                     for i, (index, patch_augmentation, patch_index) in enumerate([(int(index), int(patch_augmentation), int(patch_index)) for index, patch_augmentation, patch_index in zip(list(data_dict.values())[0][1], list(data_dict.values())[0][2], list(data_dict.values())[0][3])]):    
                         outDataset.addLayer(index, patch_augmentation, patch_index, output[i].cpu(), self.dataset)
                         if outDataset.isDone(index):
-                            name_data = self.dataset.getDatasetFromIndex(list(data_dict.keys())[0], index).name.split("/")[-1]
-                            layer_output = outDataset.getOutput(index, self.dataset)
-                            outDataset.write(index, name_data, layer_output)
+                            outDataset.write(index, self.dataset.getDatasetFromIndex(list(data_dict.keys())[0], index).name.split("/")[-1], outDataset.getOutput(index, self.dataset))
 
                 batch_iter.set_description(description())
                 self.it += 1

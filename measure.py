@@ -134,27 +134,6 @@ class GradientImages(Criterion):
                 dx -= dx_tmp
                 dy -= dy_tmp
             return dx.norm() + dy.norm()
-            
-"""class GradientImages(Criterion):
-
-    def __init__(self):
-        super().__init__()
-        self.loss = torch.nn.MSELoss()
-
-    def forward(self, input: torch.Tensor, target : torch.Tensor) -> torch.Tensor:
-        result = torch.zeros((input.shape[0])).to(self.device)
-        for batch in range(input.shape[0]):
-            X = input[batch]
-            Y = target[batch]
-            if len(X.shape) == 4:
-                input_gradient = Gradient._image_gradient3D(X)
-                target_gradient = Gradient._image_gradient3D(Y)
-            else:
-                input_gradient = Gradient._image_gradient2D(X)
-                target_gradient = Gradient._image_gradient2D(Y)
-            
-            result[batch] = self.loss(input_gradient, target_gradient)
-        return result.sum()"""
         
 class BCE(Criterion):
 
@@ -175,31 +154,21 @@ class WGP(Criterion):
     def forward(self, gradient_norm: torch.Tensor, _ : torch.Tensor) -> torch.Tensor:
         return torch.mean((gradient_norm - 1)**2)
 
-
-"""class Gram(Criterion):
-    
-    def __init__(self) -> None:
-        super().__init__()
-        
-    def forward(self, input : torch.Tensor, target : torch.Tensor) -> torch.Tensor:
-        return torch.nn.L1Loss(reduction='sum')(torch.mm(input, input.t()).div(np.prod(input.shape)), torch.mm(target, target.t()).div(np.prod(target.shape)))
-"""
-
-def computeGram(input : torch.Tensor):
-    (b, ch, w) = input.size()
-    features = input
-    features_t = features.transpose(1, 2)
-    gram = features.bmm(features_t).div(ch*w)
-    return gram
-
 class Gram(Criterion):
-    
+
+    def computeGram(input : torch.Tensor):
+        (b, ch, w) = input.size()
+        features = input
+        features_t = features.transpose(1, 2)
+        gram = features.bmm(features_t).div(ch*w)
+        return gram
+
     def __init__(self) -> None:
         super().__init__()
         self.loss = torch.nn.L1Loss(reduction='sum')
 
     def forward(self, input : torch.Tensor, target : torch.Tensor) -> torch.Tensor:
-        return self.loss(computeGram(input), computeGram(target))
+        return self.loss(Gram.computeGram(input), Gram.computeGram(target))
 
 class MedPerceptualLoss(Criterion):
     
@@ -237,10 +206,8 @@ class MedPerceptualLoss(Criterion):
         input = input.repeat(1, 3, *[1 for _ in range(len(input.shape)-2)])
         input = (input-torch.min(input))/(torch.max(input)-torch.min(input))
         input = (input-self.mean.to(input.device))/self.std.to(input.device)
-        return input
-
-        #if not all([input.shape[-i-1] == size for i, size in enumerate(reversed(self.shape[2:]))]):
-        #    input = F.interpolate(input, mode=self.mode, size=tuple(self.shape), align_corners=False).type(torch.float32)
+        if not all([input.shape[-i-1] == size for i, size in enumerate(reversed(self.shape[2:]))]):
+            input = F.interpolate(input, mode=self.mode, size=tuple(self.shape), align_corners=False).type(torch.float32)
         return input
 
     def forward(self, input : torch.Tensor, *targets_tmp : torch.Tensor) -> torch.Tensor:
@@ -321,32 +288,4 @@ class Accuracy(Criterion):
         self.n += input.shape[0]
         self.corrects += (torch.argmax(torch.softmax(input, dim=1), dim=1) == target).sum().float().cpu()
         return self.corrects/self.n
-
-class Contrastive(Criterion):
-
-    def __init__(self, alpha: float = 1) -> None:
-        super().__init__()
-        self.loss = torch.nn.MSELoss(reduction="mean")
-        self.alpha = alpha
-
-    def J_ij(self, D: Callable[[int, int], torch.Tensor], i: int, j: int, negative_index: list[int]) -> torch.Tensor:
-        loss = torch.tensor(0, dtype=torch.float, device=self.device)
-        for k in negative_index:
-            loss += torch.exp(self.alpha-D(i, k))
-            loss += torch.exp(self.alpha-D(j, k))
-        return torch.log(loss)+D(i,j)
-        
-    def forward(self, input : torch.Tensor, target : torch.Tensor) -> torch.Tensor:
-        input = computeGram(input.view(input.shape[0], input.shape[1], int(np.prod(input.shape[2:]))))
-        D = lambda i, j: self.loss(input[i], input[j])
-
-        combinations = list(itertools.combinations(range(input.shape[0]), r=2))
-        positive_pair = [(index_0, index_1) for index_0 ,index_1 in combinations if (target[index_0].item() == target[index_1].item())]
-        loss = torch.tensor(0, dtype=torch.float, device=self.device)
-
-        for i ,j in positive_pair:
-            negative_index = [a for a in range(target.shape[0]) if target[a] != target[i]]
-            loss += torch.pow(torch.relu(self.J_ij(D, i, j, negative_index)), 2)
-        return loss*1/(2*len(positive_pair))
-    
 

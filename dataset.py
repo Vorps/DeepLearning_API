@@ -74,19 +74,15 @@ class CustomSampler(Sampler[int]):
 
 class DataSet(data.Dataset):
 
-    def __init__(self, data : dict[str, list[Dataset]], map: dict[int, tuple[int, int, int]], groups_src : dict[str, Group], dataAugmentationsList : list[DataAugmentationsList], patch_size: list[int], overlap: list[int], use_cache = True) -> None:
+    def __init__(self, data : dict[str, list[Dataset]], map: dict[int, tuple[int, int, int]], groups_src : dict[str, Group], dataAugmentationsList : list[DataAugmentationsList], patch_size: Union[list[int], None], overlap: Union[list[int], None], use_cache = True) -> None:
         self.data = data
         self.map = map
         self.patch_size = patch_size
         self.overlap = overlap
         self.groups_src = groups_src
         self.dataAugmentationsList = dataAugmentationsList
-
         self.use_cache = use_cache
-        
         self.nb_dataset = len(data[list(data.keys())[0]])
-        self.patch_size = patch_size
-        self.overlap = overlap
 
     def getPatchConfig(self) -> tuple[list[int], list[int]]:
         return self.patch_size, self.overlap
@@ -141,45 +137,41 @@ class DataSet(data.Dataset):
 
 class Data(ABC):
     
-    @config("Dataset")
-    def __init__(self,  dataset_filename : str = "default", 
-                        groups_src : dict[str, Group] = {"default" : Group()},
-                        patch : Union[DatasetPatch, None] = None,
-                        use_cache : bool = True,
-                        subset : Union[list[int], None] = None,
-                        num_workers : int = 4,
-                        pin_memory : bool = True,
-                        batch_size : int = 1,
+    def __init__(self,  dataset_filenames : list[str], 
+                        groups_src : dict[str, Group],
+                        patch : Union[DatasetPatch, None],
+                        use_cache : bool,
+                        subset : Union[str, list[int], list[str], None],
+                        num_workers : int,
+                        pin_memory : bool,
+                        batch_size : int,
                         shuffle : bool = False,
-                        train_size: float = 1.0,
-                        dataAugmentationsList: dict[str, DataAugmentationsList] = {}) -> None:
-        self.dataset_filename = dataset_filename
+                        train_size: float = 1,
+                        dataAugmentationsList: dict[str, DataAugmentationsList]= {}) -> None:
+        self.dataset_filenames = dataset_filenames
         self.subset = subset
         self.groups_src = groups_src
         self.patch = patch
         self.shuffle = shuffle
         self.train_size = train_size
         self.dataAugmentationsList = dataAugmentationsList
-        self.dataSet_args = dict(groups_src=self.groups_src, dataAugmentationsList = list(self.dataAugmentationsList.values()), use_cache = use_cache, patch_size=self.patch.patch_size, overlap=self.patch.overlap)
+        self.dataSet_args = dict(groups_src=self.groups_src, dataAugmentationsList = list(self.dataAugmentationsList.values()), use_cache = use_cache, patch_size=self.patch.patch_size if self.patch is not None else None, overlap=self.patch.overlap if self.patch is not None else None)
         self.dataLoader_args = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
         self.data : list[list[dict[str, list[Dataset]]], dict[str, list[Dataset]]] = []
         self.map : list[list[list[tuple[int, int, int]]], list[tuple[int, int, int]]] = []
+        self.datasets: dict[str, DatasetUtils] = {}
 
-    def _getDatasets(self, index: list[int]) -> tuple[dict[str, list[Dataset]], list[tuple[int, int, int]]]:
-        nb_dataset = None
+    def _getDatasets(self, names: list[str]) -> tuple[dict[str, list[Dataset]], list[tuple[int, int, int]]]:
+        nb_dataset = len(names)
         nb_patch = None
         data = {}
         map = []
         nb_augmentation = np.max([int(np.sum([data_augmentation.nb for data_augmentation in self.dataAugmentationsList.values()])+1), 1])
         for group_src in self.groups_src:
-            datasets_name = self.dataset.getNames(group_src, index)
-            nb_dataset = len(datasets_name)
-        
             for group_dest in self.groups_src[group_src]:
-                data[group_dest] = [Dataset(i, group_src, group_dest, name, self.dataset, patch = self.patch, pre_transforms = self.groups_src[group_src][group_dest].pre_transforms, dataAugmentationsList=list(self.dataAugmentationsList.values())) for i, name in enumerate(datasets_name)]
+                data[group_dest] = [Dataset(i, group_src, group_dest, name, self.datasets[group_src], patch = self.patch, pre_transforms = self.groups_src[group_src][group_dest].pre_transforms, dataAugmentationsList=list(self.dataAugmentationsList.values())) for i, name in enumerate(names)]
                 nb_patch = [[dataset.getSize(a) for a in range(nb_augmentation)] for dataset in data[group_dest]]
 
-        
         for x in range(nb_dataset):
             for y in range(nb_augmentation):
                 for z in range(nb_patch[x][y]):
@@ -187,30 +179,55 @@ class Data(ABC):
         return data, map
 
     def getData(self, world_size: int = 1) -> list[list[DataLoader]]:
-        self.dataset = DatasetUtils(self.dataset_filename)
+        for dataset_filename in self.dataset_filenames:
+            filename, format = dataset_filename.split(":")
+            datasetUtils = DatasetUtils(filename, format) 
+            for group in self.groups_src:
+                if datasetUtils.isGroupExist(group):
+                    if group in self.datasets:
+                        raise NameError("Error group source: {} is on two datasets".format(group))
+                    self.datasets[group] = datasetUtils
+        
         for group_src in self.groups_src:
+            assert group_src in self.datasets, "Error group source {} not found".format(group_src)
+
             for group_dest in self.groups_src[group_src]:
-                self.groups_src[group_src][group_dest].load(group_src, group_dest, self.dataset)
+                self.groups_src[group_src][group_dest].load(group_src, group_dest, self.datasets[group_src])
 
         for key, dataAugmentations in self.dataAugmentationsList.items():
             dataAugmentations.load(key)
 
-        sizes = []
-        
+        names = []
         for group in self.groups_src:
-            sizes.append(self.dataset.getSize(group))
-        assert len(np.unique(sizes)) == 1
-        sizes = sizes[0]
+            names.append(set(self.datasets[group].getNames(group)))
+        inter_name = names[0]
+        for n in names[1:]:
+            inter_name = inter_name.intersection(n)
+        inter_name = list(inter_name)
+        size = len(inter_name)
+
         if self.subset is None:
-            self.subset = [0, sizes]
-        elif len(self.subset) == 1:
-            self.subset = [self.subset[0], min(sizes, self.subset[0]+1)]
-
-        index = range(self.subset[0], self.subset[1])
+            index = list(range(0, size))
+        else:
+            if isinstance(self.subset, str):
+                subset = [int(i) for i in self.subset.split(":")]
+                index = list(range(subset[0], subset[1]))
+            elif isinstance(self.subset, list):
+                if len(self.subset) > 0:
+                    if isinstance(self.subset[0], int):
+                        if len(self.subset) == 1:
+                            index = list(range(self.subset[0], min(size, self.subset[0]+1)))
+                        else:
+                            index = self.subset
+                    if isinstance(self.subset[0], str):
+                        index = []
+                        for i, name in enumerate(inter_name):
+                            if name in self.subset:
+                                index.append(i)
         if self.shuffle:
-            index = random.sample(list(range(self.subset[0], self.subset[1])), self.subset[1]-self.subset[0])
+            index = random.sample(index, self.subset[1]-self.subset[0])
 
-        data, map = self._getDatasets(index)
+        data, map = self._getDatasets([inter_name[i] for i in index])
         offset = len(map)//world_size
 
         for i, itr in enumerate(range(0, len(map), offset)):
@@ -245,30 +262,44 @@ class Data(ABC):
 class DataTrain(Data):
 
     @config("Dataset")
-    def __init__(self,  dataset_filename : str = "default", 
+    def __init__(self,  dataset_filenames : list[str] = ["default:Dataset.h5"], 
                         groups_src : dict[str, Group] = {"default" : Group()},
                         augmentations : Union[dict[str, DataAugmentationsList], None] = {"DataAugmentation_0" : DataAugmentationsList()},
                         patch : Union[DatasetPatch, None] = DatasetPatch(),
                         use_cache : bool = True,
-                        subset : Union[list[int], None] = None,
+                        subset : Union[str, list[int], list[str], None] = None,
                         num_workers : int = 4,
                         pin_memory : bool = True,
                         batch_size : int = 1,
                         shuffle : bool = True,
                         train_size : float = 0.8) -> None:
-        super().__init__(dataset_filename, groups_src, patch, use_cache, subset, num_workers, pin_memory, batch_size, shuffle, train_size, augmentations if augmentations else {})
+        super().__init__(dataset_filenames, groups_src, patch, use_cache, subset, num_workers, pin_memory, batch_size, shuffle, train_size, augmentations if augmentations else {})
 
 class DataPrediction(Data):
 
     @config("Dataset")
-    def __init__(self,  dataset_filename : str = "Dataset.h5", 
+    def __init__(self,  dataset_filenames : list[str] = ["default:Dataset.h5"], 
                         groups_src : dict[str, Group] = {"default" : Group()},
                         augmentations : Union[dict[str, DataAugmentationsList], None] = {"DataAugmentation_0" : DataAugmentationsList()},
                         patch : Union[DatasetPatch, None] = DatasetPatch(),
                         use_cache : bool = True,
-                        subset : Union[list[int], None] = None,
+                        subset : Union[str, list[int], list[str], None] = None,
                         num_workers : int = 4,
                         pin_memory : bool = True,
                         batch_size : int = 1) -> None:
 
-        super().__init__(dataset_filename, groups_src, patch, use_cache,  subset, num_workers, pin_memory, batch_size, dataAugmentationsList=augmentations if augmentations else {})
+        super().__init__(dataset_filenames, groups_src, patch, use_cache,  subset, num_workers, pin_memory, batch_size, dataAugmentationsList=augmentations if augmentations else {})
+
+class DataMetric(Data):
+
+    @config("Dataset")
+    def __init__(self,  dataset_filenames : list[str] = ["default:Dataset.h5"], 
+                        groups_src : dict[str, Group] = {"default" : Group()},
+                        patch : Union[DatasetPatch, None] = DatasetPatch(),
+                        use_cache : bool = True,
+                        subset : Union[str, list[int], list[str], None] = None,
+                        num_workers : int = 4,
+                        pin_memory : bool = True,
+                        batch_size : int = 1) -> None:
+
+        super().__init__(dataset_filenames, groups_src, patch, use_cache,  subset, num_workers, pin_memory, batch_size)
