@@ -75,7 +75,6 @@ class Normalize(Transform):
             if self.channels:
                 cache_attribute["Min"] = torch.min(input[self.channels])
             else:
-                
                 cache_attribute["Min"] = torch.min(input)
         if "Max" not in cache_attribute:
             if self.channels:
@@ -416,51 +415,3 @@ class Save(Transform):
 
     def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return input
-    
-
-    
-"""class NConnexeLabel(Transform):
-
-    @config("NConnexeLabel") 
-    def __init__(self, save=None) -> None:
-        super().__init__(save)
-    
-    def __call__(self, input : torch.Tensor) -> torch.Tensor:
-        nb_labels = len(torch.unique(input))-1
-        result = torch.zeros_like(input)
-
-        connectedComponentImageFilter = sitk.ConnectedComponentImageFilter()
-        labelShapeStatisticsImageFilter = sitk.LabelShapeStatisticsImageFilter()
-        for i in range(nb_labels):
-            data = np.copy(input.numpy())
-            data[np.where(data != i+1)] = 0
-            connectedComponentImage = connectedComponentImageFilter.Execute(self.dataset.to_image(data))
-            labelShapeStatisticsImageFilter.Execute(connectedComponentImage)
-            stats = {label: labelShapeStatisticsImageFilter.GetNumberOfPixels(label) for label in labelShapeStatisticsImageFilter.GetLabels()}
-            true_label = max(stats)
-
-            tmp = sitk.GetArrayFromImage(connectedComponentImage)
-            tmp[np.where(tmp != true_label)] = 0
-            tmp[np.where(tmp == true_label)] = i+1
-            result = result + torch.from_numpy(tmp.astype(np.uint8)).type(torch.uint8)
-        return result
-
-class MorphologicalClosing(Transform):
-
-    @config("MorphologicalClosing")
-    def __init__(self, radius : int = 2, save=None) -> None:
-        super().__init__(save)
-        self.binaryMorphologicalClosingImageFilter = sitk.BinaryMorphologicalClosingImageFilter()
-        self.binaryMorphologicalClosingImageFilter.SetKernelRadius(radius)
-
-    def __call__(self, input : torch.Tensor) -> torch.Tensor:
-        result = torch.zeros_like(input)
-        nb_labels = len(torch.unique(input))-1
-        for i in range(nb_labels):
-            data = np.copy(input.numpy())
-            data[np.where(data != i+1)] = 0
-            data[np.where(data == i+1)] = 1
-            result_tmp = torch.from_numpy(sitk.GetArrayFromImage(self.binaryMorphologicalClosingImageFilter.Execute(self.dataset.to_image(data))))*(i+1)
-            result[np.where(result_tmp == i+1)] = 0
-            result += result_tmp
-        return result"""

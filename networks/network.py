@@ -47,12 +47,13 @@ class SchedulersLoader():
 class CriterionsAttr():
 
     @config()
-    def __init__(self, l: float = 1.0, isLoss: bool = True, stepStart:int = 0, stepStop: Union[int, None] = None) -> None:
+    def __init__(self, l: float = 1.0, isLoss: bool = True, group: int = 0, stepStart:int = 0, stepStop: Union[int, None] = None) -> None:
         self.l = l
         self.isTorchCriterion = True
         self.isLoss = isLoss
         self.stepStart = stepStart
         self.stepStop = stepStop
+        self.group = group
         
 class CriterionsLoader():
 
@@ -88,10 +89,7 @@ class Measure():
         for output_group, targetCriterionsLoader in outputsCriterions.items():
             self.outputsCriterions[output_group.replace(":", ".")] = targetCriterionsLoader.getTargetsCriterions(output_group, model_classname)
         self.values : dict[str, list[float]] = dict()
-        self.loss : Union[torch.Tensor, None] = None
-        self._it = 0
-        self._nb_loss = 0
-        self.saved_loss = 0
+        self.loss : dict[int, torch.Tensor] = {}
 
     def init(self, model : torch.nn.Module) -> None:
         outputs_group_rename = {}
@@ -109,50 +107,43 @@ class Measure():
             for target_group in self.outputsCriterions[output_group]:
                 for criterion, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
                     self.values["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)] = []
-                    if criterionsAttr.isLoss:
-                        self._nb_loss+=1
+                    self.loss[criterionsAttr.group] = torch.zeros((1), requires_grad = True)
 
     def update(self, output_group: str, output : torch.Tensor, data_dict: dict[str, torch.Tensor], it: int) -> None:
         for target_group in self.outputsCriterions[output_group]:
             target = [data_dict[group].to(output.device) for group in target_group.split("/") if group in data_dict]
             for criterion, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
-                
                 if it >= criterionsAttr.stepStart and (criterionsAttr.stepStop is None or it <= criterionsAttr.stepStop):
                     result = criterion(output, *target)
                     if criterionsAttr.isLoss:
-                        self.loss = self.loss.to(result.device)+criterionsAttr.l*result
-                        self._it +=1
+                        self.loss[criterionsAttr.group] = self.loss[criterionsAttr.group].to(result.device)+criterionsAttr.l*result
                     self.values["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)].append(criterionsAttr.l*result.item())
-                elif criterionsAttr.isLoss:
-                    self._it +=1
-
-    def isDone(self) -> bool:
-        return self._it == self._nb_loss
     
     def resetLoss(self) -> None:
-        self._it = 0
-        self.saved_loss = self.getLastValue()
-        self.loss = torch.zeros((1), requires_grad = True)
+        for group in self.loss:
+            self.loss[group] = torch.zeros((1), requires_grad = True)
         
     def getLastValue(self) -> float:
-        return self.loss.item() if self.loss is not None else 0
+        return sum([self.loss[group].item() for group in self.loss])
     
-    def getLastMetrics(self) -> dict[str, float]:
-        return {name : value[-1] if len(value) else 0 for name, value in self.values.items()}
+    def getLastMetrics(self, n: int = 1) -> dict[str, float]:
+        return {name : np.mean(value[-n:]) for name, value in self.values.items() if len(self.values[name]) > 0}
 
     def format(self, isLoss) -> dict[str, float]:
         result = dict()
         for name in self.values:
             output_group, target_group = name.split(":")[:2]
             for _, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
-                if criterionsAttr.isLoss == isLoss:
-                    result[name] = np.mean(self.values[name]) if len(self.values[name]) else 0
+                if criterionsAttr.isLoss == isLoss and len(self.values[name]):
+                    if len(self.values[name]) > 0:
+                        result[name] = np.mean(self.values[name])
         return result
 
     def mean(self) -> float:
         value = 0.0
         for name in self.values:
-            value += np.mean(self.values[name])
+            if len(self.values[name]) > 0:
+                value += np.mean(self.values[name])
         return value
     
     def clear(self) -> None:
@@ -164,7 +155,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
    
     class ModuleArgs:
 
-        def __init__(self, in_branch: list[str], out_branch: list[str], pretrained : bool, alias : list[str], requires_grad: Union[bool, None]) -> None:
+        def __init__(self, in_branch: list[str], out_branch: list[str], pretrained : bool, alias : list[str], requires_grad: Union[bool, None], training: Union[None, bool]) -> None:
             super().__init__()
             self.alias= alias
             self.pretrained = pretrained
@@ -178,10 +169,12 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             self.isCheckpoint = False
             self.isGPU_Checkpoint = False
             self.gpu = "CPU"
+            self.training = training
 
     def __init__(self) -> None:
         super().__init__()
         self._modulesArgs : dict[str, ModuleArgsDict.ModuleArgs] = dict()
+        self._training = True
 
     def _addindent(self, s_: str, numSpaces : int):
         s = s_.split('\n')
@@ -252,9 +245,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
     def values(self) -> Iterable[Union[torch.nn.Module, None]]:
         return self._modules.values()
 
-    def add_module(self, name: str, module : torch.nn.Module, in_branch: list[Union[int, str]] = [0], out_branch: list[Union[int, str]] = [0], pretrained : bool = True, alias : list[str] = [], requires_grad: Union[bool, None] = None) -> None:
+    def add_module(self, name: str, module : torch.nn.Module, in_branch: list[Union[int, str]] = [0], out_branch: list[Union[int, str]] = [0], pretrained : bool = True, alias : list[str] = [], requires_grad: Union[bool, None] = None, training: Union[None, bool] = None) -> None:
         super().add_module(name, module)
-        self._modulesArgs[name] = ModuleArgsDict.ModuleArgs([str(value) for value in in_branch], [str(value) for value in out_branch], pretrained, alias, requires_grad)
+        self._modulesArgs[name] = ModuleArgsDict.ModuleArgs([str(value) for value in in_branch], [str(value) for value in out_branch], pretrained, alias, requires_grad, training)
     
     def getMap(self):
         results : dict[str, str] = {}
@@ -313,27 +306,28 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                 branchs[str(i)] = sinput
             out = inputs[0]
             for name, module in self.items():
-                requires_grad = self._modulesArgs[name].requires_grad
-                if requires_grad is not None and module:
-                    module.requires_grad_(requires_grad)
-                for ib in self._modulesArgs[name].in_branch:
-                    if ib not in branchs:
-                        branchs[ib] = inputs[0]
-                for branchs_key in branchs.keys():
-                    if str(branchs[branchs_key].device) != "cuda:"+self._modulesArgs[name].gpu:
-                        branchs[branchs_key] = branchs[branchs_key].to(int(self._modulesArgs[name].gpu))
-                if self._modulesArgs[name].isCheckpoint:
-                    out = checkpoint(module, *[branchs[i] for i in self._modulesArgs[name].in_branch])
-                    yield name, out
-                else:
-                    if isinstance(module, ModuleArgsDict):
-                        for k, out in module.named_forward(*[branchs[i] for i in self._modulesArgs[name].in_branch]):
-                            yield name+"."+k, out
-                    elif isinstance(module, torch.nn.Module):
-                        out = module(*[branchs[i] for i in self._modulesArgs[name].in_branch])                    
+                if self._modulesArgs[name].training is None or not (not self._modulesArgs[name].training and self._training):
+                    requires_grad = self._modulesArgs[name].requires_grad
+                    if requires_grad is not None and module:
+                        module.requires_grad_(requires_grad)
+                    for ib in self._modulesArgs[name].in_branch:
+                        if ib not in branchs:
+                            branchs[ib] = inputs[0]
+                    for branchs_key in branchs.keys():
+                        if str(branchs[branchs_key].device) != "cuda:"+self._modulesArgs[name].gpu:
+                            branchs[branchs_key] = branchs[branchs_key].to(int(self._modulesArgs[name].gpu))
+                    if self._modulesArgs[name].isCheckpoint:
+                        out = checkpoint(module, *[branchs[i] for i in self._modulesArgs[name].in_branch])
                         yield name, out
-                for ob in self._modulesArgs[name].out_branch:
-                    branchs[ob] = out
+                    else:
+                        if isinstance(module, ModuleArgsDict):
+                            for k, out in module.named_forward(*[branchs[i] for i in self._modulesArgs[name].in_branch]):
+                                yield name+"."+k, out
+                        elif isinstance(module, torch.nn.Module):
+                            out = module(*[branchs[i] for i in self._modulesArgs[name].in_branch])                    
+                            yield name, out
+                    for ob in self._modulesArgs[name].out_branch:
+                        branchs[ob] = out
             del branchs
 
     def forward(self, *input: torch.Tensor) -> torch.Tensor:
@@ -350,20 +344,20 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     yield name+"."+k, v
             elif isinstance(module, torch.nn.Module):
                 if not pretrained or not moduleArgs.pretrained:
-                    for k, v in module.named_parameters():
-                        yield name+"."+k, v
+                    if moduleArgs.training is None or moduleArgs.training:
+                        for k, v in module.named_parameters():
+                            yield name+"."+k, v
 
     def parameters(self, pretrained: bool = False):
         for _, v in self.named_parameters(pretrained):
             yield v
     
-    def named_ModuleArgsDict(self) -> Iterator[tuple[str, torch.nn.Module, ModuleArgs]]:
+    def named_ModuleArgsDict(self) -> Iterator[tuple[str, Self, ModuleArgs]]:
         for name, module in self._modules.items():
             yield name, module, self._modulesArgs[name]
             if isinstance(module, ModuleArgsDict):
                 for k, v, u in module.named_ModuleArgsDict():
                     yield name+"."+k, v, u
-            
 
     def _requires_grad(self, keys: list[str]):
         keys = keys.copy()
@@ -488,7 +482,6 @@ class Network(ModuleArgsDict, ABC):
         name = "Model" + ("_EMA" if ema else "")
         if name in state_dict:
             model_state_dict_tmp = {k.split(".")[-1] : v for k, v in state_dict[name].items()}[self._getName()]
-
             map = self.getMap()
             model_state_dict : OrderedDict[str, torch.Tensor] = OrderedDict()
             
@@ -659,10 +652,10 @@ class Network(ModuleArgsDict, ABC):
     @_function_network()
     def backward(self, model: Self):
         if self.measure:
-            if self.measure.isDone() and self.measure.loss is not None:
-                if self.scaler and self.optimizer:
-                    model._requires_grad(list(self.measure.outputsCriterions.keys()))
-                    self.scaler.scale(self.measure.loss / self.nb_batch_per_step).backward()
+            if self.scaler and self.optimizer:
+                model._requires_grad(list(self.measure.outputsCriterions.keys()))
+                for group in self.measure.loss:
+                    self.scaler.scale(self.measure.loss[group] / self.nb_batch_per_step).backward()
                     if self._it % self.nb_batch_per_step == 0:
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
@@ -715,7 +708,12 @@ class Network(ModuleArgsDict, ABC):
     
     def _getName(self) -> str:
         return self.name
-
+    
+    def setState(self, state: bool):
+        for module in self.modules():
+            if isinstance(module, ModuleArgsDict):
+                module._training = state
+                
 class ModelLoader():
 
     @config("Model")

@@ -9,7 +9,7 @@ import pynvml
 
 from DeepLearning_API import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, URL_MODEL
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import DatasetUtils, State, gpuInfo, getDevice, logImageFormat, Attribute, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule
+from DeepLearning_API.utils import DatasetUtils, State, gpuInfo, getDevice, Attribute, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule
 from DeepLearning_API.dataset import DataPrediction, DataSet
 from DeepLearning_API.HDF5 import Accumulator, PathCombine
 from DeepLearning_API.networks.network import Measure, ModelLoader, Network
@@ -103,10 +103,11 @@ class OutDataset(DatasetUtils, NeedDevice, ABC):
 class OutSameAsGroupDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, redution: str = "mean") -> None:
+    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, redution: str = "mean", inverse_transform: bool = True) -> None:
         super().__init__(dataset_filename, group, pre_transforms, post_transforms, patchCombine)
         self.group_src, self.group_dest = sameAsGroup.split(":")
         self.redution = redution
+        self.inverse_transform = inverse_transform
 
     def addLayer(self, index_dataset: int, index_augmentation: int, index_patch: int, layer: torch.Tensor, dataset: DataSet):
         if index_dataset not in self.output_layer_accumulator or index_augmentation not in self.output_layer_accumulator[index_dataset]:
@@ -125,8 +126,10 @@ class OutSameAsGroupDataset(OutDataset):
         for transform in self.pre_transforms:
             layer = transform(self.names[index_dataset], layer, self.attributes[index_dataset][index_augmentation][index_patch])
 
-        for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].post_transforms):
-            layer = transform.inverse(self.names[index_dataset], layer, self.attributes[index_dataset][index_augmentation][index_patch])
+        if self.inverse_transform:
+            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].post_transforms):
+                layer = transform.inverse(self.names[index_dataset], layer, self.attributes[index_dataset][index_augmentation][index_patch])
+                
         self.output_layer_accumulator[index_dataset][index_augmentation].addLayer(index_patch, layer)
     
     def _getOutput(self, index: int, index_augmentation: int, dataset: DataSet) -> torch.Tensor:
@@ -142,8 +145,9 @@ class OutSameAsGroupDataset(OutDataset):
                         layer = dataAugmentation.inverse(index, index_augmentation_tmp, layer)
                 i += dataAugmentations.nb
 
-        for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].pre_transforms):
-            layer = transform.inverse(name, layer, self.attributes[index][index_augmentation][0])
+        if self.inverse_transform:
+            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].pre_transforms):
+                layer = transform.inverse(name, layer, self.attributes[index][index_augmentation][0])
 
         for transform in self.post_transforms:
             layer = transform(name, layer, self.attributes[index][index_augmentation][0])

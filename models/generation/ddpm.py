@@ -7,6 +7,8 @@ from DeepLearning_API.networks import blocks
 from DeepLearning_API.measure import Criterion
 import torch
 import tqdm
+from torchvision.utils import save_image
+import numpy as np
 
 def cosine_beta_schedule(timesteps, s=0.008):
     steps = timesteps + 1
@@ -15,6 +17,8 @@ def cosine_beta_schedule(timesteps, s=0.008):
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0.0001, 0.9999)
+
+import SimpleITK as sitk
 
 class DDPM(network.Network):
     
@@ -58,12 +62,29 @@ class DDPM(network.Network):
         def __init__(self, noise_step: int=1000, beta_start: float = 1e-4, beta_end: float = 0.02) -> None:
             super().__init__()
             self.betas = torch.linspace(beta_start, beta_end, noise_step)
+            self.betas = DDPM.DDPM_ForwardProcess.enforce_zero_terminal_snr(self.betas)
             self.alphas = 1 - self.betas
-            self.alpha_hat = torch.concat((torch.ones(1), torch.cumprod(1.-self.betas, dim=0)))
+            self.alpha_hat = torch.concat((torch.ones(1), torch.cumprod(self.alphas, dim=0)))
+
+        def enforce_zero_terminal_snr(betas: torch.Tensor):
+            alphas = 1 - betas
+            alphas_bar = alphas.cumprod(0)
+            alphas_bar_sqrt = alphas_bar.sqrt()
+            alphas_bar_sqrt_0 = alphas_bar_sqrt[0].clone()
+            alphas_bar_sqrt_T = alphas_bar_sqrt[-1].clone()
+            alphas_bar_sqrt -= alphas_bar_sqrt_T
+            alphas_bar_sqrt *= alphas_bar_sqrt_0 / (
+            alphas_bar_sqrt_0 - alphas_bar_sqrt_T)
+            alphas_bar = alphas_bar_sqrt ** 2
+            alphas = alphas_bar[1:] / alphas_bar[:-1]
+            alphas = torch.cat([alphas_bar[0:1], alphas])
+            betas = 1 - alphas
+            return betas
 
         def forward(self, input: torch.Tensor, t: torch.Tensor, eta: torch.Tensor) -> torch.Tensor:
             alpha_hat_t = self.alpha_hat[t.cpu()].to(input.device).reshape(input.shape[0], *[1 for _ in range(len(input.shape)-1)])
-            return alpha_hat_t.sqrt() * input + (1 - alpha_hat_t).sqrt() * eta
+            result = alpha_hat_t.sqrt() * input + (1 - alpha_hat_t).sqrt() * eta
+            return result
     
     class DDPM_SampleT(torch.nn.Module):
 
@@ -104,47 +125,53 @@ class DDPM(network.Network):
 
     class DDPM_Inference(torch.nn.Module):
 
-        def __init__(self, model: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], noise_step: int, beta_start: float, beta_end: float) -> None:
+        def __init__(self, model: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], train_noise_step: int, inference_noise_step: int, beta_start: float, beta_end: float) -> None:
             super().__init__()
             self.model = model
-            self.noise_step = noise_step
-            self.forwardProcess = DDPM.DDPM_ForwardProcess(noise_step, beta_start, beta_end)
+            self.train_noise_step = train_noise_step
+            self.inference_noise_step = inference_noise_step
+            self.forwardProcess = DDPM.DDPM_ForwardProcess(train_noise_step, beta_start, beta_end)
         
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             x = torch.randn_like(input).to(input.device)
-
+            result = []
+            result.append(x.unsqueeze(1))
             description = lambda : "Inference : "+gpuInfo([input.device])+gpuInfo(input.device)
+            offset = self.train_noise_step // self.inference_noise_step
+            t_list = np.round(np.arange(self.train_noise_step-1, 0, -offset)).astype(int).tolist()
+            with tqdm.tqdm(iterable = enumerate(t_list), desc = description(), total=len(t_list), leave=False, disable=True) as batch_iter:
+                for i, t in batch_iter:
+                    alpha_t_hat = self.forwardProcess.alpha_hat[t]
+                    alpha_t_hat_prev = self.forwardProcess.alpha_hat[t - offset] if t - offset >= 0 else self.forwardProcess.alpha_hat[0]
+                    eta_theta = self.model(torch.concat((x, input), dim=1), (torch.ones(input.shape[0], 1) * t).to(input.device).long())
 
-            t_list = list(range(self.noise_step))[::-1]
-            with tqdm.tqdm(iterable = enumerate(t_list), desc = description(), total=len(t_list), leave=False) as batch_iter:
-                for _, t in batch_iter:
-                    # Estimating noise to be removed
-                    time_tensor = (torch.ones(input.shape[0], 1) * t).to(input.device).long()
+                    predicted = (x - (1 - alpha_t_hat).sqrt() * eta_theta)/alpha_t_hat.sqrt()*alpha_t_hat_prev.sqrt()
+
+                    variance = ((1 - alpha_t_hat_prev) / (1 - alpha_t_hat)) * (1 - alpha_t_hat / alpha_t_hat_prev)
                     
-                    eta_theta = self.model(torch.concat((x, input), dim=1), time_tensor)
+                    direction = (1-alpha_t_hat_prev-variance).sqrt()*eta_theta
+                    
+                    x = predicted+direction
+                    x += variance.sqrt()*torch.randn_like(input).to(input.device)
+                    
+                    result.append(x.unsqueeze(1))
+                    
+                    batch_iter.set_description(description())
+            result[-1] = torch.clip(result[-1], -1, 1)
+            return torch.concat(result, dim=1)
 
-                    alpha_t = self.forwardProcess.alphas[t]
-                    alpha_t_bar = self.forwardProcess.alpha_hat[t]
+    class DDPM_VLoss(torch.nn.Module):
 
-                    # Partially denoising the image
-                    x = (1 / alpha_t.sqrt()) * (x - (1 - alpha_t) / (1 - alpha_t_bar).sqrt() * eta_theta)
+        def __init__(self, alpha_hat: torch.Tensor) -> None:
+            super().__init__()
+            self.alpha_hat = alpha_hat
 
-                    if t > 0:
-                        z = torch.randn_like(input).to(input.device)
-
-                        # Option 1: sigma_t squared = beta_t
-                        beta_t = self.forwardProcess.betas[t]
-                        sigma_t = beta_t.sqrt()
-
-                        # Option 2: sigma_t squared = beta_tilda_t
-                        # prev_alpha_t_bar = ddpm.alpha_bars[t-1] if t > 0 else ddpm.alphas[0]
-                        # beta_tilda_t = ((1 - prev_alpha_t_bar)/(1 - alpha_t_bar)) * beta_t
-                        # sigma_t = beta_tilda_t.sqrt()
-
-                        # Adding some more noise like in Langevin Dynamics fashion
-                        x = x + sigma_t * z
-                    batch_iter.set_description(description()) 
-            return x
+        def v(self, input: torch.Tensor, noise: torch.Tensor, t: torch.Tensor):
+            alpha_hat_t = self.alpha_hat[t.cpu()].to(input.device).reshape(input.shape[0], *[1 for _ in range(len(input.shape)-1)])
+            return alpha_hat_t.sqrt()*input-(1-alpha_hat_t).sqrt()*noise
+            
+        def forward(self, input: torch.Tensor, eta: torch.Tensor, eta_hat: torch.Tensor, t: int) -> torch.Tensor:
+            return torch.concat((self.v(input, eta, t), self.v(input, eta_hat, t)), dim=1)
 
     @config("DDPM")
     def __init__(   self,
@@ -152,7 +179,8 @@ class DDPM(network.Network):
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
-                    noise_step: int = 1000,
+                    train_noise_step: int = 1000,
+                    inference_noise_step: int = 100,
                     beta_start: float = 1e-4, 
                     beta_end: float = 0.02,
                     time_embedding_dim: int = 100,
@@ -162,23 +190,21 @@ class DDPM(network.Network):
                     downSampleMode: str = "MAXPOOL",
                     upSampleMode: str = "CONV_TRANSPOSE",
                     attention : bool = False,
-                    dim : int = 3,
-                    trainning: bool = False) -> None:
+                    dim : int = 3) -> None:
         super().__init__(in_channels=1, optimizer=optimizer, schedulers=schedulers, outputsCriterions=outputsCriterions, patch=patch, dim=dim)
-        if trainning:
-            self.add_module("Identity", torch.nn.Identity())
-            self.add_module("Noise", blocks.NormalNoise(), out_branch=["eta"])
-            self.add_module("Sample", DDPM.DDPM_SampleT(noise_step), out_branch=["t"])
-            self.add_module("Forward", DDPM.DDPM_ForwardProcess(noise_step, beta_start, beta_end), in_branch=[0, "t", "eta"])
-            self.add_module("Concat", blocks.Concat(), in_branch=[0,1])
-            self.add_module("UNet", DDPM.DDPM_UNet(noise_step, channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, time_embedding_dim, dim), in_branch=[0, "t"])
-            self.add_module("Noise_optim", blocks.Concat(), in_branch=[0, "eta"])
-        else:
-            self.add_module("UNet", DDPM.DDPM_UNet(noise_step, channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, time_embedding_dim, dim), in_branch=[])
-            self.add_module("Inference", DDPM.DDPM_Inference(self.inference, noise_step, beta_start, beta_end), in_branch=[0])
+        self.add_module("Noise", blocks.NormalNoise(), out_branch=["eta"], training=True)
+        self.add_module("Sample", DDPM.DDPM_SampleT(train_noise_step), out_branch=["t"], training=True)
+        self.add_module("Forward", DDPM.DDPM_ForwardProcess(train_noise_step, beta_start, beta_end), in_branch=[0, "t", "eta"], out_branch=["x_t"], training=True)
+        self.add_module("Concat", blocks.Concat(), in_branch=["x_t",0], out_branch=["xy_t"], training=True)
+        self.add_module("UNet", DDPM.DDPM_UNet(train_noise_step, channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, time_embedding_dim, dim), in_branch=["xy_t", "t"], out_branch=["eta_hat"], training=True)
+
+        self.add_module("Noise_optim", DDPM.DDPM_VLoss(self["Forward"].alpha_hat), in_branch=[0, "eta", "eta_hat", "t"], out_branch=["noise"], training=True)
+        
+        self.add_module("Inference", DDPM.DDPM_Inference(self.inference, train_noise_step, inference_noise_step, beta_start, beta_end), in_branch=[1], training=False)
+        self.add_module("LastImage", blocks.Select([slice(None, None), slice(-1, None)]), training=False)
     
     def inference(self, input: torch.Tensor, t: torch.Tensor):
-        return self._modules["UNet"](input, t)
+        return self["UNet"](input, t)
 
 class MSE(Criterion):
 

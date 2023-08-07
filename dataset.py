@@ -74,7 +74,8 @@ class CustomSampler(Sampler[int]):
 
 class DataSet(data.Dataset):
 
-    def __init__(self, data : dict[str, list[Dataset]], map: dict[int, tuple[int, int, int]], groups_src : dict[str, Group], dataAugmentationsList : list[DataAugmentationsList], patch_size: Union[list[int], None], overlap: Union[list[int], None], use_cache = True) -> None:
+    def __init__(self, rank: int, data : dict[str, list[Dataset]], map: dict[int, tuple[int, int, int]], groups_src : dict[str, Group], dataAugmentationsList : list[DataAugmentationsList], patch_size: Union[list[int], None], overlap: Union[list[int], None], buffer_size: int, use_cache = True) -> None:
+        self.rank = rank
         self.data = data
         self.map = map
         self.patch_size = patch_size
@@ -83,6 +84,8 @@ class DataSet(data.Dataset):
         self.dataAugmentationsList = dataAugmentationsList
         self.use_cache = use_cache
         self.nb_dataset = len(data[list(data.keys())[0]])
+        self.buffer_size = buffer_size
+        self._index_cache = list[int]
 
     def getPatchConfig(self) -> tuple[list[int], list[int]]:
         return self.patch_size, self.overlap
@@ -101,12 +104,13 @@ class DataSet(data.Dataset):
         if self.use_cache:
             memory_init = getMemory()
             description = lambda i : "Caching : {} | {} | {}".format(memoryInfo(), memoryForecast(memory_init, i, self.nb_dataset), cpuInfo())
-            with tqdm.tqdm(range(self.nb_dataset), desc=description(0)) as pbar:
+            with tqdm.tqdm(range(self.nb_dataset), desc=description(0), disable=self.rank != 0) as pbar:
                 for index in pbar:
                     self._loadData(index)
                     pbar.set_description(description(index))
     
     def _loadData(self, index):
+        self._index_cache.append(index)
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 self.loadData(group_src, group_dest, index)
@@ -115,6 +119,7 @@ class DataSet(data.Dataset):
         self.data[group_dest][index].load(self.groups_src[group_src][group_dest].pre_transforms, self.dataAugmentationsList)
 
     def _unloadData(self, index : int) -> None:
+        self._index_cache.remove(index)
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 self.unloadData(group_dest, index)
@@ -128,10 +133,14 @@ class DataSet(data.Dataset):
     def __getitem__(self, index : int) -> dict[str, tuple[torch.Tensor, int, int, int]]:
         data = {}
         x, a, p = self.map[index]
+        if x not in self._index_cache:
+            if len(self._index_cache) >= self.buffer_size and not self.use_cache:
+                self._unloadData(self._index_cache[0])
+            self._loadData(x)
+
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 dataset = self.data[group_dest][x]
-                self.loadData(group_src, group_dest, x)
                 data["{}".format(group_dest)] = (dataset.getData(p, a, self.groups_src[group_src][group_dest].post_transforms), x, a, p)
         return data
 
@@ -146,7 +155,7 @@ class Data(ABC):
                         pin_memory : bool,
                         batch_size : int,
                         shuffle : bool = False,
-                        train_size: float = 1,
+                        train_size: Union[float, str, list[int], list[str]] = 1,
                         dataAugmentationsList: dict[str, DataAugmentationsList]= {}) -> None:
         self.dataset_filenames = dataset_filenames
         self.subset = subset
@@ -155,7 +164,7 @@ class Data(ABC):
         self.shuffle = shuffle
         self.train_size = train_size
         self.dataAugmentationsList = dataAugmentationsList
-        self.dataSet_args = dict(groups_src=self.groups_src, dataAugmentationsList = list(self.dataAugmentationsList.values()), use_cache = use_cache, patch_size=self.patch.patch_size if self.patch is not None else None, overlap=self.patch.overlap if self.patch is not None else None)
+        self.dataSet_args = dict(groups_src=self.groups_src, dataAugmentationsList = list(self.dataAugmentationsList.values()), use_cache = use_cache, buffer_size=batch_size+1, patch_size=self.patch.patch_size if self.patch is not None else None, overlap=self.patch.overlap if self.patch is not None else None)
         self.dataLoader_args = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
         self.data : list[list[dict[str, list[Dataset]]], dict[str, list[Dataset]]] = []
         self.map : list[list[list[tuple[int, int, int]]], list[tuple[int, int, int]]] = []
@@ -177,6 +186,15 @@ class Data(ABC):
                 for z in range(nb_patch[x][y]):
                     map.append((x, y, z))
         return data, map
+
+    def _split(map: list[tuple[int, int, int]], world_size: int) -> list[list[tuple[int, int, int]]]:
+        if len(map) == 0:
+            return [[] for _ in range(world_size)]
+        offset = len(map)//world_size
+        maps = []
+        for itr in range(0, len(map), offset):
+            maps.append(map[itr-offset:] if itr+offset > len(map) else map[itr:itr+offset])
+        return maps
 
     def getData(self, world_size: int = 1) -> list[list[DataLoader]]:
         for dataset_filename in self.dataset_filenames:
@@ -200,18 +218,18 @@ class Data(ABC):
         names = []
         for group in self.groups_src:
             names.append(set(self.datasets[group].getNames(group)))
+        
         inter_name = names[0]
         for n in names[1:]:
             inter_name = inter_name.intersection(n)
-        inter_name = list(inter_name)
+        inter_name = sorted(list(inter_name))
         size = len(inter_name)
 
         if self.subset is None:
             index = list(range(0, size))
         else:
             if isinstance(self.subset, str):
-                subset = [int(i) for i in self.subset.split(":")]
-                index = list(range(subset[0], subset[1]))
+                index = list(range(int(self.subset.split(":")[0]), int(self.subset.split(":")[1])))
             elif isinstance(self.subset, list):
                 if len(self.subset) > 0:
                     if isinstance(self.subset[0], int):
@@ -225,22 +243,39 @@ class Data(ABC):
                             if name in self.subset:
                                 index.append(i)
         if self.shuffle:
-            index = random.sample(index, self.subset[1]-self.subset[0])
-
-        data, map = self._getDatasets([inter_name[i] for i in index])
-        offset = len(map)//world_size
-
-        for i, itr in enumerate(range(0, len(map), offset)):
-            if itr+offset > len(map):
-                map_batched = map[itr-offset:]
+            index = random.sample(index, len(index))
+        names = [inter_name[i] for i in index]
+        data, map = self._getDatasets(names)
+        
+        train_map = map
+        validate_map = []
+        if isinstance(self.train_size, float):
+            if self.train_size < 1.0 and int(math.floor(len(map)*(1-self.train_size))) > 0:
+                train_map, validate_map = map[:int(math.floor(len(map)*self.train_size))], map[int(math.floor(len(map)*self.train_size)):]
+        elif isinstance(self.train_size, str):
+            if ":" in self.train_size:
+                index = list(range(int(self.subset.split(":")[0]), int(self.subset.split(":")[1])))
+                train_map = [m for m in map if m[0] not in index]
+                validate_map = [m for m in map if m[0] in index]
             else:
-                map_batched = map[itr:itr+offset]
+                validate_map = train_map
+        elif isinstance(self.train_size, list):
+            if len(self.train_size) > 0:
+                if isinstance(self.train_size[0], int):
+                    train_map = [m for m in map if m[0] not in self.train_size]
+                    validate_map = [m for m in map if m[0] in self.train_size]
+                elif isinstance(self.train_size[0], str):
+                    index = [i for i, n in enumerate(names) if n in self.train_size]
+                    train_map = [m for m in map if m[0] not in index]
+                    validate_map = [m for m in map if m[0] in index]
 
-            if self.train_size < 1.0 and int(math.floor(len(map_batched)*(1-self.train_size))) > 0:
-                maps = [map_batched[:int(math.floor(len(map_batched)*self.train_size))], map_batched[int(math.floor(len(map_batched)*self.train_size)):]]
-            else:
-                maps = [map_batched]
-            
+        train_maps = Data._split(train_map, world_size)
+        validate_maps = Data._split(validate_map, world_size)
+
+        for i, (train_map, validate_map) in enumerate(zip(train_maps, validate_maps)):
+            maps = [train_map]
+            if len(validate_map):
+                maps += [validate_map]
             self.data.append([])
             self.map.append([])
             for map_tmp in maps:
@@ -256,7 +291,7 @@ class Data(ABC):
         for i, (datas, maps) in enumerate(zip(self.data, self.map)):
             dataLoaders.append([])
             for data, map in zip(datas, maps):
-                dataLoaders[i].append(DataLoader(dataset=DataSet(data=data, map=map, **self.dataSet_args), sampler=CustomSampler(len(map), self.shuffle), **self.dataLoader_args))
+                dataLoaders[i].append(DataLoader(dataset=DataSet(rank=i, data=data, map=map, **self.dataSet_args), sampler=CustomSampler(len(map), self.shuffle), **self.dataLoader_args))
         return dataLoaders
 
 class DataTrain(Data):
@@ -272,7 +307,7 @@ class DataTrain(Data):
                         pin_memory : bool = True,
                         batch_size : int = 1,
                         shuffle : bool = True,
-                        train_size : float = 0.8) -> None:
+                        train_size : Union[float, str, list[int], list[str]] = 0.8) -> None:
         super().__init__(dataset_filenames, groups_src, patch, use_cache, subset, num_workers, pin_memory, batch_size, shuffle, train_size, augmentations if augmentations else {})
 
 class DataPrediction(Data):

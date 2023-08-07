@@ -90,8 +90,9 @@ class Metric():
         result = {}
         for output_group in self.metrics:
             for target_group in self.metrics[output_group]:
+                targets = [data_dict[group] for group in target_group.split("/") if group in data_dict]
                 for metric in self.metrics[output_group][target_group]:
-                    result["{}:{}:{}".format(output_group, target_group, metric.__class__.__name__)] = metric(data_dict[output_group], data_dict[target_group]).item()
+                    result["{}:{}:{}".format(output_group, target_group, metric.__class__.__name__)] = metric(data_dict[output_group], *targets).item()
         self.statistics.add(result)
         return result
 

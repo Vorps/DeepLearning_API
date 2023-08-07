@@ -40,7 +40,8 @@ class MaskedLoss(Criterion):
                 if self.mode_image_masked:
                     loss += self.loss(input[batch, ...]*target[1][batch, ...], target[0][batch, ...]*target[1][batch, ...])
                 else:
-                    loss += self.loss(torch.masked_select(input[batch, ...], target[1][batch, ...] == 1), torch.masked_select(target[0][batch, ...], target[1][batch, ...] == 1))
+                    if torch.count_nonzero(target[1][batch, ...]) > 0:
+                        loss += self.loss(torch.masked_select(input[batch, ...], target[1][batch, ...] == 1), torch.masked_select(target[0][batch, ...], target[1][batch, ...] == 1))
             else:
                 loss += self.loss(input[batch, ...], target[0][batch, ...])
         return loss/input.shape[0]
@@ -61,7 +62,7 @@ class MAE(MaskedLoss):
 class PSNR(MaskedLoss):
 
     def _loss(dynamic_range: Union[float, None], x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        return peak_signal_noise_ratio(x[0].cpu().numpy(), y[0].cpu().numpy(), data_range=dynamic_range if dynamic_range else (y.max()-y.min()).cpu().numpy())
+        return peak_signal_noise_ratio(x[0].detach().cpu().numpy(), y[0].cpu().numpy(), data_range=dynamic_range if dynamic_range else (y.max()-y.min()).cpu().numpy())
     
     def __init__(self, dynamic_range: Union[float, None] = None) -> None:
         super().__init__(partial(PSNR._loss, dynamic_range), False)
@@ -69,7 +70,7 @@ class PSNR(MaskedLoss):
 class SSIM(MaskedLoss):
     
     def _loss(dynamic_range: Union[float, None], x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        return structural_similarity(x[0].cpu().numpy(), y[0].cpu().numpy(), data_range=dynamic_range if dynamic_range else (y.max()-y.min()).cpu().numpy())
+        return structural_similarity(x[0].detach().cpu().numpy(), y[0].cpu().numpy(), data_range=dynamic_range if dynamic_range else (y.max()-y.min()).cpu().numpy())
     
     def __init__(self, dynamic_range: Union[float, None] = None) -> None:
         super().__init__(partial(SSIM._loss, dynamic_range), True)

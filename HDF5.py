@@ -150,7 +150,7 @@ class Patch(ABC):
             padding.append(0)
             padding.append(0 if _slice.start+self.patch_size[-dim_it-1] <= data.shape[-dim_it-1] else self.patch_size[-dim_it-1]-(data.shape[-dim_it-1]-_slice.start))
         data = data[slices]
-        data = F.pad(data, tuple(padding), "constant", self.padValue)
+        data = F.pad(data, tuple(padding), "constant", 0 if data.dtype == torch.uint8 and self.padValue < 0 else self.padValue)
         if self.mask is not None:
             data = torch.where(self.mask == 0, torch.zeros((1), dtype=data.dtype), data)
 

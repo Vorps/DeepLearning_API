@@ -219,6 +219,19 @@ class ArgMax(torch.nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return torch.argmax(input, dim=self.dim).unsqueeze(self.dim)
+    
+class Select(torch.nn.Module):
+
+    def __init__(self, slices: list[slice]) -> None:
+        super().__init__()
+        self.slices = tuple(slices)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        result = input[self.slices]
+        for i, s in enumerate(range(len(result.shape))):
+            if s == 1:
+              result = result.squeeze(dim=i)  
+        return result
 
 class NormalNoise(torch.nn.Module):
 

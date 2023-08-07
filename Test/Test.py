@@ -28,22 +28,27 @@ def test_h5(datasetUtils: DatasetUtils):
     assert datasetUtils.isGroupExist("Group")
     assert datasetUtils.isGroupExist("Group/Group2")
     assert datasetUtils.isGroupExist("Group1/Group2")
+    assert datasetUtils.isGroupExist("*/Group2")
 
     assert datasetUtils.isDatasetExist("Group", "Data1")
     assert datasetUtils.isDatasetExist("Group", "Data2")
     assert datasetUtils.isDatasetExist("Group/Group2", "Image")
+    assert datasetUtils.isDatasetExist("*/Group2", "Image")
     assert datasetUtils.isDatasetExist("Group1/Group2", "Transform")
 
     assert not datasetUtils.isGroupExist("Group/Group1")
     assert not datasetUtils.isDatasetExist("Test/Group1", "Test")
     assert not datasetUtils.isDatasetExist("Group/Group1", "Test")
+    assert not datasetUtils.isDatasetExist("*/Group1", "Test")
 
     assert datasetUtils.getSize("Group") == 2
     assert datasetUtils.getSize("Group/Group2") == 1
     assert datasetUtils.getSize("Group1/Group2") == 1
+    assert datasetUtils.getSize("*/Group2") == 2
 
     assert datasetUtils.getNames("Group") == ["Data1", "Data2"]
     assert datasetUtils.getNames("Group/Group2") == ["Image"]
+    assert datasetUtils.getNames("*/Group2") == ["Image", "Transform"] or datasetUtils.getNames("*/Group2") == ["Transform", "Image"]
     assert datasetUtils.getNames("Group1/Group2") == ["Transform"]
 
     s, a = datasetUtils.getInfos("Group", "Data1")
@@ -57,6 +62,9 @@ def test_h5(datasetUtils: DatasetUtils):
     s, a = datasetUtils.getInfos("Group/Group2", "Image")
     assert tuple([1]+list(shape)) == s
 
+    s, a = datasetUtils.getInfos("*/Group2", "Image")
+    assert tuple([1]+list(shape)) == s
+
     s, a = datasetUtils.getInfos("Group1/Group2", "Transform")
     assert a == {"FixedParameters_0": "(0.0, 0.0, 0.0, 0.0)", "Test": "1", "Transform_0": "Euler3DTransform_double_3_3"}
     assert s == (6,)
@@ -66,6 +74,9 @@ def test_h5(datasetUtils: DatasetUtils):
     assert attribute == a
 
     i = datasetUtils.readImage("Group/Group2", "Image")
+    assert i == image
+
+    i = datasetUtils.readImage("*/Group2", "Image")
     assert i == image
 
     t = datasetUtils.readTransform("Group1/Group2", "Transform")
@@ -103,25 +114,33 @@ def test(datasetUtils: DatasetUtils):
     assert datasetUtils.isGroupExist("Group")
     assert datasetUtils.isGroupExist("Group/Group2")
     assert datasetUtils.isGroupExist("Group1/Group2")
+    assert datasetUtils.isGroupExist("*/Group2")
 
     assert datasetUtils.isDatasetExist("Group", "RGBImage")
     assert not datasetUtils.isDatasetExist("Group", "Data2")
     assert datasetUtils.isDatasetExist("Group/Group2", "Image")
     assert datasetUtils.isDatasetExist("Group1/Group2", "Transform")
+    assert datasetUtils.isDatasetExist("*/Group2", "Image")
+    assert not datasetUtils.isDatasetExist("*/Group1", "Test")
 
     assert not datasetUtils.isGroupExist("Group/Group1")
     assert not datasetUtils.isDatasetExist("Test/Group1", "Test")
     assert not datasetUtils.isDatasetExist("Group/Group1", "Test")
-
+    
     assert datasetUtils.getSize("Group") == 1
     assert datasetUtils.getSize("Group/Group2") == 1
     assert datasetUtils.getSize("Group1/Group2") == 1
+    assert datasetUtils.getSize("*/Group2") == 2
 
     assert datasetUtils.getNames("Group") == ["RGBImage"]
     assert datasetUtils.getNames("Group/Group2") == ["Image"]
     assert datasetUtils.getNames("Group1/Group2") == ["Transform"]
+    assert datasetUtils.getNames("*/Group2") == ["Image", "Transform"] or datasetUtils.getNames("*/Group2") == ["Transform", "Image"]
 
     s, a = datasetUtils.getInfos("Group/Group2", "Image")
+    assert tuple([1]+list(shape)) == s
+
+    s, a = datasetUtils.getInfos("*/Group2", "Image")
     assert tuple([1]+list(shape)) == s
 
     s, a = datasetUtils.getInfos("Group", "RGBImage")
@@ -129,6 +148,11 @@ def test(datasetUtils: DatasetUtils):
 
     i = datasetUtils.readImage("Group/Group2", "Image")
     assert i == image
+
+    i = datasetUtils.readImage("*/Group2", "Image")
+    assert i == image
+
+    
 
     i = datasetUtils.readImage("Group", "RGBImage")
 
