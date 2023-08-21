@@ -7,7 +7,6 @@ from DeepLearning_API.networks import blocks
 from DeepLearning_API.measure import Criterion
 import torch
 import tqdm
-from torchvision.utils import save_image
 import numpy as np
 
 def cosine_beta_schedule(timesteps, s=0.008):
@@ -50,7 +49,7 @@ class DDPM(network.Network):
                     self.add_module("Attention", blocks.Attention(F_g=channels[1], F_l=channels[0], F_int=channels[0], dim=dim), in_branch=[2, 0], out_branch=[2])
                 self.add_module(upSampleMode.name, blocks.upSample(in_channels=channels[1], out_channels=channels[0], upSampleMode=upSampleMode, dim=dim))
                 self.add_module("SkipConnection", blocks.Concat(), in_branch=[0, 2])
-
+    
     class DDPM_UNetHead(network.ModuleArgsDict):
 
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
@@ -136,7 +135,7 @@ class DDPM(network.Network):
             x = torch.randn_like(input).to(input.device)
             result = []
             result.append(x.unsqueeze(1))
-            description = lambda : "Inference : "+gpuInfo([input.device])+gpuInfo(input.device)
+            description = lambda : "Inference : "+gpuInfo(input.device)
             offset = self.train_noise_step // self.inference_noise_step
             t_list = np.round(np.arange(self.train_noise_step-1, 0, -offset)).astype(int).tolist()
             with tqdm.tqdm(iterable = enumerate(t_list), desc = description(), total=len(t_list), leave=False, disable=True) as batch_iter:
@@ -195,7 +194,7 @@ class DDPM(network.Network):
         self.add_module("Noise", blocks.NormalNoise(), out_branch=["eta"], training=True)
         self.add_module("Sample", DDPM.DDPM_SampleT(train_noise_step), out_branch=["t"], training=True)
         self.add_module("Forward", DDPM.DDPM_ForwardProcess(train_noise_step, beta_start, beta_end), in_branch=[0, "t", "eta"], out_branch=["x_t"], training=True)
-        self.add_module("Concat", blocks.Concat(), in_branch=["x_t",0], out_branch=["xy_t"], training=True)
+        self.add_module("Concat", blocks.Concat(), in_branch=["x_t",1], out_branch=["xy_t"], training=True)
         self.add_module("UNet", DDPM.DDPM_UNet(train_noise_step, channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, time_embedding_dim, dim), in_branch=["xy_t", "t"], out_branch=["eta_hat"], training=True)
 
         self.add_module("Noise_optim", DDPM.DDPM_VLoss(self["Forward"].alpha_hat), in_branch=[0, "eta", "eta_hat", "t"], out_branch=["noise"], training=True)

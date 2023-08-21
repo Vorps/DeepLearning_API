@@ -12,6 +12,7 @@ from DeepLearning_API.transform import Transform, Save
 from DeepLearning_API.augmentation import DataAugmentationsList
 from typing import Union
 import itertools
+import copy 
 
 class PathCombine(ABC):
 
@@ -28,15 +29,16 @@ class PathCombine(ABC):
         self.dim = len([o for o in overlap if o > 0])
         self.data = self._setSides(self.data, padding)
         
+        
         slices = [[slice(0, o), slice(-o, None)] if o > 0 else [slice(None, None)] for o in overlap]
-        for s in itertools.product(*slices):
-            self.data[s] = self._setCorners(self.data[s])
-
+        for i, s in enumerate(itertools.product(*slices)):
+            self.data[s] = self._setCorners(self.data[s], i)
+            
     def __call__(self, input: torch.Tensor) -> torch.Tensor:
         return self.data.repeat([input.shape[0]]+[1]*(len(input.shape)-1)).to(input.device)*input
 
     @abstractmethod
-    def _setCorners(self, data: torch.Tensor) -> torch.Tensor:
+    def _setCorners(self, data: torch.Tensor, i: int) -> torch.Tensor:
         pass
     
     @abstractmethod
@@ -66,15 +68,25 @@ class Cosinus(PathCombine):
         assert len(np.unique(np.asarray([o for o in overlap if o > 0]))) == 1, "Overlap must be the same in each dimension"
         self.overlap = [o for o in overlap if o > 0][0]
         super().setPatchConfig(patch_size, overlap)
-
-    def _function_corners(self, x):
-        return np.cos(np.pi*x)**2/2
     
-    def _setCorners(self, data: torch.Tensor) -> torch.Tensor:
-        return torch.ones_like(data)*1/4
+    def _setCorners(self, data: torch.Tensor, i: int) -> torch.Tensor:
+        result = torch.zeros_like(data)
+        suport_invert = list(reversed(range(self.overlap)))
+        suport =  list(range(self.overlap))
+
+        func = lambda l: torch.tensor(np.asarray([np.cos(np.pi*1/(2*(self.overlap-1))*(x))**2/2 for x in l]))
+
+        if i == 0 or i == 2:
+            for i in range(self.overlap):
+                result[:, i, :] = func(suport_invert)   
+        elif i == 1 or i == 3:
+            for i in range(self.overlap):
+                result[:, i, :] = func(suport)   
+
+        return result
     
     def _function_sides(self, x):
-        return np.clip(np.cos(np.pi*1/(2*self.overlap)*x)**2, 0, 1)
+        return np.clip(np.cos(np.pi*1/(2*(self.overlap-1))*((x-1) if x > 0 else 0))**2, 0, 1)
 
     def _setSides(self, data: torch.Tensor, padding: list[int]) -> torch.Tensor:
         data = F.pad(self.data, padding, mode="constant", value=0)
@@ -110,7 +122,7 @@ class Accumulator():
                     if s.stop-s.start == 1:
                         data = data.unsqueeze(dim=dim+N)
                 if self.patchCombine is not None:
-                    result[slices_dest] += self.patchCombine(data)[slices_source]
+                    result[slices_dest] +=self.patchCombine(data)[slices_source]
                 else:
                     result[slices_dest] = data[slices_source]
         else:
@@ -152,8 +164,8 @@ class Patch(ABC):
         data = data[slices]
         data = F.pad(data, tuple(padding), "constant", 0 if data.dtype == torch.uint8 and self.padValue < 0 else self.padValue)
         if self.mask is not None:
-            data = torch.where(self.mask == 0, torch.zeros((1), dtype=data.dtype), data)
-
+            data = torch.where(self.mask == 0, 0 if data.dtype == torch.uint8 and self.padValue < 0 else self.padValue, data)
+        
         for d in [i for i, v in enumerate(reversed(self.patch_size)) if v == 1]:
             data = torch.squeeze(data, dim = len(data.shape)-d-1)
         return data
@@ -195,18 +207,18 @@ class Dataset():
         
         self.data : list[torch.Tensor] = list()
         for transformFunction in pre_transforms:
-            _shape = transformFunction.transformShape(_shape, self.cache_attributes[0])
+            _shape = transformFunction.transformShape(_shape, cache_attribute)
         
         self.patch = DatasetPatch(patch_size=patch.patch_size, overlap=patch.overlap, mask=patch.path_mask, padValue=patch.padValue) if patch else DatasetPatch(_shape)
         self.patch.load(_shape, 0)
-
+        self.s = _shape
         i = 1
         for dataAugmentations in dataAugmentationsList:
             shape = []
             caches_attribute = []
             for _ in range(dataAugmentations.nb):
                 shape.append(_shape)
-                caches_attribute.append(Attribute(self.cache_attributes[0]))
+                caches_attribute.append(copy.deepcopy(cache_attribute))
 
             for dataAugmentation in dataAugmentations.dataAugmentations:
                 shape = dataAugmentation.state_init(self.index, shape, caches_attribute)
@@ -214,15 +226,15 @@ class Dataset():
                 self.cache_attributes.append(caches_attribute[it])
                 self.patch.load(s, i)
                 i+=1
+        self.cache_attributes_bak = copy.deepcopy(self.cache_attributes)
 
     def load(self, pre_transform : list[Transform], dataAugmentationsList : list[DataAugmentationsList]) -> None:
         if self.loaded:
             return
-        assert self.name
         i = len(pre_transform)
         data = None
         for transformFunction in reversed(pre_transform):
-            if isinstance(transformFunction, Save) and os.path.exists(transformFunction.save):
+            if isinstance(transformFunction, Save):
                 filename, format = transformFunction.save.split(":")
                 datasetUtils = DatasetUtils(filename, format)
                 if datasetUtils.isDatasetExist(self.group_dest, self.name):
@@ -243,6 +255,7 @@ class Dataset():
                     datasetUtils = DatasetUtils(filename, format)
                     datasetUtils.write(self.group_dest, self.name, data.numpy(), self.cache_attributes[0])
         self.data : list[torch.Tensor] = list()
+        
         self.data.append(data)
             
         for dataAugmentations in dataAugmentationsList:
@@ -255,6 +268,7 @@ class Dataset():
              
     def unload(self) -> None:
         del self.data
+        self.cache_attributes = copy.deepcopy(self.cache_attributes_bak)
         self.loaded = False
     
     def getData(self, index : int, a : int, post_transforms : list[Transform]) -> torch.Tensor:

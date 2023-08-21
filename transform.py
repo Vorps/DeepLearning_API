@@ -12,10 +12,10 @@ from typing import Any, Union
 class Transform(NeedDevice, ABC):
     
     def __init__(self) -> None:
-        self.datasetUtils : DatasetUtils
+        self.datasetsUtils : list[DatasetUtils] = []
         
-    def setDatasetUtils(self, datasetUtils: DatasetUtils):
-        self.datasetUtils = datasetUtils
+    def setDatasetsUtils(self, datasetsUtils: list[DatasetUtils]):
+        self.datasetsUtils = datasetsUtils
 
     def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return shape
@@ -81,7 +81,6 @@ class Normalize(Transform):
                 cache_attribute["Max"] = torch.max(input[self.channels])
             else:
                 cache_attribute["Max"] = torch.max(input)
-
         if not self.lazy:
             input_min = float(cache_attribute["Min"])
             input_max = float(cache_attribute["Max"])
@@ -98,11 +97,9 @@ class Normalize(Transform):
         if self.lazy:
             return input
         else:
-            min_value = torch.min(input)
-            max_value = torch.max(input)
-            input_min = cache_attribute.pop("Min")
-            input_max = cache_attribute.pop("Max")
-            return (input - min_value)*(input_max-input_min)/(max_value-min_value)+input_min
+            input_min = float(cache_attribute.pop("Min"))
+            input_max = float(cache_attribute.pop("Max"))
+            return (input - self.min_value)*(input_max-input_min)/(self.max_value-self.min_value)+input_min
 
 class Standardize(Transform):
 
@@ -129,8 +126,8 @@ class Standardize(Transform):
         if self.lazy:
             return input
         else:
-            mean = cache_attribute.pop("Mean")
-            std = cache_attribute.pop("Std")
+            mean = float(cache_attribute.pop("Mean"))
+            std = float(cache_attribute.pop("Std"))
             return input * std + mean
         
 class TensorCast(Transform):
@@ -155,11 +152,11 @@ class Padding(Transform):
 
     def __call__(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute:
-            origin = cache_attribute["Origin"]
-            matrix = cache_attribute["Direction"].reshape((len(origin),len(origin)))
+            origin = torch.tensor(cache_attribute.get_np_array("Origin"))
+            matrix = torch.tensor(cache_attribute.get_np_array("Direction").reshape((len(origin),len(origin))))
             origin = torch.matmul(origin, matrix)
             for dim in range(len(self.padding)//2):
-                origin[-dim-1] -= self.padding[dim*2]*cache_attribute["Spacing"][-dim-1]
+                origin[-dim-1] -= self.padding[dim*2]* cache_attribute.get_np_array("Spacing")[-dim-1]
             cache_attribute["Origin"] = torch.matmul(origin, torch.inverse(matrix))
         result = F.pad(input.unsqueeze(0), tuple(self.padding), self.mode.split(":")[0], float(self.mode.split(":")[1]) if len(self.mode.split(":")) == 2 else 0).squeeze(0)
         return result
@@ -201,10 +198,8 @@ class Resample(Transform, ABC):
             mode = "nearest"
         elif len(input.shape) < 4:
             mode = "bilinear"
-            args = {"align_corners" : False}
         else:
             mode = "trilinear"
-            args = {"align_corners" : False}
         return F.interpolate(input.type(torch.float32).to(self.device).unsqueeze(0), size=tuple(size), mode=mode).squeeze(0).type(input.dtype).cpu()
 
     @abstractmethod
@@ -216,8 +211,8 @@ class Resample(Transform, ABC):
         pass
     
     def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        spacing_0 = cache_attribute.pop("Spacing")
-        spacing_1 = cache_attribute["Spacing"]
+        spacing_0 = cache_attribute.pop_np_array("Spacing")
+        spacing_1 = cache_attribute.get_np_array("Spacing")
         return self._resample(input, [int(np.ceil(i)) for i in np.flip(spacing_0, axis=0)/np.flip(spacing_1, axis=0)*input.shape[1:]])
 
 class ResampleIsotropic(Resample):
@@ -228,12 +223,12 @@ class ResampleIsotropic(Resample):
         
     def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
         assert "Spacing" in cache_attribute, "Error no spacing"
-        resize_factor = self.spacing/cache_attribute["Spacing"].flip(0)
+        resize_factor = self.spacing/cache_attribute.get_tensor("Spacing").flip(0)
         return  [int(x) for x in (torch.tensor(shape) * 1/resize_factor)]
 
     def __call__(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         assert "Spacing" in cache_attribute, "Error no spacing"
-        resize_factor = self.spacing/cache_attribute["Spacing"].flip(0)
+        resize_factor = self.spacing/cache_attribute.get_tensor("Spacing").flip(0)
         cache_attribute["Spacing"] = self.spacing.flip(0)
         return self._resample(input, [int(x) for x in (torch.tensor(input.shape[1:]) * 1/resize_factor)])
 
@@ -248,7 +243,7 @@ class ResampleResize(Resample):
     
     def __call__(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Spacing" in cache_attribute:
-            cache_attribute["Spacing"] = torch.flip(torch.tensor(list(input.shape[1:]))/torch.tensor(self.size)*torch.flip(cache_attribute["Spacing"], dims=[0]), dims=[0])
+            cache_attribute["Spacing"] = torch.flip(torch.tensor(list(input.shape[1:]))/torch.tensor(self.size)*torch.flip(cache_attribute.get_np_array("Spacing"), dims=[0]), dims=[0])
         return self._resample(input, self.size)
 
 class ResampleTransform(Transform):
@@ -260,11 +255,17 @@ class ResampleTransform(Transform):
     def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return shape
 
-    def __call__v1(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+    def __call__V1(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         transforms = []
         image = data_to_image(input, cache_attribute)
         for transform_group, invert in self.transforms.items():
-            transform = self.datasetUtils.readTransform(transform_group, name)
+            transform = None
+            for datasetUtils in self.datasetsUtils:
+                if datasetUtils.isDatasetExist(transform_group, name):
+                    transform = datasetUtils.readTransform(transform_group, name)
+                    break
+            if transform is None:
+                raise NameError("Tranform : {}/{} not found".format(transform_group, name))
             if isinstance(transform, sitk.BSplineTransform):
                 if invert:
                     transformToDisplacementFieldFilter = sitk.TransformToDisplacementFieldFilter()
@@ -278,14 +279,11 @@ class ResampleTransform(Transform):
                 if invert:
                     transform = transform.GetInverse()
             transforms.append(transform)
-        result_transform = sitk.Transform()
-        for transform in transforms:
-            result_transform.AddTransform(transform)
+        result_transform = sitk.CompositeTransform(transforms)
         result = torch.tensor(sitk.GetArrayFromImage(sitk.Resample(image, image, result_transform, sitk.sitkNearestNeighbor if input.dtype == torch.uint8 else sitk.sitkBSpline, 0 if input.dtype == torch.uint8 else -1024))).unsqueeze(0)
         return result.type(torch.uint8) if input.dtype == torch.uint8 else result
     
     def __call__(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        transforms = []
         assert len(input.shape) == 4 , "input size should be 5 dim"
         image = data_to_image(input, cache_attribute)
         
@@ -294,8 +292,15 @@ class ResampleTransform(Transform):
         grid = torch.stack(grids)
         grid = torch.unsqueeze(grid, 0)
         
+        transforms = []
         for transform_group, invert in self.transforms.items():
-            transform = self.datasetUtils.readTransform(transform_group, name)
+            transform = None
+            for datasetUtils in self.datasetsUtils:
+                if datasetUtils.isDatasetExist(transform_group, name):
+                    transform = datasetUtils.readTransform(transform_group, name)
+                    break
+            if transform is None:
+                raise NameError("Tranform : {}/{} not found".format(transform_group, name))
             if isinstance(transform, sitk.BSplineTransform):
                 if invert:
                     transformToDisplacementFieldFilter = sitk.TransformToDisplacementFieldFilter()
@@ -309,13 +314,12 @@ class ResampleTransform(Transform):
                 if invert:
                     transform = transform.GetInverse()
             transforms.append(transform)
-        result_transform = sitk.Transform()
-        for transform in transforms:
-            result_transform.AddTransform(transform)
+        result_transform = sitk.CompositeTransform(transforms)
+        
         transformToDisplacementFieldFilter = sitk.TransformToDisplacementFieldFilter()        
         transformToDisplacementFieldFilter.SetReferenceImage(image)
         transformToDisplacementFieldFilter.SetNumberOfThreads(16)
-        new_locs = grid + torch.tensor(sitk.GetArrayFromImage(transformToDisplacementFieldFilter.Execute(transform))).unsqueeze(0).permute(0, 4, 1, 2, 3)
+        new_locs = grid + torch.tensor(sitk.GetArrayFromImage(transformToDisplacementFieldFilter.Execute(result_transform))).unsqueeze(0).permute(0, 4, 1, 2, 3)
         shape = new_locs.shape[2:]
         for i in range(len(shape)):
             new_locs[:, i, ...] = 2 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
@@ -339,7 +343,13 @@ class Mask(Transform):
         if self.path.endswith(".mha"):
             mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path))).unsqueeze(0)
         else:
-            mask = self.datasetUtils.readData(self.path, self.name)
+            mask = None
+            for datasetUtils in self.datasetsUtils:
+                if datasetUtils.isDatasetExist(self.path, name):
+                    mask = datasetUtils.readData(self.path, name)
+                    break
+            if mask is None:
+                raise NameError("Mask : {}/{} not found".format(self.path, name))
         input[torch.where(mask != 1)] = self.value_outside
         return input
 
@@ -415,3 +425,19 @@ class Save(Transform):
 
     def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return input
+    
+class Permute(Transform):
+
+    @config("Permute")
+    def __init__(self, dims: str = "1|0|2") -> None:
+        super().__init__()
+        self.dims = [0]+[int(d)+1 for d in dims.split("|")]
+
+    def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        return [shape[it-1] for it in self.dims[1:]]
+    
+    def __call__(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return input.permute(tuple(self.dims))
+    
+    def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return input.permute(tuple(np.argsort(self.dims)))

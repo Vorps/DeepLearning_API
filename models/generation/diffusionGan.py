@@ -8,7 +8,6 @@ from DeepLearning_API.HDF5 import ModelPatch
 from DeepLearning_API.models.generation.ddpm import DDPM
 from DeepLearning_API.utils import State
 import numpy as np
-import itertools
 
 class Discriminator(network.Network):
 
@@ -88,13 +87,12 @@ class Discriminator(network.Network):
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
-                    nb_batch_per_step: int = 64,
                     noise_step: int = 1000,
                     beta_start: float = 1e-4, 
                     beta_end: float = 0.02,
                     time_embedding_dim: int = 100,
                     dim : int = 3) -> None:
-        super().__init__(in_channels = 1, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim, nb_batch_per_step=nb_batch_per_step)
+        super().__init__(in_channels = 1, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim)
         self.add_module("DiscriminatorModel", Discriminator.DiscriminatorBlock(noise_step, beta_start, beta_end, time_embedding_dim, dim))
 
     def initialized(self):
@@ -114,7 +112,7 @@ class Generator(network.Network):
             super().__init__()
             self.add_module("ConvBlock", blocks.ConvBlock(in_channels, in_channels, nb_conv=1, blockConfig=blocks.BlockConfig(bias=False, activation="ReLU", normMode="SYNCBATCH"), dim=dim))
             self.add_module("Conv", blocks.getTorchModule("Conv", dim)(in_channels, out_channels, kernel_size=1, bias=False))
-            self.add_module("Tanh", torch.nn.Identity())
+            self.add_module("Tanh", torch.nn.Tanh())
 
     class GeneratorDownSample(network.ModuleArgsDict):
 
@@ -180,9 +178,8 @@ class Generator(network.Network):
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     patch : ModelPatch = ModelPatch(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
-                    nb_batch_per_step: int = 64,
                     dim : int = 3) -> None:
-        super().__init__(optimizer=optimizer, in_channels=1, schedulers=schedulers, patch=patch, outputsCriterions=outputsCriterions, dim=dim, nb_batch_per_step=nb_batch_per_step)
+        super().__init__(optimizer=optimizer, in_channels=1, schedulers=schedulers, patch=patch, outputsCriterions=outputsCriterions, dim=dim)
         self.add_module("GeneratorModel", Generator.GeneratorBlock(32, dim))
 
 class DiffusionGan(network.Network):
@@ -203,13 +200,12 @@ class CycleGanDiscriminator(network.Network):
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
-                    nb_batch_per_step: int = 64,
                     noise_step: int = 1000,
                     beta_start: float = 1e-4, 
                     beta_end: float = 0.02,
                     time_embedding_dim: int = 100,
                     dim : int = 3) -> None:
-        super().__init__(in_channels = 1, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim, nb_batch_per_step=nb_batch_per_step)
+        super().__init__(in_channels = 1, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim)
         self.add_module("Discriminator_A", Discriminator.DiscriminatorBlock(noise_step, beta_start, beta_end, time_embedding_dim, dim), in_branch=[0], out_branch=[0])
         self.add_module("Discriminator_B", Discriminator.DiscriminatorBlock(noise_step, beta_start, beta_end, time_embedding_dim, dim), in_branch=[1], out_branch=[1])
         
@@ -223,11 +219,9 @@ class CycleGanGenerator(network.Network):
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
-                    patch : ModelPatch = ModelPatch(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
-                    nb_batch_per_step: int = 64,
                     dim : int = 3) -> None:
-        super().__init__(in_channels = 1, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim, nb_batch_per_step=nb_batch_per_step)
+        super().__init__(in_channels = 1, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim)
         self.add_module("Generator_A_to_B", Generator.GeneratorBlock(32, dim), in_branch=[0], out_branch=[0])
         self.add_module("Generator_B_to_A", Generator.GeneratorBlock(32, dim), in_branch=[1], out_branch=[1])
 

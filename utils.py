@@ -11,7 +11,16 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Union, Optional
 import copy
-from torch.utils.tensorboard.writer import SummaryWriter
+import csv
+from DeepLearning_API import CONFIG_FILE, STATISTICS_DIRECTORY
+import torch.distributed as dist
+import argparse
+import subprocess
+import random
+from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
+import multiprocessing
+from typing import Callable
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
 
@@ -25,16 +34,16 @@ class Attribute(dict[str, Any]):
     def __getitem__(self, key: str) -> Any:
         i = len([k for k in super().keys() if k.startswith(key)])
         if i > 0 and "{}_{}".format(key, i-1) in super().keys():   
-            return super().__getitem__("{}_{}".format(key, i-1))
+            return str(super().__getitem__("{}_{}".format(key, i-1)))
         else:
             raise NameError("{} not in cache_attribute".format(key))
 
     def __setitem__(self, key: str, value: Any) -> None:
         if "_" not in key:
             i = len([k for k in super().keys() if k.startswith(key)])
-            super().__setitem__("{}_{}".format(key, i), value)
+            super().__setitem__("{}_{}".format(key, i), str(value.numpy()) if isinstance(value, torch.Tensor) else str(value))
         else:
-            super().__setitem__(key, value)
+            super().__setitem__(key, str(value.numpy()) if isinstance(value, torch.Tensor) else str(value))
             
     def pop(self, key: str) -> Any:
         i = len([k for k in super().keys() if k.startswith(key)])
@@ -43,6 +52,18 @@ class Attribute(dict[str, Any]):
         else:
             raise NameError("{} not in cache_attribute".format(key))
 
+    def get_np_array(self, key) -> np.ndarray:
+        return np.fromstring(self[key][1:-1], sep=" ", dtype=np.float32)
+    
+    def get_tensor(self, key) -> torch.Tensor:
+        return torch.tensor(self.get_np_array(key))
+    
+    def pop_np_array(self, key):
+        return np.fromstring(self.pop(key)[1:-1], sep=" ", dtype=np.float32)
+    
+    def pop_tensor(self, key) -> torch.Tensor:
+        return torch.tensor(self.pop_np_array(key))
+    
     def __contains__(self, key: str) -> bool:
         return len([k for k in super().keys() if k.startswith(key)]) > 0
     
@@ -57,9 +78,9 @@ def data_to_image(data : np.ndarray, attributes: Attribute) -> sitk.Image:
     else:
         data = data.transpose(tuple([i+1 for i in range(len(data.shape)-1)]+[0]))
         image = sitk.GetImageFromArray(data, isVector=True)
-    image.SetOrigin(attributes["Origin"].tolist())
-    image.SetSpacing(attributes["Spacing"].tolist())
-    image.SetDirection(attributes["Direction"].tolist())
+    image.SetOrigin(attributes.get_np_array("Origin").tolist())
+    image.SetSpacing(attributes.get_np_array("Spacing").tolist())
+    image.SetDirection(attributes.get_np_array("Direction").tolist())
     return image
 
 class DatasetUtils():
@@ -127,18 +148,16 @@ class DatasetUtils():
             dataset = self._getDataset(groups, name)
             data = np.zeros(dataset.shape, dataset.dtype)
             dataset.read_direct(data)
-            attrs = Attribute()
-            attrs.update(dataset.attrs)
-            return data, attrs
+            return data, Attribute({k : str(v) for k, v in dataset.attrs.items()})
 
         def data_to_file(self, name : str, data : Union[sitk.Image, sitk.Transform, np.ndarray], attributes : Union[Attribute, None] = None) -> None:
             if attributes is None:
                 attributes = Attribute()
             if isinstance(data, sitk.Image):
                 image = data
-                attributes["Origin"] = torch.tensor(image.GetOrigin())
-                attributes["Spacing"] = torch.tensor(image.GetSpacing())
-                attributes["Direction"] = torch.tensor(image.GetDirection())
+                attributes["Origin"] = np.asarray(image.GetOrigin())
+                attributes["Spacing"] = np.asarray(image.GetSpacing())
+                attributes["Direction"] = np.asarray(image.GetDirection())
                 data = sitk.GetArrayFromImage(image)
 
                 if image.GetNumberOfComponentsPerPixel() == 1:
@@ -146,15 +165,25 @@ class DatasetUtils():
                 else:
                     data = np.transpose(data, (len(data.shape)-1, *[i for i in range(len(data.shape)-1)]))
             elif isinstance(data, sitk.Transform):
-                if isinstance(data, sitk.Euler3DTransform):
-                    transform_type = "Euler3DTransform_double_3_3"
-                if isinstance(data, sitk.AffineTransform):
-                    transform_type = "AffineTransform_double_3_3"
-                if isinstance(data, sitk.BSplineTransform):
-                    transform_type = "BSplineTransform_double_3_3"
-                attributes["Transform"] = transform_type
-                attributes["FixedParameters"] = data.GetFixedParameters()
-                data = np.asarray(data.GetParameters())
+                transforms = []
+                if isinstance(data, sitk.CompositeTransform):
+                    for i in range(data.GetNumberOfTransforms()):
+                        transforms.append(data.GetNthTransform(i))    
+                else:
+                    transforms.append(data)
+                datas = []
+                for i, transform in enumerate(transforms):
+                    if isinstance(transform, sitk.Euler3DTransform):
+                        transform_type = "Euler3DTransform_double_3_3"
+                    if isinstance(transform, sitk.AffineTransform):
+                        transform_type = "AffineTransform_double_3_3"
+                    if isinstance(transform, sitk.BSplineTransform):
+                        transform_type = "BSplineTransform_double_3_3"
+                    attributes["{}:Transform".format(i)] = transform_type
+                    attributes["{}:FixedParameters".format(i)] = transform.GetFixedParameters()
+
+                    datas.append(np.asarray(transform.GetParameters()))
+                data = np.asarray(datas)
 
             h5_group = self.h5
             if len(name.split("/")) > 1:
@@ -168,7 +197,7 @@ class DatasetUtils():
                 del h5_group[name]
 
             dataset = h5_group.create_dataset(name, data=data, dtype=data.dtype, chunks=None)
-            dataset.attrs.update({k : (v if isinstance(v.numpy() if isinstance(v, torch.Tensor) else v, np.ndarray) else str(v)) for k, v in attributes.items()})
+            dataset.attrs.update({k : str(v) for k, v in attributes.items()})
         
         def isExist(self, group: str, name: Union[str, None] = None) -> bool:
             if group in self.h5:
@@ -222,7 +251,7 @@ class DatasetUtils():
         
         def getInfos(self, groups: str, name: str) -> tuple[list[int], Attribute]:
             dataset = self._getDataset(groups, name)
-            return (dataset.shape, Attribute({k : torch.tensor(v) if isinstance(v, np.ndarray) else v for k, v in dataset.attrs.items()}))
+            return (dataset.shape, Attribute({k : str(v) for k, v in dataset.attrs.items()}))
         
     class SitkFile(AbstractFile):
 
@@ -230,63 +259,96 @@ class DatasetUtils():
             self.filename = filename
             self.read = read
             self.format = format
-
+     
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
             attributes = Attribute()
             if os.path.exists("{}{}.{}".format(self.filename, name, self.format)):
                 image = sitk.ReadImage("{}{}.{}".format(self.filename, name, self.format))
                 
-                attributes["Origin"] = torch.tensor(image.GetOrigin())
-                attributes["Spacing"] = torch.tensor(image.GetSpacing())
-                attributes["Direction"] = torch.tensor(image.GetDirection())
-
+                attributes["Origin"] = np.asarray(image.GetOrigin())
+                attributes["Spacing"] = np.asarray(image.GetSpacing())
+                attributes["Direction"] = np.asarray(image.GetDirection())
+                for k in image.GetMetaDataKeys():
+                    attributes[k] = image.GetMetaData(k)
                 data = sitk.GetArrayFromImage(image)
                 if image.GetNumberOfComponentsPerPixel() == 1:
                     data = np.expand_dims(data, 0)
                 else:
                     data = np.transpose(data, (len(data.shape)-1, *[i for i in range(len(data.shape)-1)]))
             elif os.path.exists("{}{}.itk.txt".format(self.filename, name)): 
-                transform = sitk.ReadTransform("{}{}.itk.txt".format(self.filename, name))
-                transform_type = None
-                with open("{}{}.itk.txt".format(self.filename, name), "r") as f:
-                    for line in f:
-                        if line.startswith("Transform"):
-                            transform_type = line.split(": ")[1].strip("\n")
-                            break
-                attributes["Transform"] = transform_type
-                attributes["FixedParameters"] = str(transform.GetFixedParameters())
-                data = np.asarray(transform.GetParameters())
+                data = sitk.ReadTransform("{}{}.itk.txt".format(self.filename, name))
+                transforms = []
+                if isinstance(data, sitk.CompositeTransform):
+                    for i in range(data.GetNumberOfTransforms()):
+                        transforms.append(data.GetNthTransform(i))    
+                else:
+                    transforms.append(data)
+                datas = []
+                for i, transform in enumerate(transforms):
+                    if isinstance(transform, sitk.Euler3DTransform):
+                        transform_type = "Euler3DTransform_double_3_3"
+                    if isinstance(transform, sitk.AffineTransform):
+                        transform_type = "AffineTransform_double_3_3"
+                    if isinstance(transform, sitk.BSplineTransform):
+                        transform_type = "BSplineTransform_double_3_3"
+                    attributes["{}:Transform".format(i)] = transform_type
+                    attributes["{}:FixedParameters".format(i)] = transform.GetFixedParameters()
 
+                    datas.append(np.asarray(transform.GetParameters()))
+                data = np.asarray(datas)
+            elif os.path.exists("{}{}.fcsv".format(self.filename, name)):
+                with open("{}{}.fcsv".format(self.filename, name), newline="") as csvfile:
+                    reader = csv.reader(filter(lambda row: row[0]!='#', csvfile))
+                    lines = list(reader)
+                    data = np.zeros((len(list(lines)), 3), dtype=np.double)
+                    for i, row in enumerate(lines):
+                        data[i] = np.array(row[1:4], dtype=np.double)
+                    csvfile.close()
             return data, attributes
                 
-        def data_to_file(self, name : str, data : Union[sitk.Image, sitk.Transform, np.ndarray], attributes : Union[Attribute, None] = None) -> None:
-            if not os.path.exists(self.filename) and (isinstance(data, sitk.Image) or isinstance(data, sitk.Transform) or isAnImage(attributes)):
+        def data_to_file(self, name : str, data : Union[sitk.Image, sitk.Transform, np.ndarray], attributes : Attribute = Attribute()) -> None:
+            if not os.path.exists(self.filename) and (isinstance(data, sitk.Image) or isinstance(data, sitk.Transform) or isAnImage(attributes) or (len(data.shape) == 2 and data.shape[1] == 3 and data.shape[0] > 0)):
                 os.makedirs(self.filename)
             if isinstance(data, sitk.Image):
+                for k, v in attributes.items():
+                    data.SetMetaData(k, v)
                 sitk.WriteImage(data, "{}{}.{}".format(self.filename, name, self.format))
             elif isinstance(data, sitk.Transform):
                 sitk.WriteTransform(data, "{}{}.itk.txt".format(self.filename, name))
-            else:   
+            elif isAnImage(attributes):   
                 self.data_to_file(name, data_to_image(data, attributes), attributes)
+            elif (len(data.shape) == 2 and data.shape[1] == 3 and data.shape[0] > 0):
+                data = np.round(data, 4)
+                with open("{}{}.fcsv".format(self.filename, name), 'w') as f:
+                    f.write("# Markups fiducial file version = 4.6\n# CoordinateSystem = 0\n# columns = id,x,y,z,ow,ox,oy,oz,vis,sel,lock,label,desc,associatedNodeID\n")
+                    for i in range(data.shape[0]):
+                        f.write("vtkMRMLMarkupsFiducialNode_"+str(i+1)+","+str(data[i, 0])+","+str(data[i, 1])+","+str(data[i, 2])+",0,0,0,1,1,1,0,F-"+str(i+1)+",,vtkMRMLScalarVolumeNode1\n")
+                    f.close()
                  
         def isExist(self, group: str, name: Union[str, None] = None) -> bool:
-            return os.path.exists("{}{}.{}".format(self.filename, group, self.format)) or os.path.exists("{}{}.itk.txt".format(self.filename, group))
+            return os.path.exists("{}{}.{}".format(self.filename, group, self.format)) or os.path.exists("{}{}.itk.txt".format(self.filename, group)) or os.path.exists("{}{}.fcsv".format(self.filename, group))
         
         def getNames(self, group: str) -> list[str]:
             raise NotImplementedError()
 
         def getInfos(self, group: str, name: str) -> tuple[list[int], Attribute]:
-            file_reader = sitk.ImageFileReader()
-            file_reader.SetFileName("{}{}{}.{}".format(self.filename, group if group is not None else "", name, self.format))
-            file_reader.ReadImageInformation()
             attributes = Attribute()
-            attributes["Origin"] = torch.tensor(file_reader.GetOrigin())
-            attributes["Spacing"] = torch.tensor(file_reader.GetSpacing())
-            attributes["Direction"] = torch.tensor(file_reader.GetDirection())
-            size = list(file_reader.GetSize())
-            if len(size) == 3:
-                size = list(reversed(size))
-            size = [file_reader.GetNumberOfComponents()]+size
+            if os.path.exists("{}{}{}.{}".format(self.filename, group if group is not None else "", name, self.format)):
+                file_reader = sitk.ImageFileReader()
+                file_reader.SetFileName("{}{}{}.{}".format(self.filename, group if group is not None else "", name, self.format))
+                file_reader.ReadImageInformation()
+                attributes["Origin"] = np.asarray(file_reader.GetOrigin())
+                attributes["Spacing"] = np.asarray(file_reader.GetSpacing())
+                attributes["Direction"] = np.asarray(file_reader.GetDirection())
+                for k in file_reader.GetMetaDataKeys():
+                    attributes[k] = file_reader.GetMetaData(k)
+                size = list(file_reader.GetSize())
+                if len(size) == 3:
+                    size = list(reversed(size))
+                size = [file_reader.GetNumberOfComponents()]+size
+            else:
+                data, attributes = self.file_to_data(group if group is not None else "", name)
+                size = data.shape
             return tuple(size), attributes
 
     class File(ABC):
@@ -315,7 +377,7 @@ class DatasetUtils():
         self.filename = filename
         self.format = format
         
-    def write(self, group : str, name : str, data : Union[sitk.Image, sitk.Transform, np.ndarray], attributes : Union[Attribute, None] = None):
+    def write(self, group : str, name : str, data : Union[sitk.Image, sitk.Transform, np.ndarray], attributes : Attribute = Attribute()):
         if self.is_directory:
             if not os.path.exists(self.filename):
                 os.makedirs(self.filename)
@@ -345,17 +407,20 @@ class DatasetUtils():
     
     def readTransform(self, group : str, name : str) -> sitk.Transform: 
         transformParameters, attribute = self.readData(group, name)
-        transform_type = attribute["Transform"]
-        if transform_type == "Euler3DTransform_double_3_3":
-            transform = sitk.Euler3DTransform()
-        if transform_type == "AffineTransform_double_3_3":
-            transform = sitk.AffineTransform(3)
-        if transform_type == "BSplineTransform_double_3_3":
-            transform = sitk.BSplineTransform(3)
-        transform.SetFixedParameters(eval(attribute["FixedParameters"]))
-        transform.SetParameters(tuple(transformParameters))
-        return transform
-    
+        transforms_type = [v for k, v in attribute.items() if k.endswith(":Transform_0")]
+        transforms = []
+        for i, transform_type in enumerate(transforms_type):
+            if transform_type == "Euler3DTransform_double_3_3":
+                transform = sitk.Euler3DTransform()
+            if transform_type == "AffineTransform_double_3_3":
+                transform = sitk.AffineTransform(3)
+            if transform_type == "BSplineTransform_double_3_3":
+                transform = sitk.BSplineTransform(3)
+            transform.SetFixedParameters(eval(attribute["{}:FixedParameters".format(i)]))
+            transform.SetParameters(tuple(transformParameters[i]))
+            transforms.append(transform)
+        return sitk.CompositeTransform(transforms) if len(transforms) > 1 else transforms[0]
+
     def readImage(self, group : str, name : str):
          data, attribute = self.readData(group, name)
          return data_to_image(data, attribute)
@@ -438,74 +503,19 @@ def memoryForecast(memory_init : float, i : float, size : float) -> str:
     forecast = memory_init + ((current_memory-memory_init)*size/i) if i > 0 else 0
     return "Memory forecast ({:.2f}G ({:.2f} %))".format(forecast, forecast/(psutil.virtual_memory()[0]/2**30)*100)
 
-def gpuInfo(device : torch.device) -> str:
-    if str(device).startswith("cuda:"):
-        device = int(str(device).replace("cuda:", ""))
-    else:
-        return ""
+def gpuInfo(device : Union[int, torch.device]) -> str:
+    if isinstance(device, torch.device):
+        if str(device).startswith("cuda:"):
+            device = int(str(device).replace("cuda:", ""))
+        else:
+            return ""
     if device < pynvml.nvmlDeviceGetCount():
         handle = pynvml.nvmlDeviceGetHandleByIndex(device)
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
     else:
         return ""
-    return  "GPU({}) Memory GPU ({:.2f}G ({:.2f} %)) | {} | Power {}W | Temperature {}°C".format(device, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
+    return  "Node: {} GPU({}) Memory GPU ({:.2f}G ({:.2f} %)) | {} ".format(os.environ["SLURMD_NODENAME"], device, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, memoryInfo())
 
-
-"""def gpuInfo(devices : torch.device) -> str:
-    infos : list[tuple[int, float, float]] = []
-
-    for device in devices:
-        device_id = int(str(device).replace("cuda:", ""))
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-        memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        infos.append((device_id, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100))
-    return "GPU({})".format("|".join([str(info[0]) for info in infos]))+" Memory GPU ({})".format("|".join(["{:.2f}G ({:.2f} %)".format(info[1], info[2]) for info in infos]))
-    #float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, memoryInfo(), pynvml.nvmlDeviceGetPowerUsage(handle)//1000, pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
-"""
-def getAvailableDevice() -> list[int]:
-    pynvml.nvmlInit()
-    available = []
-    deviceCount = pynvml.nvmlDeviceGetCount()
-    for id in range(deviceCount):
-        handle = pynvml.nvmlDeviceGetHandleByIndex(id)
-        use = pynvml.nvmlDeviceGetUtilizationRates(handle)
-        memory = int(use.memory)
-        if memory == 0:
-            available.append(id)
-    pynvml.nvmlShutdown()
-    return available
-
-def getDevice(devices : Union[list[int], None]) -> list[torch.device]:
-    if torch.cuda.is_available():
-        result_devices = []
-        result_ids = []
-        
-        if devices is None:
-            devices = "None"
-
-        for device in devices:
-            if device == "None":
-                availableDevice = getAvailableDevice()
-                if len(availableDevice):
-                    device = "cpu"
-                    for d in availableDevice:
-                        if d not in result_ids:
-                            device = d
-                            break
-                else:
-                    result_devices.append(torch.device("cpu"))
-
-            if device == "cpu":
-                result_devices.append(torch.device("cpu"))
-                result_ids.append(None)
-            if device in getAvailableDevice():
-                result_devices.append(torch.device("cuda:{}".format(device)))
-                result_ids.append(device)
-            else:
-                raise Exception("GPU : {} is not available !".format(device))
-        return result_devices
-    else:
-        return [torch.device("cpu")]
 
 class NeedDevice(ABC):
 
@@ -513,8 +523,11 @@ class NeedDevice(ABC):
         super().__init__()
         self.device : torch.device
     
-    def setDevice(self, device : torch.device):
-        self.device = device
+    def setDevice(self, device : int):
+        self.device = getDevice(device)
+
+def getDevice(device : int):
+    return device if torch.cuda.is_available() and device >=0 else torch.device("cpu")
 
 class State(Enum):
     TRAIN = "TRAIN"
@@ -591,7 +604,7 @@ def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overla
     
     return patch_slices, nb_patch_per_dim
 
-def transformCompose(path: str, transforms_files : dict[str, bool]):
+def transformCompose(path: str, transforms_files : dict[str, bool]) -> sitk.CompositeTransform:
     transforms = []
     for transform_file, invert in transforms_files.items():
         transform = sitk.ReadTransform(path+transform_file+".itk.txt")
@@ -622,8 +635,7 @@ def transformCompose(path: str, transforms_files : dict[str, bool]):
                 inverseDisplacementField = iterativeInverseDisplacementFieldImageFilter.Execute(displacementField)
                 transform = sitk.DisplacementFieldTransform(inverseDisplacementField)
             transforms.append(transform)
-    result_transform = sitk.CompositeTransform(transforms)
-    return result_transform
+    return sitk.CompositeTransform(transforms)
 
 def resampleITK(path: str, image_reference : sitk.Image, image : sitk.Image, transforms_files : dict[str, bool], mask = True):
     return sitk.Resample(image, image_reference, transformCompose(path, transforms_files), sitk.sitkNearestNeighbor if mask else sitk.sitkBSpline, defaultPixelValue =  0 if mask else -1024)
@@ -658,14 +670,12 @@ def parameterMap_to_ITK_AffineTransform(path_src: str, path_dest: str) -> None:
         f.write("#Insight Transform File V1.0\n")
         f.write("#Transform 0\n")
         f.write("Transform: AffineTransform_double_3_3\n")
-
+        
         TransformParameters = np.array([float(i) for i in transform_affine["TransformParameters"]])
         CenterOfRotationPoint = np.array([float(i) for i in transform_affine["CenterOfRotationPoint"]])
-            
+
         f.write("Parameters: "+" ".join([str(i) for i in TransformParameters])+""+"\n")
         f.write("FixedParameters: "+" ".join([str(i)+" " for i in CenterOfRotationPoint])+"\n")
-
-
 
 def parameterMap_to_ITK_BSplineTransform(path_src: str, path_dest: str) -> None:
     transform_BSpline = sitk.ReadParameterFile("{}.0.txt".format(path_src))
@@ -686,29 +696,35 @@ def parameterMap_to_ITK_BSplineTransform(path_src: str, path_dest: str) -> None:
 def _logImageFormat(input : np.ndarray):
     if input.dtype == np.uint8:
         return input
+    if len(input.shape) == 2:
+        input = np.expand_dims(input, axis=0)
     if len(input.shape) == 4:
-        input = input[input.shape[1]//2]
+        input = input[:, input.shape[1]//2]
     b = -np.min(input)
     if (np.max(input)+b) > 0:
         return (input+b)/(np.max(input)+b)
     else:
         return 0*input
 
-def _logImagesFormat(input : torch.Tensor):
+def _logImagesFormat(input : np.ndarray):
+    result = []
     for n in range(input.shape[0]):
-        input[n] = _logImageFormat(input[n])
-    return input
+        result.append(_logImageFormat(input[n]))
+    result = np.stack(result, axis=0)
+    return result
 
-def _logVideoFormat(input : torch.Tensor):
+def _logVideoFormat(input : np.ndarray):
+    result = []
     for t in range(input.shape[1]):
-        input[:, t] = _logImagesFormat(input[:, t,...])
+        result.append( _logImagesFormat(input[:, t,...]))
+    result = np.stack(result, axis=1)
 
-    nb_channel = input.shape[2]
+    nb_channel = result.shape[2]
     if nb_channel < 3:
-        channel_split = [input[:, :, 0, ...] for i in range(3)]
+        channel_split = [result[:, :, 0, ...] for i in range(3)]
     else:
-        channel_split = np.split(input, 3, axis=0)
-    input = np.zeros((input.shape[0], input.shape[1], 3, *list(input.shape[3:])))
+        channel_split = np.split(result, 3, axis=0)
+    input = np.zeros((result.shape[0], result.shape[1], 3, *list(result.shape[3:])))
     for i, channels in enumerate(channel_split):
         input[:,:,i] = np.mean(channels, axis=0)
     return input
@@ -719,3 +735,180 @@ class DataLog(Enum):
     IMAGES  = lambda tb, name, layer, it : tb.add_images(name, _logImagesFormat(layer), it),
     VIDEO   = lambda tb, name, layer, it : tb.add_video(name, _logVideoFormat(layer), it),
     AUDIO   = lambda tb, name, layer, it : tb.add_audio(name, _logImageFormat(layer), it)
+
+class DistributedObject():
+
+    def __init__(self, name: str) -> None:
+        self.port = find_free_port()
+        self.dataloader : list[list[DataLoader]]
+        self.manual_seed: bool = None
+        self.name = name
+    
+    @abstractmethod
+    def setup(self, world_size: int):
+        pass
+    
+    @abstractmethod
+    def __enter__(self):
+        if "DEEP_LEANING_TENSORBOARD_PORT" in os.environ:
+            def start_tb():
+                import subprocess
+                command = ["tensorboard", "--logdir", STATISTICS_DIRECTORY()+self.name+"/", "--port", os.environ["DEEP_LEANING_TENSORBOARD_PORT"]]
+                subprocess.call(command)
+
+            multiprocessing.Process(target=start_tb).start()
+        return self
+    
+    @abstractmethod
+    def __exit__(self, type, value, traceback):
+        pass
+    
+    @abstractmethod
+    def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):
+        pass 
+    
+    def getMeasure(world_size: int, global_rank: int, local_rank: int, models: dict[str, torch.nn.Module]) -> dict[str, tuple[dict[str, float], dict[str, float]]]:
+        data = {}
+        for label, model in models.items():
+            for name, network in model.getNetworks().items():
+                if network.measure is not None:
+                    data["{}{}".format(name, label)] = (network.measure.format(isLoss=True), network.measure.format(isLoss=False))
+            model.measureClear()
+        outputs = synchronize_data(world_size, local_rank, data)
+        result = {}
+        if global_rank == 0:
+            for output in outputs:
+                for k, v in output.items():
+                    for t in range(len(v)):
+                        for u, n in v[t].items():
+                            if k not in result:
+                                result[k] = ({}, {})
+                            if u not in result[k][t]:
+                                result[k][t][u] = 0
+                            result[k][t][u] += n/world_size
+        return result
+
+    def __call__(self, rank: Union[int, None] = None) -> None:
+        world_size = len(self.dataloader)
+        global_rank, local_rank = setupGPU(world_size, self.port, rank)
+        if global_rank is None:
+            return
+        pynvml.nvmlInit()
+        if self.manual_seed is not None:
+            np.random.seed(self.manual_seed * world_size + global_rank)
+            random.seed(self.manual_seed * world_size + global_rank)
+            torch.manual_seed(self.manual_seed * world_size + global_rank)
+        torch.backends.cudnn.benchmark = self.manual_seed is None
+        torch.backends.cudnn.deterministic = self.manual_seed is not None
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        dataloaders = self.dataloader[global_rank]
+        torch.cuda.set_device(local_rank)
+        for dataloader in dataloaders:
+            dataloader.dataset.to(local_rank)
+            dataloader.dataset.load()
+    
+        self.run_process(world_size, global_rank, local_rank, dataloaders)
+        pynvml.nvmlShutdown()
+        cleanup()
+
+def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
+    # API arguments
+    api_args = parser.add_argument_group('API arguments')
+    api_args.add_argument("type", type=State, choices=list(State))
+    api_args.add_argument('-y', action='store_true', help="Accept overwrite")
+    api_args.add_argument('-tb', action='store_true', help='Start TensorBoard')
+    api_args.add_argument("-c", "--config", type=str, default="None", help="Configuration file location")
+    api_args.add_argument("-g", "--gpu", type=str, default=os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else "", help="List of GPU")
+    api_args.add_argument('--num-workers', '--num_workers', default=4, type=int, help='No. of workers per DataLoader & GPU')
+    api_args.add_argument("-models_dir", "--MODELS_DIRECTORY", type=str, default="./Models/", help="Models location")
+    api_args.add_argument("-checkpoints_dir", "--CHECKPOINTS_DIRECTORY", type=str, default="./Checkpoints/", help="Checkpoints location")
+    api_args.add_argument("-url", "--URL_MODEL", type=str, default="", help="URL Model")
+    api_args.add_argument("-predictions_dir", "--PREDICTIONS_DIRECTORY", type=str, default="./Predictions/", help="Predictions location")
+    api_args.add_argument("-metrics_dir", "--METRICS_DIRECTORY", type=str, default="./Metrics/", help="Metrics location")
+    api_args.add_argument("-statistics_dir", "--STATISTICS_DIRECTORY", type=str, default="./Statistics/", help="Statistics location")
+    api_args.add_argument("-setups_dir", "--SETUPS_DIRECTORY", type=str, default="./Setups/", help="Setups location")
+    
+    args = parser.parse_args()
+    config = vars(args)
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = config["gpu"]
+    os.environ["DL_API_MODELS_DIRECTORY"] = config["MODELS_DIRECTORY"]
+    os.environ["DL_API_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]
+    os.environ["DL_API_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
+    os.environ["DL_API_METRICS_DIRECTORY"] = config["METRICS_DIRECTORY"]
+    os.environ["DL_API_STATISTICS_DIRECTORY"] = config["STATISTICS_DIRECTORY"]
+    os.environ["DL_API_STATE"] = str(config["type"])
+    
+    os.environ["DL_API_URL_MODEL"] = config["URL_MODEL"]
+
+    os.environ["DL_API_SETUPS_DIRECTORY"] = config["SETUPS_DIRECTORY"]
+
+    os.environ["DL_API_OVERWRITE"] = "{}".format(config["y"])
+    os.environ["DEEP_LEANING_API_CONFIG_MODE"] = "Done"
+    
+    if config["tb"]:
+        os.environ["DEEP_LEANING_TENSORBOARD_PORT"] = str(find_free_port())
+
+    if config["config"] == "None":
+        if config["type"] is State.PREDICTION:
+             os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Prediction.yml"
+        elif config["type"] is State.METRIC:
+            os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Metric.yml"
+        else:
+            os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Config.yml"
+    else:
+        os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = config["config"]
+    
+    if config["type"] is State.PREDICTION:    
+        from DeepLearning_API.predictor import Predictor
+        os.environ["DEEP_LEARNING_API_ROOT"] = "Predictor"
+        return Predictor(config=CONFIG_FILE())    
+    elif config["type"] is State.METRIC:
+        from DeepLearning_API.metric import Metric
+        os.environ["DEEP_LEARNING_API_ROOT"] = "Metric"
+        return Metric(config=CONFIG_FILE())
+    else:
+        from DeepLearning_API.trainer import Trainer
+        os.environ["DEEP_LEARNING_API_ROOT"] = "Trainer"
+        return Trainer(config=CONFIG_FILE())
+
+import submitit
+
+def setupGPU(world_size: int, port: int, rank: Union[int, None] = None) -> tuple[int , int]:
+    host_name = subprocess.check_output("scontrol show hostnames {}".format(os.getenv('SLURM_JOB_NODELIST')).split()).decode().splitlines()[0]
+    if rank is None:
+        job_env = submitit.JobEnvironment()
+        global_rank = job_env.global_rank
+        local_rank = job_env.local_rank
+    else:
+        global_rank = rank
+        local_rank = rank
+    if global_rank >= world_size:
+        return None, None
+    print("tcp://{}:{}".format(host_name, port))
+    if torch.cuda.is_available():
+        dist.init_process_group("nccl", rank=global_rank, init_method="tcp://{}:{}".format(host_name, port), world_size=world_size)
+    return global_rank, local_rank
+
+import socket
+from contextlib import closing
+
+def find_free_port():
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(('', 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
+    
+def cleanup():
+    if torch.cuda.is_available():
+        dist.destroy_process_group()
+
+def synchronize_data(world_size: int, local_rank: int, data: any) -> list[Any]:
+    if torch.cuda.is_available():
+        outputs: list[dict[str, tuple[dict[str, float], dict[str, float]]]] = [None for _ in range(world_size)]
+        torch.cuda.set_device(local_rank)
+        dist.all_gather_object(outputs, data)
+    else:
+        outputs = [data]
+    return outputs

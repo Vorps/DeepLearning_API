@@ -2,7 +2,7 @@ from functools import partial
 import importlib
 import inspect
 import os
-from typing import Iterable, Iterator, Callable
+from typing import Any, Iterable, Iterator, Callable
 from typing_extensions import Self
 import torch
 from abc import ABC
@@ -10,12 +10,19 @@ import numpy as np
 from torch._jit_internal import _copy_to_script_wrapper
 
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import State, _getModule
+from DeepLearning_API.utils import State, _getModule, getDevice
+
 from DeepLearning_API.HDF5 import Accumulator, ModelPatch
 from collections import OrderedDict
 from torch.utils.checkpoint import checkpoint
 from typing import Union
+from enum import Enum
 
+class NetState(Enum):
+    TRAIN = 0,
+    EVALUATION = 1,
+    PREDICTION = 2
+    
 class OptimizerLoader():
     
     @config("Optimizer")
@@ -168,13 +175,13 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             self.requires_grad = requires_grad
             self.isCheckpoint = False
             self.isGPU_Checkpoint = False
-            self.gpu = "CPU"
+            self.gpu = "cpu"
             self.training = training
 
     def __init__(self) -> None:
         super().__init__()
         self._modulesArgs : dict[str, ModuleArgsDict.ModuleArgs] = dict()
-        self._training = True
+        self._training = NetState.TRAIN
 
     def _addindent(self, s_: str, numSpaces : int):
         s = s_.split('\n')
@@ -305,8 +312,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             for i, sinput in enumerate(inputs):
                 branchs[str(i)] = sinput
             out = inputs[0]
+            
             for name, module in self.items():
-                if self._modulesArgs[name].training is None or not (not self._modulesArgs[name].training and self._training):
+                if self._modulesArgs[name].training is None or (not (self._modulesArgs[name].training and self._training == NetState.PREDICTION) and not (not self._modulesArgs[name].training and self._training == NetState.TRAIN)):
                     requires_grad = self._modulesArgs[name].requires_grad
                     if requires_grad is not None and module:
                         module.requires_grad_(requires_grad)
@@ -314,7 +322,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                         if ib not in branchs:
                             branchs[ib] = inputs[0]
                     for branchs_key in branchs.keys():
-                        if str(branchs[branchs_key].device) != "cuda:"+self._modulesArgs[name].gpu:
+                        if str(self._modulesArgs[name].gpu) != 'cpu' and str(branchs[branchs_key].device) != "cuda:"+self._modulesArgs[name].gpu:
                             branchs[branchs_key] = branchs[branchs_key].to(int(self._modulesArgs[name].gpu))
                     if self._modulesArgs[name].isCheckpoint:
                         out = checkpoint(module, *[branchs[i] for i in self._modulesArgs[name].in_branch])
@@ -691,12 +699,12 @@ class Network(ModuleArgsDict, ABC):
         for k, v in module.items():
             if module._modulesArgs[k].isGPU_Checkpoint:
                 device+=1
-            module._modulesArgs[k].gpu = str(device)
+            module._modulesArgs[k].gpu = str(getDevice(device))
 
             if isinstance(v, ModuleArgsDict):
                 v = Network.to(v, device)
             else:
-                v = v.to(device)
+                v = v.to(getDevice(device))
         return module
                 
     def getName(self) -> str:
@@ -709,11 +717,12 @@ class Network(ModuleArgsDict, ABC):
     def _getName(self) -> str:
         return self.name
     
-    def setState(self, state: bool):
+    def setState(self, state: State):
         for module in self.modules():
             if isinstance(module, ModuleArgsDict):
                 module._training = state
-                
+
+
 class ModelLoader():
 
     @config("Model")
@@ -727,4 +736,17 @@ class ModelLoader():
         if not train: 
             model = partial(model, DL_without = DL_without)
         return model()
+
+class CPU_Model():
+
+    def __init__(self, model: Network) -> None:
+        self.module = model
+
+    def train(self):
+        self.module.train()
     
+    def eval(self):
+        self.module.eval()
+    
+    def __call__(self, data_dict: dict[tuple[str, bool], torch.Tensor], output_layers: list[str] = []) -> list[tuple[str, torch.Tensor]]:
+        return self.module(data_dict, output_layers)

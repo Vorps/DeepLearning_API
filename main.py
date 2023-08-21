@@ -1,74 +1,17 @@
+from DeepLearning_API.utils import setupAPI
+import torch.multiprocessing as mp
+from torch.cuda import device_count
 import argparse
-import os
-from DeepLearning_API import CONFIG_FILE
-from DeepLearning_API.trainer import Trainer
-from DeepLearning_API.predictor import Predictor
-from DeepLearning_API.metric import Metric
-from DeepLearning_API.utils import State
-
-def train(state : State):
-    os.environ["DEEP_LEARNING_API_ROOT"] = "Trainer"
-    with Trainer(config = CONFIG_FILE()) as trainer:
-        trainer.train(state)
-
-def predict():
-    os.environ["DEEP_LEARNING_API_ROOT"] = "Predictor"
-    with Predictor(config = CONFIG_FILE()) as predictor:
-        predictor.predict()
-
-def metric():
-    os.environ["DEEP_LEARNING_API_ROOT"] = "Metric"
-    with Metric(config = CONFIG_FILE()) as metric:
-        metric.measure()
 
 def main():
-    parser = argparse.ArgumentParser(description="DeepLearing API",
-                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    api_args = parser.add_argument_group('API arguments')
-    api_args.add_argument("type", type=State, choices=list(State))
-    api_args.add_argument('-y', action='store_true', help="Accept overwrite")
-    api_args.add_argument("-c", "--config", type=str, default="None", help="Configuration file location")
-    api_args.add_argument("-models_dir", "--MODELS_DIRECTORY", type=str, default="./Models/", help="Models location")
-    api_args.add_argument("-checkpoints_dir", "--CHECKPOINTS_DIRECTORY", type=str, default="./Checkpoints/", help="Checkpoints location")
-    api_args.add_argument("-url", "--URL_MODEL", type=str, default="", help="URL Model")
-    api_args.add_argument("-predictions_dir", "--PREDICTIONS_DIRECTORY", type=str, default="./Predictions/", help="Predictions location")
-    api_args.add_argument("-metrics_dir", "--METRICS_DIRECTORY", type=str, default="./Metrics/", help="Metrics location")
-    api_args.add_argument("-statistics_dir", "--STATISTICS_DIRECTORY", type=str, default="./Statistics/", help="Statistics location")
-    api_args.add_argument("-setups_dir", "--SETUPS_DIRECTORY", type=str, default="./Setups/", help="Setups location")
-    api_args.add_argument('--resubmit', action='store_true', help='Automatically resubmit job just before timout')
+    parser = argparse.ArgumentParser(description="DeepLearing API", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
-    args = parser.parse_args()
-    config = vars(args)
-
-    os.environ["DL_API_MODELS_DIRECTORY"] = config["MODELS_DIRECTORY"]
-    os.environ["DL_API_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]
-    os.environ["DL_API_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
-    os.environ["DL_API_METRICS_DIRECTORY"] = config["METRICS_DIRECTORY"]
-    os.environ["DL_API_STATISTICS_DIRECTORY"] = config["STATISTICS_DIRECTORY"]
-    
-    os.environ["DL_API_URL_MODEL"] = config["URL_MODEL"]
-
-    os.environ["DL_API_SETUPS_DIRECTORY"] = config["SETUPS_DIRECTORY"]
-
-    os.environ["DL_API_OVERWRITE"] = "{}".format(config["y"])
-    os.environ["DEEP_LEANING_API_CONFIG_MODE"] = "Done"
-    
-    if config["config"] == "None":
-        if config["type"] is State.PREDICTION:
-             os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Prediction.yml"
-        elif config["type"] is State.METRIC:
-            os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Metric.yml"
-        else:
-            os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Config.yml"
-    else:
-        os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = config["config"]
-    
-    if config["type"] is State.PREDICTION:
-        predict()
-    elif config["type"] is State.METRIC:
-        metric()
-    else:
-        train(config["type"])
+    with setupAPI(parser) as distributedObject:
+        world_size = device_count()
+        if world_size == 0:
+            world_size = 1
+        distributedObject.setup(world_size)
+        mp.spawn(distributedObject, nprocs=world_size)
 
 if __name__ == "__main__":
     main()

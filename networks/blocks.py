@@ -92,19 +92,6 @@ class ResBlock(network.ModuleArgsDict):
                 self.add_module("Conv_skip_{}".format(i), blockConfig.getConv(in_channels, out_channels, dim), alias=alias[3], in_branch=[1], out_branch=[1])    
             in_channels = out_channels
             self.add_module("Add_{}".format(i), Add(), in_branch=[0,1], out_branch=[0,1])
-
-class Attention(network.ModuleArgsDict):
-
-    def __init__(self, F_g : int, F_l : int, F_int : int, dim : int):
-        super().__init__()
-        self.add_module("W_x", getTorchModule("Conv", dim = dim)(in_channels = F_l, out_channels = F_int, kernel_size=1, stride=2, padding=0), in_branch=[0], out_branch=[0])
-        self.add_module("W_g", getTorchModule("Conv", dim = dim)(in_channels = F_g, out_channels = F_int, kernel_size=1, stride=1, padding=0), in_branch=[1], out_branch=[1])
-        self.add_module("Add", Add(), in_branch=[0,1])
-        self.add_module("ReLU", torch.nn.ReLU(inplace=True))
-        self.add_module("Conv", getTorchModule("Conv", dim = dim)(in_channels = F_int, out_channels = 1, kernel_size=1,stride=1, padding=0))
-        self.add_module("Sigmoid", torch.nn.Sigmoid())
-        self.add_module("Upsample", torch.nn.Upsample(scale_factor=2))
-        self.add_module("Multiply", Multiply(), in_branch=[2,0])
     
 def downSample(in_channels: int, out_channels: int, downSampleMode: DownSampleMode, dim: int) -> torch.nn.Module:
     if downSampleMode == DownSampleMode.MAXPOOL:
@@ -322,17 +309,57 @@ class LatentDistribution(network.ModuleArgsDict):
         self.add_module("z", LatentDistribution.LatentDistribution_Z(), in_branch=[1,2,3], out_branch=[3])
         self.add_module("Concat", Concat(), in_branch=[1,2,3])
         self.add_module("DecoderInput", LatentDistribution.LatentDistribution_DecoderInput(shape, latentDim), in_branch=[3])
+"""
 
-class AdaIN(torch.nn.Module):
-
-    def __init__(self) -> None:
+class Attention(nn.Module):
+    def __init__(self, dim, heads=4, dim_head=32):
         super().__init__()
-    
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        mean = torch.mean(input, dim=[2+i for i in range(len(input.shape)-2)])
-        sigma = torch.std(input, dim=[2+i for i in range(len(input.shape)-2)])
-        
-        print(mean)
-        print(sigma)
-        return torch.Tensor(0)
+        self.scale = dim_head**-0.5
+        self.heads = heads
+        hidden_dim = dim_head * heads
+        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
+        self.to_out = nn.Conv2d(hidden_dim, dim, 1)
 
+    def forward(self, x):
+        b, c, h, w = x.shape
+        qkv = self.to_qkv(x).chunk(3, dim=1)
+        q, k, v = map(
+            lambda t: rearrange(t, "b (h c) x y -> b h c (x y)", h=self.heads), qkv
+        )
+        q = q * self.scale
+
+        sim = einsum("b h d i, b h d j -> b h i j", q, k)
+        sim = sim - sim.amax(dim=-1, keepdim=True).detach()
+        attn = sim.softmax(dim=-1)
+
+        out = einsum("b h i j, b h d j -> b h i d", attn, v)
+        out = rearrange(out, "b h (x y) d -> b (h d) x y", x=h, y=w)
+        return self.to_out(out)
+
+class LinearAttention(nn.Module):
+    def __init__(self, dim, heads=4, dim_head=32):
+        super().__init__()
+        self.scale = dim_head**-0.5
+        self.heads = heads
+        hidden_dim = dim_head * heads
+        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
+
+        self.to_out = nn.Sequential(nn.Conv2d(hidden_dim, dim, 1), 
+                                    nn.GroupNorm(1, dim))
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+        qkv = self.to_qkv(x).chunk(3, dim=1)
+        q, k, v = map(
+            lambda t: rearrange(t, "b (h c) x y -> b h c (x y)", h=self.heads), qkv
+        )
+
+        q = q.softmax(dim=-2)
+        k = k.softmax(dim=-1)
+
+        q = q * self.scale
+        context = torch.einsum("b h d n, b h e n -> b h d e", k, v)
+
+        out = torch.einsum("b h d e, b h d n -> b h e n", context, q)
+        out = rearrange(out, "b h c (x y) -> b (h c) x y", h=self.heads, x=h, y=w)
+        return self.to_out(out)"""

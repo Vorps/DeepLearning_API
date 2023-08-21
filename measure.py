@@ -48,8 +48,11 @@ class MaskedLoss(Criterion):
     
 class MSE(MaskedLoss):
 
+    def _loss(reduction: str, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return torch.nn.MSELoss(reduction=reduction)(x, y)
+
     def __init__(self, reduction: str = "mean") -> None:
-        super().__init__(lambda x, y : torch.nn.MSELoss(reduction=reduction)(x, y), False)
+        super().__init__(partial(MSE._loss, reduction), False)
 
 class MAE(MaskedLoss):
 
@@ -210,14 +213,11 @@ class MedPerceptualLoss(Criterion):
         if not all([input.shape[-i-1] == size for i, size in enumerate(reversed(self.shape[2:]))]):
             input = F.interpolate(input, mode=self.mode, size=tuple(self.shape), align_corners=False).type(torch.float32)
         return input
-
-    def forward(self, input : torch.Tensor, *targets_tmp : torch.Tensor) -> torch.Tensor:
-        if not self.initdevice:
-            self.model = Network.to(self.model, input.device.index)
-            self.initdevice = True
+    
+    def _compute(self, input: torch.Tensor, targets: list[torch.Tensor]) -> torch.Tensor:
         loss = torch.zeros((1), requires_grad = True).to(input.device, non_blocking=False).type(torch.float32)
         input = self.preprocessing(input)
-        targets = [self.preprocessing(target) for target in targets_tmp]
+        targets = [self.preprocessing(target) for target in targets]
         
         for zipped_input in zip([input], *[[target] for target in targets]):
             input = zipped_input[0]
@@ -227,6 +227,18 @@ class MedPerceptualLoss(Criterion):
                 for i, target_layer in enumerate(zipped_layers[1:]):
                     target_layer = target_layer[1].view(target_layer[1].shape[0], target_layer[1].shape[1], int(np.prod(target_layer[1].shape[2:])))
                     loss += self.losses[i](input_layer.float(), target_layer.float())/input_layer.shape[0]
+        return loss
+    
+    def forward(self, input : torch.Tensor, *targets : torch.Tensor) -> torch.Tensor:
+        if not self.initdevice:
+            self.model = Network.to(self.model, input.device.index)
+            self.initdevice = True
+        loss = torch.zeros((1), requires_grad = True).to(input.device, non_blocking=False).type(torch.float32)
+        if len(input.shape) == 5:
+            for i in range(input.shape[2]):
+                loss += self._compute(input[:,:,i, ...], [t[:,:,i,...] for t in targets])/input.shape[2]
+        else:
+            loss = self._compute(input, targets)
         return loss
 
 class KLDivergence(Criterion):
@@ -241,7 +253,7 @@ class KLDivergence(Criterion):
         
     def init(self, model : Network, output_group : str, target_group : str) -> str:
         super().init(model, output_group, target_group)
-        model._compute_channels_trace(model, model.in_channels, None)
+        model._compute_channels_trace(model, model.in_channels, None, None)
         self.modelDim = model.dim
         last_module = model
         for name in output_group.split(".")[:-1]:

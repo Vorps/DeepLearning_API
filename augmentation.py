@@ -6,9 +6,9 @@ import SimpleITK as sitk
 from torch.functional import Tensor
 
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import _getModule, NeedDevice, Attribute
+from DeepLearning_API.utils import _getModule, NeedDevice, Attribute, data_to_image
 import torch.nn.functional as F
-from typing import Callable
+from typing import Union
 import os
 
 class Prob():
@@ -32,7 +32,7 @@ class DataAugmentationsList():
             dataAugmentation.load(prob.prob)
             self.dataAugmentations.append(dataAugmentation)
     
-    def to(self, device: torch.device):
+    def to(self, device: int):
         for dataAugmentation in self.dataAugmentations:
             dataAugmentation.setDevice(device)
 
@@ -41,14 +41,14 @@ class DataAugmentation(NeedDevice, ABC):
     def __init__(self) -> None:
         self.who_index: dict[int, list[int]] = {}
         self.shape_index: dict[int, list[list[int]]] = {}
-        self.prob: float = 0
+        self._prob: float = 0
 
     def load(self, prob: float):
-        self.prob = prob
+        self._prob = prob
 
     def state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         if index not in self.who_index:
-            self.who_index[index] = torch.where(torch.rand(len(shapes)) < self.prob)[0].tolist()
+            self.who_index[index] = torch.where(torch.rand(len(shapes)) < self._prob)[0].tolist()
         else:
             return self.shape_index[index]
         for i, shape in enumerate(self._state_init(index, [shapes[i] for i in self.who_index[index]], [caches_attribute[i] for i in self.who_index[index]])):
@@ -78,9 +78,9 @@ class DataAugmentation(NeedDevice, ABC):
     def _inverse(self, index: int, a: int, input : torch.Tensor) -> torch.Tensor:
         pass
 
-class RandomRotateTransform(DataAugmentation):
+class Rotate(DataAugmentation):
 
-    @config("RandomRotateTransform")
+    @config("Rotate")
     def __init__(self, min_angles: list[float] = [0, 0, 0], max_angles: list[float] = [360, 360, 360]) -> None:
         super().__init__()
         assert len(min_angles) == len(max_angles)
@@ -112,9 +112,9 @@ class RandomRotateTransform(DataAugmentation):
     def _inverse(self, index: int, a: int, input : torch.Tensor) -> torch.Tensor:
         pass
 
-class RandomElastixTransform(DataAugmentation):
+class Elastix(DataAugmentation):
 
-    @config("RandomElastixTransform")
+    @config("Elastix")
     def __init__(self, grid_spacing: int = 16, max_displacement: int = 16) -> None:
         super().__init__()
         self.grid_spacing = grid_spacing
@@ -136,13 +136,10 @@ class RandomElastixTransform(DataAugmentation):
             dim = len(shape)
 
             grid_physical_spacing = [self.grid_spacing]*dim
-            image_physical_size = [size*spacing for size, spacing in zip(shape, cache_attribute["Spacing"])]
+            image_physical_size = [size*spacing for size, spacing in zip(shape, cache_attribute.get_np_array("Spacing"))]
             mesh_size = [int(image_size/grid_spacing + 0.5) for image_size,grid_spacing in zip(image_physical_size, grid_physical_spacing)]
             
-            ref_image = sitk.GetImageFromArray(np.zeros(shape))
-            ref_image.SetOrigin([float(v) for v in cache_attribute["Origin"]])
-            ref_image.SetSpacing([float(v) for v in cache_attribute["Spacing"]])
-            ref_image.SetDirection([float(v) for v in cache_attribute["Direction"]])
+            ref_image = data_to_image(np.zeros(shape), cache_attribute)
 
             bspline_transform = sitk.BSplineTransformInitializer(image1 = ref_image, transformDomainMeshSize = mesh_size, order=3)
             displacement_filter = sitk.TransformToDisplacementFieldFilter()
@@ -159,7 +156,7 @@ class RandomElastixTransform(DataAugmentation):
             control_points *= 2*self.max_displacement
             bspline_transform.SetParameters(control_points.flatten().tolist())
             new_locs = grid+torch.unsqueeze(torch.from_numpy(sitk.GetArrayFromImage(displacement_filter.Execute(bspline_transform))), 0).type(torch.float32)
-            self.displacement_fields[index].append(RandomElastixTransform._formatLoc(new_locs, shape))
+            self.displacement_fields[index].append(Elastix._formatLoc(new_locs, shape))
             print("Compute in progress : {:.2f} %".format((i+1)/len(shapes)*100))
         return shapes
     
@@ -172,44 +169,68 @@ class RandomElastixTransform(DataAugmentation):
     def _inverse(self, index: int, a: int, input : torch.Tensor) -> torch.Tensor:
         pass
 
-class RandomFlipTransform(DataAugmentation):
+class Flip(DataAugmentation):
 
-    @config("RandomFlipTransform")
-    def __init__(self, flip: list[float] = [0.5, 0.25 ,0.25]) -> None:
+    @config("Flip")
+    def __init__(self, prob_flip: Union[list[float], None] = [0.33, 0.33 ,0.33]) -> None:
         super().__init__()
-        self.flip = flip
-        self.dim_flip : dict[int, torch.Tensor] = {}
+        self.prob_flip = prob_flip
+        self.flip : dict[int, torch.Tensor] = {}
 
     def _state_init(self, index : int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
-        self.dim_flip[index] = torch.rand((len(shapes), len(self.flip))) < torch.tensor(self.flip)
+        if len(shapes):
+            dim = len(shapes[0])
+            if self.prob_flip:
+                assert dim == len(self.prob_flip), "Dim images != prob_flip"
+                self.flip[index] = torch.rand((len(shapes), len(self.prob_flip))) < torch.tensor(self.prob_flip)
+            else:
+                assert dim == len(shapes), "Nb images != dim-1"
+                self.flip[index] = torch.eye(dim, dtype=torch.bool)
         return shapes
     
     def _compute(self, index: int, inputs : list[torch.Tensor]) -> torch.Tensor:
         results = []
-        for input, dim_flip in zip(inputs, self.dim_flip[index]):
-            results.append(torch.flip(input, tuple([i+1 for i, v in enumerate(dim_flip) if v])))
+        for input, prob in zip(inputs, self.flip[index]):
+            results.append(torch.flip(input, tuple([i+1 for i, v in enumerate(prob) if v])))
         return results
     
     def _inverse(self, index: int, a: int, input : torch.Tensor) -> torch.Tensor:
-        pass
+        return torch.flip(input, tuple([i+1 for i, v in enumerate(self.flip[index][a]) if v]))
 
-class PermuteTransform(DataAugmentation):
+class Permute(DataAugmentation):
 
-    @config("PermuteTransform")
-    def __init__(self, dims: list[str] = ["1|0|2", "2|0|1"]) -> None:
+    @config("Permute")
+    def __init__(self, prob_permute: Union[list[float], None] = [0.33 ,0.33]) -> None:
         super().__init__()
-        self.dims = [[0]+[int(d)+1 for d in dim.split("|")] for dim in dims]
+        self._permute_dims = torch.tensor([[0, 2, 1, 3], [0, 3, 1, 2]])
+        self.prob_permute = prob_permute
+        self.permute: dict[int, torch.Tensor] = {}
 
     def _state_init(self, index : int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
-        for i, shape in enumerate(shapes):
-            shapes[i] = [shape[it-1] for it in self.dims[i][1:]]
+        if len(shapes):
+            dim = len(shapes[0])
+            assert dim == 3, "The permute augmentation only support 3D images"
+            if self.prob_permute:
+                assert len(self.prob_permute) == 2, "len of prob_permute must be equal 2"
+                self.permute[index] = torch.rand((len(shapes), len(self.prob_permute))) < torch.tensor(self.prob_permute)
+            else:
+                assert len(shapes) == 2, "The number of augmentation images must be equal to 2"
+                self.permute[index] = torch.eye(2, dtype=torch.bool)
+            for i, prob in enumerate(self.permute[index]):
+                for permute in self._permute_dims[prob]:
+                    shapes[i] = [shapes[i][dim-1] for dim in permute[1:]]
         return shapes
     
     def _compute(self, index: int, inputs : list[torch.Tensor]) -> torch.Tensor:
         results = []
-        for i, input in enumerate(inputs):
-            results.append(input.permute(tuple(self.dims[i])))
+        for input, prob in zip(inputs, self.permute[index]):
+            res = input
+            for permute in self._permute_dims[prob]:
+                res = res.permute(tuple(permute))
+            results.append(res)
         return results
     
     def _inverse(self, index: int, a: int, input : torch.Tensor) -> torch.Tensor:
-        return input.permute(tuple(np.argsort(self.dims[a])))
+        for permute in reversed(self._permute_dims[self.permute[index][a]]):
+            input.permute(tuple(np.argsort(permute)))
+        return input
