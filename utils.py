@@ -394,6 +394,8 @@ class DatasetUtils():
                 file.data_to_file("{}/{}".format(group, name), data, attributes)
     
     def readData(self, groups : str, name : str) -> tuple[np.ndarray, Attribute]:
+        if not os.path.exists(self.filename):
+            raise NameError("Dataset {} not found".format(self.filename))
         if self.is_directory:
             for subDirectory in self._getSubDirectories(groups):
                 group = groups.split("/")[-1]
@@ -405,7 +407,9 @@ class DatasetUtils():
                 result = file.file_to_data(groups, name)
         return result
     
-    def readTransform(self, group : str, name : str) -> sitk.Transform: 
+    def readTransform(self, group : str, name : str) -> sitk.Transform:
+        if not os.path.exists(self.filename):
+            raise NameError("Dataset {} not found".format(self.filename))
         transformParameters, attribute = self.readData(group, name)
         transforms_type = [v for k, v in attribute.items() if k.endswith(":Transform_0")]
         transforms = []
@@ -503,7 +507,7 @@ def memoryForecast(memory_init : float, i : float, size : float) -> str:
     forecast = memory_init + ((current_memory-memory_init)*size/i) if i > 0 else 0
     return "Memory forecast ({:.2f}G ({:.2f} %))".format(forecast, forecast/(psutil.virtual_memory()[0]/2**30)*100)
 
-def gpuInfo(device : Union[int, torch.device]) -> str:
+def gpuInfo(device : Union[int, torch.device], showMemory: bool = True) -> str:
     if isinstance(device, torch.device):
         if str(device).startswith("cuda:"):
             device = int(str(device).replace("cuda:", ""))
@@ -514,7 +518,34 @@ def gpuInfo(device : Union[int, torch.device]) -> str:
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
     else:
         return ""
-    return  "Node: {} GPU({}) Memory GPU ({:.2f}G ({:.2f} %)) | {} ".format(os.environ["SLURMD_NODENAME"], device, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, memoryInfo())
+    return  "Node: {} GPU({}) Memory GPU ({:.2f}G ({:.2f} %)){}".format(os.environ["SLURMD_NODENAME"], device, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, " | {}".format(memoryInfo()) if showMemory else "")
+
+def getMaxGPUMemory(device : Union[int, torch.device]) -> float:
+    if isinstance(device, torch.device):
+        if str(device).startswith("cuda:"):
+            device = int(str(device).replace("cuda:", ""))
+        else:
+            return 0
+    if device < pynvml.nvmlDeviceGetCount():
+        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+        memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+    else:
+        return 0
+    return float(memory.total)/(10**9)
+
+
+def getGPUMemory(device : Union[int, torch.device]) -> float:
+    if isinstance(device, torch.device):
+        if str(device).startswith("cuda:"):
+            device = int(str(device).replace("cuda:", ""))
+        else:
+            return 0
+    if device < pynvml.nvmlDeviceGetCount():
+        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+        memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+    else:
+        return 0
+    return float(memory.used)/(10**9)
 
 
 class NeedDevice(ABC):
@@ -536,6 +567,7 @@ class State(Enum):
     FINE_TUNNING = "FINE_TUNNING"
     PREDICTION = "PREDICTION"
     METRIC = "METRIC"
+    HYPERPARAMETER = "HYPERPARAMETER"
     
     def __str__(self) -> str:
         return self.value
@@ -604,7 +636,7 @@ def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overla
     
     return patch_slices, nb_patch_per_dim
 
-def transformCompose(path: str, transforms_files : dict[str, bool]) -> sitk.CompositeTransform:
+def transformCompose(path: str, transforms_files : dict[str, bool], image: sitk.Image = None) -> sitk.CompositeTransform:
     transforms = []
     for transform_file, invert in transforms_files.items():
         transform = sitk.ReadTransform(path+transform_file+".itk.txt")
@@ -638,7 +670,7 @@ def transformCompose(path: str, transforms_files : dict[str, bool]) -> sitk.Comp
     return sitk.CompositeTransform(transforms)
 
 def resampleITK(path: str, image_reference : sitk.Image, image : sitk.Image, transforms_files : dict[str, bool], mask = True):
-    return sitk.Resample(image, image_reference, transformCompose(path, transforms_files), sitk.sitkNearestNeighbor if mask else sitk.sitkBSpline, defaultPixelValue =  0 if mask else -1024)
+    return sitk.Resample(image, image_reference, transformCompose(path, transforms_files, image), sitk.sitkNearestNeighbor if mask else sitk.sitkBSpline, defaultPixelValue =  0 if mask else -1024)
 
 def formatMaskLabel(mask: sitk.Image, labels: list[tuple[int, int]]) -> sitk.Image:
     data = sitk.GetArrayFromImage(mask)
@@ -748,7 +780,6 @@ class DistributedObject():
     def setup(self, world_size: int):
         pass
     
-    @abstractmethod
     def __enter__(self):
         if "DEEP_LEANING_TENSORBOARD_PORT" in os.environ:
             def start_tb():
@@ -773,6 +804,7 @@ class DistributedObject():
             for name, network in model.getNetworks().items():
                 if network.measure is not None:
                     data["{}{}".format(name, label)] = (network.measure.format(isLoss=True), network.measure.format(isLoss=False))
+            print(data)
             model.measureClear()
         outputs = synchronize_data(world_size, local_rank, data)
         result = {}
@@ -855,6 +887,8 @@ def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
              os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Prediction.yml"
         elif config["type"] is State.METRIC:
             os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Metric.yml"
+        elif config["type"] is State.HYPERPARAMETER:
+            os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Hyperparameter.yml"
         else:
             os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Config.yml"
     else:
@@ -868,6 +902,10 @@ def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
         from DeepLearning_API.metric import Metric
         os.environ["DEEP_LEARNING_API_ROOT"] = "Metric"
         return Metric(config=CONFIG_FILE())
+    elif config["type"] is State.HYPERPARAMETER:
+        from DeepLearning_API.hyperparameter import Hyperparameter
+        os.environ["DEEP_LEARNING_API_ROOT"] = "Hyperparameter"
+        return Hyperparameter(config=CONFIG_FILE())
     else:
         from DeepLearning_API.trainer import Trainer
         os.environ["DEEP_LEARNING_API_ROOT"] = "Trainer"
@@ -888,6 +926,7 @@ def setupGPU(world_size: int, port: int, rank: Union[int, None] = None) -> tuple
         return None, None
     print("tcp://{}:{}".format(host_name, port))
     if torch.cuda.is_available():
+        torch.cuda.empty_cache()
         dist.init_process_group("nccl", rank=global_rank, init_method="tcp://{}:{}".format(host_name, port), world_size=world_size)
     return global_rank, local_rank
 

@@ -13,8 +13,8 @@ from DeepLearning_API.networks.network import ModelLoader, Network
 from typing import Callable, Union
 from functools import partial
 import torch.nn.functional as F
-import itertools
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+import copy
 
 modelsRegister = {}
 
@@ -150,6 +150,17 @@ class BCE(Criterion):
         target = self._buffers["target"]
         return self.loss(input, target.to(input.device).expand_as(input))
 
+class PatchGanLoss(Criterion):
+
+    def __init__(self, target : float = 0) -> None:
+        super().__init__()
+        self.loss = torch.nn.MSELoss()
+        self.register_buffer('target', torch.tensor(target).type(torch.float32))
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        target = self._buffers["target"]
+        return self.loss(input, (torch.ones_like(input)*target).to(input.device))
+
 class WGP(Criterion):
 
     def __init__(self) -> None:
@@ -204,11 +215,13 @@ class MedPerceptualLoss(Criterion):
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         self.model.eval()
         self.model.requires_grad_(False)
-        self.initdevice = False
+        self.models: dict[int, torch.nn.Module] = {}
 
     def preprocessing(self, input: torch.Tensor) -> torch.Tensor:
         input = input.repeat(1, 3, *[1 for _ in range(len(input.shape)-2)])
-        input = (input-torch.min(input))/(torch.max(input)-torch.min(input))
+        input = input-torch.min(input)
+        if torch.max(input) - torch.min(input) > 0.0001:
+            input= input/(torch.max(input)-torch.min(input))
         input = (input-self.mean.to(input.device))/self.std.to(input.device)
         if not all([input.shape[-i-1] == size for i, size in enumerate(reversed(self.shape[2:]))]):
             input = F.interpolate(input, mode=self.mode, size=tuple(self.shape), align_corners=False).type(torch.float32)
@@ -218,28 +231,29 @@ class MedPerceptualLoss(Criterion):
         loss = torch.zeros((1), requires_grad = True).to(input.device, non_blocking=False).type(torch.float32)
         input = self.preprocessing(input)
         targets = [self.preprocessing(target) for target in targets]
-        
         for zipped_input in zip([input], *[[target] for target in targets]):
             input = zipped_input[0]
             targets = zipped_input[1:]
-            for zipped_layers in list(zip(self.model.get_layers([input], self.module_names.copy()), *[self.model.get_layers([target], self.module_names.copy()) for target in targets])):
+           
+            for zipped_layers in list(zip(self.models[input.device.index].get_layers([input], self.module_names.copy()), *[self.models[input.device.index].get_layers([target], self.module_names.copy()) for target in targets])):
                 input_layer = zipped_layers[0][1].view(zipped_layers[0][1].shape[0], zipped_layers[0][1].shape[1], int(np.prod(zipped_layers[0][1].shape[2:])))
                 for i, target_layer in enumerate(zipped_layers[1:]):
                     target_layer = target_layer[1].view(target_layer[1].shape[0], target_layer[1].shape[1], int(np.prod(target_layer[1].shape[2:])))
-                    loss += self.losses[i](input_layer.float(), target_layer.float())/input_layer.shape[0]
+                    loss = loss+self.losses[i](input_layer.float(), target_layer.float())/input_layer.shape[0]
         return loss
     
     def forward(self, input : torch.Tensor, *targets : torch.Tensor) -> torch.Tensor:
-        if not self.initdevice:
-            self.model = Network.to(self.model, input.device.index)
-            self.initdevice = True
+        if input.device.index not in self.models:
+            del os.environ["device"]
+            self.models[input.device.index] = Network.to(copy.deepcopy(self.model).eval(), input.device.index)
+
         loss = torch.zeros((1), requires_grad = True).to(input.device, non_blocking=False).type(torch.float32)
         if len(input.shape) == 5:
             for i in range(input.shape[2]):
-                loss += self._compute(input[:,:,i, ...], [t[:,:,i,...] for t in targets])/input.shape[2]
+                loss = loss + self._compute(input[:, :, i, ...], [t[:, :, i, ...] for t in targets])/input.shape[2]
         else:
             loss = self._compute(input, targets)
-        return loss
+        return loss.to(input)
 
 class KLDivergence(Criterion):
     

@@ -188,7 +188,7 @@ class Flip(DataAugmentation):
                 self.flip[index] = torch.eye(dim, dtype=torch.bool)
         return shapes
     
-    def _compute(self, index: int, inputs : list[torch.Tensor]) -> torch.Tensor:
+    def _compute(self, index: int, inputs : list[torch.Tensor]) -> list[torch.Tensor]:
         results = []
         for input, prob in zip(inputs, self.flip[index]):
             results.append(torch.flip(input, tuple([i+1 for i, v in enumerate(prob) if v])))
@@ -221,7 +221,7 @@ class Permute(DataAugmentation):
                     shapes[i] = [shapes[i][dim-1] for dim in permute[1:]]
         return shapes
     
-    def _compute(self, index: int, inputs : list[torch.Tensor]) -> torch.Tensor:
+    def _compute(self, index: int, inputs : list[torch.Tensor]) -> list[torch.Tensor]:
         results = []
         for input, prob in zip(inputs, self.permute[index]):
             res = input
@@ -232,5 +232,5 @@ class Permute(DataAugmentation):
     
     def _inverse(self, index: int, a: int, input : torch.Tensor) -> torch.Tensor:
         for permute in reversed(self._permute_dims[self.permute[index][a]]):
-            input.permute(tuple(np.argsort(permute)))
+            input = input.permute(tuple(np.argsort(permute)))
         return input

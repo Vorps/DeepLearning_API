@@ -121,7 +121,7 @@ class OutSameAsGroupDataset(OutDataset):
                 layer = transform.inverse(self.names[index_dataset], layer, self.attributes[index_dataset][index_augmentation][index_patch])
                 
         self.output_layer_accumulator[index_dataset][index_augmentation].addLayer(index_patch, layer)
-    
+  
     def _getOutput(self, index: int, index_augmentation: int, dataset: DataSet) -> torch.Tensor:
         layer = self.output_layer_accumulator[index][index_augmentation].assemble()
         name = self.names[index]
@@ -197,7 +197,7 @@ class OutDatasetLoader():
 
 class _Predictor():
 
-    def __init__(self, world_size: int, global_rank: int, local_rank: int, predict_path: str, data_log: Union[list[str], None], groupsInput: list[str], outsDataset: dict[str, OutDataset], model: DDP, dataloader_prediction: DataLoader) -> None:
+    def __init__(self, world_size: int, global_rank: int, local_rank: int, predict_path: str, data_log: Union[list[str], None], outsDataset: dict[str, OutDataset], model: DDP, dataloader_prediction: DataLoader) -> None:
         self.world_size = world_size        
         self.global_rank = global_rank
         self.local_rank = local_rank
@@ -205,7 +205,6 @@ class _Predictor():
         self.model = model
         self.dataloader_prediction = dataloader_prediction
         self.outsDataset = outsDataset
-        self.groupsInput = groupsInput
 
         
         self.it = 0
@@ -227,10 +226,8 @@ class _Predictor():
         if self.tb:
             self.tb.close()
 
-    def getInput(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> dict[tuple[str, bool], torch.Tensor]:
-        inputs = {(k, True) : data_dict[k][0] for k in self.groupsInput}
-        inputs.update({(k, False) : v[0] for k, v in data_dict.items() if k not in self.groupsInput})
-        return inputs
+    def getInput(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int, str, bool]]) -> dict[tuple[str, bool], torch.Tensor]:
+        return {(k, v[5][0].item()) : v[0] for k, v in data_dict.items()}
     
     @torch.no_grad()
     def run(self):
@@ -271,7 +268,7 @@ class _Predictor():
                     self.tb.add_scalars("Prediction/{}/Loss".format(name), measures["{}".format(name)][0], self.it)
                     self.tb.add_scalars("Prediction/{}/Metric".format(name), measures["{}".format(name)][1], self.it)
                 if len(images_log):
-                    for name, layer in self.model.module.get_layers([v.to(0) for k, v in self.getInput(data_dict).items() if k[1]], images_log):
+                    for name, layer, _ in self.model.module.get_layers([v.to(0) for k, v in self.getInput(data_dict).items() if k[1]], images_log):
                         self.data_log[name][0](self.tb, "Prediction/{}".format(name), layer[:self.data_log[name][1]].detach().cpu().numpy(), self.it)
         
 class Predictor(DistributedObject):
@@ -280,7 +277,6 @@ class Predictor(DistributedObject):
     def __init__(self, 
                     model: ModelLoader = ModelLoader(),
                     dataset: DataPrediction = DataPrediction(),
-                    groupsInput: list[str] = ["default"],
                     train_name: str = "name",
                     manual_seed : Union[int, None] = None,
                     gpu_checkpoints: Union[list[str], None] = None,
@@ -292,7 +288,6 @@ class Predictor(DistributedObject):
         self.manual_seed = manual_seed
         self.dataset = dataset
 
-        self.groupsInput = groupsInput
         self.model = model.getModel(train=False)
         self.it = 0
         self.outsDatasetLoader = outsDataset if outsDataset else {}
@@ -364,7 +359,7 @@ class Predictor(DistributedObject):
         model = Network.to(self.model, local_rank)
         if torch.cuda.is_available():
             model = DDP(model)
-        with _Predictor(world_size, global_rank, local_rank, self.predict_path, self.images_log, self.groupsInput, self.outsDataset, model, *dataloaders) as p:
+        with _Predictor(world_size, global_rank, local_rank, self.predict_path, self.images_log, self.outsDataset, model, *dataloaders) as p:
             p.run()
 
         

@@ -171,8 +171,16 @@ class Print(torch.nn.Module):
         super().__init__()
     
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        print(input)
+        print(input.shape)
         return input
+    
+class Exit(torch.nn.Module):
+
+    def __init__(self) -> None:
+        super().__init__()
+    
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        exit(0)
     
 class Detach(torch.nn.Module):
 
@@ -309,9 +317,23 @@ class LatentDistribution(network.ModuleArgsDict):
         self.add_module("z", LatentDistribution.LatentDistribution_Z(), in_branch=[1,2,3], out_branch=[3])
         self.add_module("Concat", Concat(), in_branch=[1,2,3])
         self.add_module("DecoderInput", LatentDistribution.LatentDistribution_DecoderInput(shape, latentDim), in_branch=[3])
-"""
 
-class Attention(nn.Module):
+
+
+class Attention(network.ModuleArgsDict):
+
+    def __init__(self, F_g : int, F_l : int, F_int : int, dim : int):
+        super().__init__()
+        self.add_module("W_x", getTorchModule("Conv", dim = dim)(in_channels = F_l, out_channels = F_int, kernel_size=1, stride=2, padding=0), in_branch=[0], out_branch=[0])
+        self.add_module("W_g", getTorchModule("Conv", dim = dim)(in_channels = F_g, out_channels = F_int, kernel_size=1, stride=1, padding=0), in_branch=[1], out_branch=[1])
+        self.add_module("Add", Add(), in_branch=[0,1])
+        self.add_module("ReLU", torch.nn.ReLU(inplace=True))
+        self.add_module("Conv", getTorchModule("Conv", dim = dim)(in_channels = F_int, out_channels = 1, kernel_size=1,stride=1, padding=0))
+        self.add_module("Sigmoid", torch.nn.Sigmoid())
+        self.add_module("Upsample", torch.nn.Upsample(scale_factor=2))
+        self.add_module("Multiply", Multiply(), in_branch=[2,0])
+        
+"""class Attention(nn.Module):
     def __init__(self, dim, heads=4, dim_head=32):
         super().__init__()
         self.scale = dim_head**-0.5

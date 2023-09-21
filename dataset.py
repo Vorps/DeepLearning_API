@@ -19,11 +19,13 @@ class GroupTransform:
 
     @config()
     def __init__(self,  pre_transforms : Union[dict[str, TransformLoader], list[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
-                        post_transforms : Union[dict[str, TransformLoader], list[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()}) -> None:
+                        post_transforms : Union[dict[str, TransformLoader], list[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
+                        isInput: bool = True) -> None:
         self._pre_transforms = pre_transforms
         self._post_transforms = post_transforms
         self.pre_transforms : list[Transform] = []
         self.post_transforms : list[Transform] = []
+        self.isInput = isInput
         
     def load(self, group_src : str, group_dest : str, datasetsUtils: list[DatasetUtils]):
         if self._pre_transforms is not None:
@@ -130,7 +132,7 @@ class DataSet(data.Dataset):
     def __len__(self) -> int:
         return len(self.map)
 
-    def __getitem__(self, index : int) -> dict[str, tuple[torch.Tensor, int, int, int, str]]:
+    def __getitem__(self, index : int) -> dict[str, tuple[torch.Tensor, int, int, int, str, bool]]:
         data = {}
         x, a, p = self.map[index]
         if x not in self._index_cache:
@@ -141,7 +143,7 @@ class DataSet(data.Dataset):
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 dataset = self.data[group_dest][x]
-                data["{}".format(group_dest)] = (dataset.getData(p, a, self.groups_src[group_src][group_dest].post_transforms), x, a, p, dataset.name)
+                data["{}".format(group_dest)] = (dataset.getData(p, a, self.groups_src[group_src][group_dest].post_transforms, self.groups_src[group_src][group_dest].isInput), x, a, p, dataset.name, self.groups_src[group_src][group_dest].isInput)
         return data
 
 class Subset():
@@ -330,13 +332,13 @@ class Data(ABC):
                 for a, b in enumerate(indexs):
                     map_tmp_array[np.where(np.asarray(map_tmp_array)[:, 0] == b), 0] = a
                 self.map[i].append([(a,b,c) for a,b,c in map_tmp_array])
-                
 
         dataLoaders: list[list[DataLoader]] = []
         for i, (datas, maps) in enumerate(zip(self.data, self.map)):
             dataLoaders.append([])
             for data, map in zip(datas, maps):
-                dataLoaders[i].append(DataLoader(dataset=DataSet(rank=i, data=data, map=map, **self.dataSet_args), sampler=CustomSampler(len(map), True), batch_size=self.batch_size,**self.dataLoader_args))
+                dataLoaders[i].append(DataLoader(dataset=DataSet(rank=i, data=data, map=map, **self.dataSet_args), sampler=CustomSampler(len(map), self.subset.shuffle), batch_size=self.batch_size,**self.dataLoader_args))
+        print(len(dataLoaders))
         return dataLoaders
 
 class DataTrain(Data):
@@ -378,3 +380,12 @@ class DataMetric(Data):
                         num_workers : int = 4) -> None:
 
         super().__init__(dataset_filenames, groups_src, None, False, subset, num_workers, False, 1)
+
+class DataHyperparameter(Data):
+
+    @config("Dataset")
+    def __init__(self,  dataset_filenames : list[str] = ["default:Dataset.h5"], 
+                        groups_src : dict[str, Group] = {"default" : Group()},
+                        patch : Union[DatasetPatch, None] = DatasetPatch()) -> None:
+
+        super().__init__(dataset_filenames, groups_src, patch, False, PredictionSubset(), 0, False, 1)

@@ -10,7 +10,7 @@ import numpy as np
 from torch._jit_internal import _copy_to_script_wrapper
 
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import State, _getModule, getDevice
+from DeepLearning_API.utils import State, _getModule, getDevice, gpuInfo, getGPUMemory
 
 from DeepLearning_API.HDF5 import Accumulator, ModelPatch
 from collections import OrderedDict
@@ -22,7 +22,16 @@ class NetState(Enum):
     TRAIN = 0,
     EVALUATION = 1,
     PREDICTION = 2
-    
+
+class Patch_Indexed():
+
+    def __init__(self, patch: ModelPatch, index: int) -> None:
+        self.patch = patch
+        self.index = index
+
+    def isFull(self) -> bool:
+        return len(self.patch.getPatch_slices(0)) == self.index
+
 class OptimizerLoader():
     
     @config("Optimizer")
@@ -30,7 +39,7 @@ class OptimizerLoader():
         self.name = name
     
     def getOptimizer(self, key: str, parameter: Iterator[torch.nn.parameter.Parameter]) -> torch.optim.Optimizer:
-        return config("Trainer.Model.{}.Optimizer".format(key))(getattr(importlib.import_module('torch.optim'), self.name))(parameter, config = None)
+        return config("{}.Model.{}.Optimizer".format(os.environ["DEEP_LEARNING_API_ROOT"], key))(getattr(importlib.import_module('torch.optim'), self.name))(parameter, config = None)
         
 class SchedulerStep():
     
@@ -54,13 +63,14 @@ class SchedulersLoader():
 class CriterionsAttr():
 
     @config()
-    def __init__(self, l: float = 1.0, isLoss: bool = True, group: int = 0, stepStart:int = 0, stepStop: Union[int, None] = None) -> None:
+    def __init__(self, l: float = 1.0, isLoss: bool = True, group: int = 0, stepStart:int = 0, stepStop: Union[int, None] = None, accumulation: bool = False) -> None:
         self.l = l
         self.isTorchCriterion = True
         self.isLoss = isLoss
         self.stepStart = stepStart
         self.stepStop = stepStop
         self.group = group
+        self.accumulation = accumulation
         
 class CriterionsLoader():
 
@@ -90,13 +100,47 @@ class TargetCriterionsLoader():
 
 class Measure():
 
+    class Loss():
+
+        def __init__(self, name: str, output_group: str, target_group: str, group: int, isLoss: bool, accumulation: bool) -> None:
+            self.name = name
+            self.isLoss = isLoss
+            self.accumulation = accumulation
+            self.output_group = output_group
+            self.target_group = target_group
+            self.group = group
+
+            self._loss: list[torch.Tensor] = []
+            self._values: list[float] = []
+        
+        def resetLoss(self) -> None:
+            self._loss.clear()
+
+        def resetMetrics(self) -> None:
+            self._values.clear()
+
+        def add(self, value: torch.Tensor) -> None:
+            self._loss.append(value if self.isLoss else value.detach())
+
+        def getLastLoss(self) -> torch.Tensor:
+            return self._loss[-1] if len(self._loss) else torch.zeros((1), requires_grad = True) 
+        
+        def getLoss(self) -> torch.Tensor:
+            return torch.stack(self._loss, dim=0).mean(dim=0) if len(self._loss) else torch.zeros((1), requires_grad = True) 
+        
+        def updateValue(self) -> None:
+            self._values.append(self.getLoss().item())
+
+        def __len__(self) -> int:
+            return len(self._loss)
+        
+        
     def __init__(self, model_classname : str, outputsCriterions: dict[str, TargetCriterionsLoader]) -> None:
         super().__init__()
         self.outputsCriterions = {}
         for output_group, targetCriterionsLoader in outputsCriterions.items():
             self.outputsCriterions[output_group.replace(":", ".")] = targetCriterionsLoader.getTargetsCriterions(output_group, model_classname)
-        self.values : dict[str, list[float]] = dict()
-        self.loss : dict[int, torch.Tensor] = {}
+        self._loss : dict[int, dict[str, Measure.Loss]] = {}
 
     def init(self, model : torch.nn.Module) -> None:
         outputs_group_rename = {}
@@ -113,50 +157,68 @@ class Measure():
         for output_group in self.outputsCriterions:
             for target_group in self.outputsCriterions[output_group]:
                 for criterion, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
-                    self.values["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)] = []
-                    self.loss[criterionsAttr.group] = torch.zeros((1), requires_grad = True)
+                    if criterionsAttr.group not in self._loss:
+                        self._loss[criterionsAttr.group] = {}
+                    self._loss[criterionsAttr.group]["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)] = Measure.Loss(criterion.__class__.__name__, output_group, target_group, criterionsAttr.group, criterionsAttr.isLoss, criterionsAttr.accumulation) 
 
-    def update(self, output_group: str, output : torch.Tensor, data_dict: dict[str, torch.Tensor], it: int) -> None:
+    def update(self, output_group: str, output : torch.Tensor, data_dict: dict[str, torch.Tensor], it: int, nb_patch: int) -> None:
         for target_group in self.outputsCriterions[output_group]:
             target = [data_dict[group].to(output.device) for group in target_group.split("/") if group in data_dict]
             for criterion, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
                 if it >= criterionsAttr.stepStart and (criterionsAttr.stepStop is None or it <= criterionsAttr.stepStop):
-                    result = criterion(output, *target)
-                    if criterionsAttr.isLoss:
-                        self.loss[criterionsAttr.group] = self.loss[criterionsAttr.group].to(result.device)+criterionsAttr.l*result
-                    self.values["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)].append(criterionsAttr.l*result.item())
+                    self._loss[criterionsAttr.group]["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)].add(criterionsAttr.l*criterion(output, *target))
+                    if len(np.unique([len(l) for l in self._loss[criterionsAttr.group].values() if l.accumulation and l.isLoss])) == 1:
+                        loss = torch.zeros((1), requires_grad = True)
+                        for v in [l for l in self._loss[criterionsAttr.group].values() if l.accumulation and l.isLoss]:
+                            l = v.getLastLoss()
+                            loss = loss.to(l.device)+l
+                        if criterionsAttr.isLoss:
+                            loss = loss/nb_patch
+                            loss.backward()
+                    
+    def getLoss(self) -> list[torch.Tensor]:
+        loss: dict[int, torch.Tensor] = {}
+        for group in self._loss.keys():
+            loss[group] = torch.zeros((1), requires_grad = True)
+            for v in self._loss[group].values():
+                v.updateValue()
+                if v.isLoss and not v.accumulation:
+                    l = v.getLoss()
+                    loss[v.group] = loss[v.group].to(l.device)+l
+        return loss.values()
+    
+
+    def getLastLoss(self) -> float:
+        loss = 0
+        for group in self._loss.keys():
+            for v in self._loss[group].values():
+                if v.isLoss:
+                    loss+=v.getLoss().item()
+        return loss
     
     def resetLoss(self) -> None:
-        for group in self.loss:
-            self.loss[group] = torch.zeros((1), requires_grad = True)
+        for group in self._loss.keys():
+            for v in self._loss[group].values():
+                v.resetLoss()
         
-    def getLastValue(self) -> float:
-        return sum([self.loss[group].item() for group in self.loss])
-    
+    def resetMetrics(self) -> None:
+        for group in self._loss.keys():
+            for v in self._loss[group].values():
+                v.resetMetrics()
+        
     def getLastMetrics(self, n: int = 1) -> dict[str, float]:
-        return {name : np.mean(value[-n:]) for name, value in self.values.items() if len(self.values[name]) > 0}
-
-    def format(self, isLoss) -> dict[str, float]:
-        result = dict()
-        for name in self.values:
-            output_group, target_group = name.split(":")[:2]
-            for _, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
-                if criterionsAttr.isLoss == isLoss and len(self.values[name]):
-                    if len(self.values[name]) > 0:
-                        result[name] = np.mean(self.values[name])
+        result = {}
+        for group in self._loss.keys():
+            result.update({name : np.mean(value._values[-n:] if n > 0 else value._values) for name, value in self._loss[group].items() if n < 0 or len(value._values) >= n})
         return result
 
-    def mean(self) -> float:
-        value = 0.0
-        for name in self.values:
-            if len(self.values[name]) > 0:
-                value += np.mean(self.values[name])
-        return value
-    
-    def clear(self) -> None:
-        for name in self.values:
-            self.values[name].clear()
-
+    def format(self, isLoss: bool) -> dict[str, float]:
+        result = dict()
+        for group in self._loss.keys():
+            for name, loss in self._loss[group].items():
+                if loss.isLoss == isLoss and len(loss._values) > 0:
+                    result[name] = np.mean(loss._values)
+        return result
 
 class ModuleArgsDict(torch.nn.Module, ABC):
    
@@ -177,6 +239,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             self.isGPU_Checkpoint = False
             self.gpu = "cpu"
             self.training = training
+            self._isEnd = False
 
     def __init__(self) -> None:
         super().__init__()
@@ -217,6 +280,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             desc += ", in_is_channel={}".format(self._modulesArgs[key].in_is_channel)
             desc += ", out_channels={}".format(self._modulesArgs[key].out_channels)
             desc += ", out_is_channel={}".format(self._modulesArgs[key].out_is_channel)
+            desc += ", is_end={}".format(self._modulesArgs[key]._isEnd)
             desc += ", isInCheckpoint={}".format(self._modulesArgs[key].isCheckpoint)
             desc += ", isInGPU_Checkpoint={}".format(self._modulesArgs[key].isGPU_Checkpoint)
             desc += ", requires_grad={}".format(self._modulesArgs[key].requires_grad)
@@ -312,7 +376,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             for i, sinput in enumerate(inputs):
                 branchs[str(i)] = sinput
             out = inputs[0]
-            
+            tmp = []
             for name, module in self.items():
                 if self._modulesArgs[name].training is None or (not (self._modulesArgs[name].training and self._training == NetState.PREDICTION) and not (not self._modulesArgs[name].training and self._training == NetState.TRAIN)):
                     requires_grad = self._modulesArgs[name].requires_grad
@@ -324,18 +388,28 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     for branchs_key in branchs.keys():
                         if str(self._modulesArgs[name].gpu) != 'cpu' and str(branchs[branchs_key].device) != "cuda:"+self._modulesArgs[name].gpu:
                             branchs[branchs_key] = branchs[branchs_key].to(int(self._modulesArgs[name].gpu))
+                    
                     if self._modulesArgs[name].isCheckpoint:
                         out = checkpoint(module, *[branchs[i] for i in self._modulesArgs[name].in_branch])
+                        for ob in self._modulesArgs[name].out_branch:
+                            branchs[ob] = out
                         yield name, out
                     else:
                         if isinstance(module, ModuleArgsDict):
                             for k, out in module.named_forward(*[branchs[i] for i in self._modulesArgs[name].in_branch]):
+                                for ob in self._modulesArgs[name].out_branch:
+                                    if ob in module._modulesArgs[k.split(".")[0].replace("|accu|", "")].out_branch:
+                                        tmp.append(ob)
+                                        branchs[ob] = out
                                 yield name+"."+k, out
+                            for ob in self._modulesArgs[name].out_branch:
+                                if ob not in tmp:
+                                    branchs[ob] = out
                         elif isinstance(module, torch.nn.Module):
                             out = module(*[branchs[i] for i in self._modulesArgs[name].in_branch])                    
+                            for ob in self._modulesArgs[name].out_branch:
+                                branchs[ob] = out
                             yield name, out
-                    for ob in self._modulesArgs[name].out_branch:
-                        branchs[ob] = out
             del branchs
 
     def forward(self, *input: torch.Tensor) -> torch.Tensor:
@@ -509,6 +583,17 @@ class Network(ModuleArgsDict, ABC):
         self.initialized()
 
     def _compute_channels_trace(self, module : ModuleArgsDict, in_channels : int, gradient_checkpoints: Union[list[str], None], gpu_checkpoints: Union[list[str], None], name: Union[str, None] = None, in_is_channel = True, out_channels : Union[int, None] = None, out_is_channel = True) -> tuple[int, bool, int, bool]:
+        
+        for k1, v1 in module.items():
+            if isinstance(v1, ModuleArgsDict):
+                for t in module._modulesArgs[k1].out_branch:
+                    last = None
+                    for k2, _ in v1.items():
+                        if t in v1._modulesArgs[k2].out_branch:
+                            last = k2
+                    if last is not None:
+                        v1._modulesArgs[last]._isEnd = True
+
         for k, v in module.items():
             if hasattr(v, "in_channels"):
                 if v.in_channels:
@@ -517,15 +602,15 @@ class Network(ModuleArgsDict, ABC):
                 if v.in_features:
                     in_channels = v.in_features
             key = name+"."+k if name else k
-            isCheckpoint = False
-            isGPU_Checkpoint = False
-            if gradient_checkpoints:
-                isCheckpoint = key in gradient_checkpoints
-            if gpu_checkpoints:
-                isGPU_Checkpoint = key in gpu_checkpoints
 
-            module._modulesArgs[k].isCheckpoint = isCheckpoint
-            module._modulesArgs[k].isGPU_Checkpoint = isGPU_Checkpoint
+            if gradient_checkpoints:
+                if key in gradient_checkpoints:
+                    module._modulesArgs[k].isCheckpoint = True
+            
+            if gpu_checkpoints:
+                if key in gpu_checkpoints:
+                    module._modulesArgs[k].isGPU_Checkpoint = True
+           
             module._modulesArgs[k].in_channels = in_channels
             module._modulesArgs[k].in_is_channel = in_is_channel
             
@@ -573,35 +658,53 @@ class Network(ModuleArgsDict, ABC):
     def named_forward(self, *inputs: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:
         if self.patch:
             self.patch.load(inputs[0].shape[2:])
-            acc = Accumulator(self.patch.patch_slices, self.patch.patchCombine)
-
+            accumulators: dict[str, Accumulator] = {}
 
             patchIterator = self.patch.disassemble(*inputs)
+            buffer = []
             for i, patch_input in enumerate(patchIterator):
                 for (name, output_layer) in super().named_forward(*patch_input):
-                    yield "{}{}".format("accu:", name), output_layer
-                acc.addLayer(i, output_layer)
-            yield name, acc.assemble()
+                    yield "{}{}".format("|accu|", name), output_layer
+                    buffer.append((name.split(".")[0], output_layer))
+                    if len(buffer) == 2:
+                        if buffer[0][0] != buffer[1][0]:
+                            if self._modulesArgs[buffer[0][0]]._isEnd:
+                                if buffer[0][0] not in accumulators:
+                                    accumulators[buffer[0][0]] = Accumulator(self.patch.getPatch_slices(), self.patch.patch_size, self.patch.patchCombine)
+                                accumulators[buffer[0][0]].addLayer(i, buffer[0][1])
+                        buffer.pop(0)
+                if self._modulesArgs[buffer[0][0]]._isEnd:
+                    if buffer[0][0] not in accumulators:
+                        accumulators[buffer[0][0]] = Accumulator(self.patch.getPatch_slices(), self.patch.patch_size, self.patch.patchCombine)
+                    accumulators[buffer[0][0]].addLayer(i, buffer[0][1])
+            for name, accumulator in accumulators.items():
+                yield name, accumulator.assemble()
         else:
             for (name, output_layer) in super().named_forward(*inputs):
                 yield name, output_layer
-    
-    def get_layers(self, inputs : list[torch.Tensor], layers_name: list[str]) -> Iterator[tuple[str, torch.Tensor]]:
+
+
+    def get_layers(self, inputs : list[torch.Tensor], layers_name: list[str]) -> Iterator[tuple[str, torch.Tensor, Union[Patch_Indexed, None]]]:
         layers_name = layers_name.copy()
         output_layer_accumulator : dict[str, Accumulator] = {}
-        output_layer_index : dict[str, int] = {}
-        
+        output_layer_patch_indexed : dict[str, Patch_Indexed] = {}
+        it = 0
+        debug = "DL_API_DEBUG" in os.environ
         for (nameTmp, output_layer) in self.named_forward(*inputs):
-            name = nameTmp.replace("accu:", "")
-            
-            if name in layers_name:
-                accu = "accu:" in nameTmp
-                if accu:
-                    if name not in output_layer_accumulator:
-                        networkName = nameTmp.split("accu:")[-2].split(".")[-1]
+            print(nameTmp, getGPUMemory(output_layer.device))
+            name = nameTmp.replace("|accu|", "")
+            if debug:
+                if "DL_API_DEBUG_LAST_LAYER" in os.environ:
+                    os.environ["DL_API_DEBUG_LAST_LAYER"] = "{}|{}:{}:{}".format(os.environ["DL_API_DEBUG_LAST_LAYER"], name, getGPUMemory(output_layer.device), str(output_layer.device).replace("cuda:", ""))
+                else:
+                    os.environ["DL_API_DEBUG_LAST_LAYER"] = "{}:{}:{}".format(name, getGPUMemory(output_layer.device), str(output_layer.device).replace("cuda:", ""))
+            it += 1
+            if name in layers_name or nameTmp in layers_name:
+                if "|accu|" in nameTmp:
+                    if name not in output_layer_patch_indexed:
+                        networkName = nameTmp.split(".|accu|")[-2].split(".")[-1]
                         module = self
                         network = None
-
                         if networkName == "":
                             network = module
                         else:
@@ -610,28 +713,35 @@ class Network(ModuleArgsDict, ABC):
                                 if isinstance(module, Network) and n == networkName:
                                     network = module
                                     break
+                        
                         if network and network.patch:
-                            output_layer_accumulator[name] = Accumulator(network.patch.patch_slices, network.patch.patchCombine)
-                            output_layer_index[name] = 0
+                            output_layer_patch_indexed[name] = Patch_Indexed(network.patch, 0)
+
+                    if name not in output_layer_accumulator:
+                        output_layer_accumulator[name] = Accumulator(output_layer_patch_indexed[name].patch.getPatch_slices(0), output_layer_patch_indexed[name].patch.patch_size, output_layer_patch_indexed[name].patch.patchCombine)
                     
-                    output_layer_accumulator[name].addLayer(output_layer_index[name], output_layer)
-                    del output_layer
-                    output_layer_index[name] += 1
-                    if output_layer_accumulator[name].isFull():
-                        output_layer = output_layer_accumulator[name].assemble()
-                        output_layer_accumulator.pop(name)
-                        output_layer_index.pop(name)
+                    if nameTmp in layers_name:
+                        output_layer_accumulator[name].addLayer(output_layer_patch_indexed[name].index, output_layer)
+                        output_layer_patch_indexed[name].index += 1
+                        if output_layer_accumulator[name].isFull():
+                            output_layer = output_layer_accumulator[name].assemble()
+                            output_layer_accumulator.pop(name)
+                            output_layer_patch_indexed.pop(name)
+                            layers_name.remove(nameTmp)
+                            yield nameTmp, output_layer, None
+                if name in layers_name:
+                    if "|accu|" in nameTmp:
+                        yield name, output_layer, output_layer_patch_indexed[name]
+                        output_layer_patch_indexed[name].index += 1
+                        if output_layer_patch_indexed[name].isFull():
+                            output_layer_patch_indexed.pop(name)
+                            layers_name.remove(name)
+                    else:
                         layers_name.remove(name)
-                        yield name, output_layer
-                else:
-                    layers_name.remove(name)
-                    yield name, output_layer
+                        yield name, output_layer, None
 
             if not len(layers_name):
                 break
-            
-    def _layer_function(self, name: str, output_layer: torch.Tensor, data_dict: dict[tuple[str, bool], torch.Tensor]):
-        self.measure.update(name, output_layer, {k[0] : v for k, v in data_dict.items()}, self._it)
 
     def init_outputsGroup(self):
         metric_tmp = {network : network.measure.outputsCriterions.keys() for network in self.getNetworks().values() if network.measure}
@@ -645,9 +755,16 @@ class Network(ModuleArgsDict, ABC):
 
         self.resetLoss()
         results = []
-        for name, layer in self.get_layers([v for k, v in data_dict.items() if k[1]], list(set(list(self.outputsGroup.keys())+output_layers))):
+        for name, layer, patch_indexed in self.get_layers([v for k, v in data_dict.items() if k[1]], list(set(list(self.outputsGroup.keys())+output_layers))):
             if name in self.outputsGroup:
-                self.outputsGroup[name]._layer_function(name, layer, data_dict)
+                if patch_indexed is None:
+                    input = {k[0] : v for k, v in data_dict.items()}
+                    nb = 1
+                else:
+                    input = {k[0] : patch_indexed.patch.getData(v, patch_indexed.index, 0, False) for k, v in data_dict.items()}
+                    nb = patch_indexed.patch.getSize(0)
+                #self.outputsGroup[name]._requires_grad(list(self.outputsGroup[name].measure.outputsCriterions.keys()))
+                self.outputsGroup[name].measure.update(name, layer, input, self._it, nb)
             if name in output_layers:
                 results.append((name, layer))
         return results
@@ -662,8 +779,8 @@ class Network(ModuleArgsDict, ABC):
         if self.measure:
             if self.scaler and self.optimizer:
                 model._requires_grad(list(self.measure.outputsCriterions.keys()))
-                for group in self.measure.loss:
-                    self.scaler.scale(self.measure.loss[group] / self.nb_batch_per_step).backward()
+                for loss in self.measure.getLoss():
+                    self.scaler.scale(loss / self.nb_batch_per_step).backward()
                     if self._it % self.nb_batch_per_step == 0:
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
@@ -682,29 +799,31 @@ class Network(ModuleArgsDict, ABC):
         if scheduler:
             if scheduler.__class__.__name__ == 'ReduceLROnPlateau':
                 if self.measure:
-                    scheduler.step(self.measure.mean())
+                    scheduler.step(sum(self.measure.getLastMetrics(-1).values()))
             else:
                 scheduler.step()     
 
     @_function_network()
     def measureClear(self):
         if self.measure:
-            self.measure.clear()
+            self.measure.resetMetrics()
     
     @_function_network()
     def getNetworks(self) -> Self:
         return self
 
     def to(module : ModuleArgsDict, device: int):
+        if "device" not in os.environ:
+            os.environ["device"] = str(device)
         for k, v in module.items():
-            if module._modulesArgs[k].isGPU_Checkpoint:
-                device+=1
-            module._modulesArgs[k].gpu = str(getDevice(device))
-
-            if isinstance(v, ModuleArgsDict):
-                v = Network.to(v, device)
-            else:
-                v = v.to(getDevice(device))
+            if module._modulesArgs[k].gpu == "cpu":
+                if module._modulesArgs[k].isGPU_Checkpoint:
+                    os.environ["device"] = str(int(os.environ["device"])+1)
+                module._modulesArgs[k].gpu = str(getDevice(int(os.environ["device"])))
+                if isinstance(v, ModuleArgsDict):
+                    v = Network.to(v, int(os.environ["device"]))
+                else:
+                    v = v.to(getDevice(int(os.environ["device"])))
         return module
                 
     def getName(self) -> str:
@@ -721,7 +840,6 @@ class Network(ModuleArgsDict, ABC):
         for module in self.modules():
             if isinstance(module, ModuleArgsDict):
                 module._training = state
-
 
 class ModelLoader():
 

@@ -16,15 +16,13 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 import shutil
-import pynvml
-from functools import partial
 from torch.utils.tensorboard.writer import SummaryWriter
 from torch.optim.swa_utils import AveragedModel
 import torch.distributed as dist
 
 class _Trainer():
 
-    def __init__(self, world_size: int, global_rank: int, local_rank: int, train_name: str, data_log: Union[list[str], None] , save_checkpoint_mode: str, epochs: int, epoch: int, groupsInput: list[str], autocast: bool, it_validation: Union[int, None], it: int, model: Union[DDP, CPU_Model], modelEMA: AveragedModel, dataloader_training: DataLoader, dataloader_validation: Union[DataLoader, None] = None) -> None:
+    def __init__(self, world_size: int, global_rank: int, local_rank: int, train_name: str, data_log: Union[list[str], None] , save_checkpoint_mode: str, epochs: int, epoch: int, autocast: bool, it_validation: Union[int, None], it: int, model: Union[DDP, CPU_Model], modelEMA: AveragedModel, dataloader_training: DataLoader, dataloader_validation: Union[DataLoader, None] = None) -> None:
         self.world_size = world_size        
         self.global_rank = global_rank
         self.local_rank = local_rank
@@ -33,7 +31,6 @@ class _Trainer():
         self.train_name = train_name
         self.epochs = epochs
         self.epoch = epoch
-        self.groupsInput = groupsInput
         self.model = model
         self.dataloader_training = dataloader_training
         self.dataloader_validation = dataloader_validation
@@ -62,10 +59,8 @@ class _Trainer():
             for self.epoch in epoch_tqdm:
                 self.train()
                 
-    def getInput(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> dict[tuple[str, bool], torch.Tensor]:
-        inputs = {(k, True) : data_dict[k][0] for k in self.groupsInput}
-        inputs.update({(k, False) : v[0] for k, v in data_dict.items() if k not in self.groupsInput})
-        return inputs
+    def getInput(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int, str, bool]]) -> dict[tuple[str, bool], torch.Tensor]:
+        return {(k, v[5][0].item()) : v[0] for k, v in data_dict.items()}
 
     def train(self) -> None:
         self.model.train()
@@ -74,7 +69,7 @@ class _Trainer():
             self.modelEMA.eval()
             self.modelEMA.module.setState(NetState.TRAIN)
 
-        description = lambda : "Training : Loss ("+" ".join(["{}({:.6f}) : {:.4f}".format(name, network.optimizer.param_groups[0]['lr'], network.measure.getLastValue()) for name, network in self.model.module.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "")+gpuInfo(self.local_rank)
+        description = lambda : "Training : Loss ("+" ".join(["{}({:.6f}) : {:.4f}".format(name, network.optimizer.param_groups[0]['lr'], network.measure.getLastLoss()) for name, network in self.model.module.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastLoss()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "")+gpuInfo(self.local_rank, False)
         
         with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = description(), total=len(self.dataloader_training), disable=self.global_rank != 0 and "DL_API_CLUSTER" not in os.environ) as batch_iter:
             for _, data_dict in batch_iter:
@@ -105,7 +100,7 @@ class _Trainer():
         if self.modelEMA is not None:
             self.modelEMA.module.setState(NetState.EVALUATION)
 
-        description = lambda : "Validation : Loss ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.model.module.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastValue()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.local_rank)
+        description = lambda : "Validation : Loss ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastLoss()) for name, network in self.model.module.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastLoss()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.local_rank, False)
         data_dict = None
         with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = description(), total=len(self.dataloader_validation), leave=False, disable=self.global_rank != 0 and "DL_API_CLUSTER" not in os.environ) as batch_iter:
             for _, data_dict in batch_iter:
@@ -176,7 +171,7 @@ class _Trainer():
                         self.tb.add_scalars("{}/{}/Metric/{}".format(type_log, name, label), measures["{}{}".format(name, label)][1], self.it)
                 
                     if len(images_log):
-                        for name, layer in model.get_layers([v.to(0) for k, v in self.getInput(data_dict).items() if k[1]], images_log):
+                        for name, layer, _ in model.get_layers([v.to(0) for k, v in self.getInput(data_dict).items() if k[1]], images_log):
                             self.data_log[name][0](self.tb, "{}/{}{}".format(type_log, name, label), layer[:self.data_log[name][1]].detach().cpu().numpy(), self.it)
             
             if type_log == "Trainning":
@@ -212,7 +207,6 @@ class Trainer(DistributedObject):
     def __init__(   self,
                     model : ModelLoader = ModelLoader(),
                     dataset : DataTrain = DataTrain(),
-                    groupsInput : list[str] = ["default"],
                     train_name : str = "default:name",
                     manual_seed : Union[int, None] = None,
                     epochs: int = 100,
@@ -228,7 +222,6 @@ class Trainer(DistributedObject):
         super().__init__(train_name)
         self.manual_seed = manual_seed        
         self.dataset = dataset
-        self.groupsInput = groupsInput
         self.autocast = autocast
         self.epochs = epochs
         self.epoch = 0
@@ -311,7 +304,6 @@ class Trainer(DistributedObject):
         self.model.init_outputsGroup()
         self.model._compute_channels_trace(self.model, self.model.in_channels, self.gradient_checkpoints, self.gpu_checkpoints)
         self.model.load(state_dict, init=True, ema=False)
-        
         if self.ema_decay > 0:
             self.modelEMA = AveragedModel(self.model, avg_fn=self._avg_fn)
             if state_dict is not None:
@@ -321,13 +313,13 @@ class Trainer(DistributedObject):
             os.makedirs(SETUPS_DIRECTORY()+self.name+"/")
         shutil.copyfile(self.config_namefile_src+".yml", self.config_namefile)
 
-        self.dataloader = self.dataset.getData(world_size)
-        self.size = (len(self.gpu_checkpoints)+1 if self.gpu_checkpoints else 1)
+        self.dataloader = self.dataset.getData(world_size//(len(self.gpu_checkpoints)+1) if self.gpu_checkpoints else world_size)
 
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):
-        model = Network.to(self.model, local_rank)
+        size = (len(self.gpu_checkpoints)+1 if self.gpu_checkpoints else 1)
+        model = Network.to(self.model, local_rank*size)
         model = DDP(model) if torch.cuda.is_available() else CPU_Model(model)
         if self.modelEMA is not None:
             self.modelEMA.module = Network.to(self.modelEMA.module, local_rank)
-        with _Trainer(world_size, global_rank, local_rank, self.name, self.data_log, self.save_checkpoint_mode, self.epochs, self.epoch, self.groupsInput, self.autocast, self.it_validation, self.it, model, self.modelEMA, *dataloaders) as t:
+        with _Trainer(world_size, global_rank, local_rank, self.name, self.data_log, self.save_checkpoint_mode, self.epochs, self.epoch, self.autocast, self.it_validation, self.it, model, self.modelEMA, *dataloaders) as t:
             t.run()

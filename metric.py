@@ -82,7 +82,7 @@ class Statistics():
 
         with open(self.filename, "w") as f:
             f.write(json.dumps(result, indent=4))
-
+            
 class Metric(DistributedObject):
 
     @config("Metric")

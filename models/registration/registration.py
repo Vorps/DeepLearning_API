@@ -2,7 +2,7 @@ from functools import partial
 import torch
 from torch.nn.parameter import Parameter
 from DeepLearning_API.config import config
-from DeepLearning_API.models.segmentation import uNet
+from models.segmentation import UNet
 from DeepLearning_API.networks import blocks, network
 import torch.nn.functional as F
 
@@ -25,7 +25,7 @@ class VoxelMorph(network.Network):
                     int_downsize : int = 2):
         super().__init__(in_channels = channels[0], optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim)
         self.add_module("Concat", blocks.Concat(), in_branch=[0,1,2,3])
-        self.add_module("UNetBlock_0", uNet.UNetBlock(channels, nb_conv_per_stage, blockConfig, downSampleMode=blocks.DownSampleMode._member_map_[downSampleMode], upSampleMode=blocks.UpSampleMode._member_map_[upSampleMode], attention=attention, block = blocks.ConvBlock, dim=dim))
+        self.add_module("UNetBlock_0", UNet.UNetBlock(channels, nb_conv_per_stage, blockConfig, downSampleMode=blocks.DownSampleMode._member_map_[downSampleMode], upSampleMode=blocks.UpSampleMode._member_map_[upSampleMode], attention=attention, block = blocks.ConvBlock, dim=dim))
         self.add_module("Head", blocks.getTorchModule("Conv", dim)(in_channels = channels[1], out_channels = dim, kernel_size = 3, stride = 1, padding = 1), out_branch=["pos_flow"])
         
         self["Head"].weight = Parameter(torch.distributions.Normal(0, 1e-5).sample(self["Head"].weight.shape))
