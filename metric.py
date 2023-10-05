@@ -123,12 +123,12 @@ class Metric(DistributedObject):
 
         self.dataloader = self.dataset.getData(world_size)
 
-    def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):
+    def run_process(self, world_size: int, global_rank: int, gpu: int, dataloaders: list[DataLoader]):
         description = lambda measure : "Metric : {} ".format(" | ".join("{}: {:.2f}".format(k, v) for k, v in measure.items()) if measure is not None else "")
         with tqdm.tqdm(iterable = enumerate(dataloaders[0]), desc = description(None), total=len(dataloaders[0])) as batch_iter:
             for _, data_dict in batch_iter:
                 batch_iter.set_description(description(self.update({k: (v[0], v[4]) for k,v in data_dict.items()})))
-        outputs = synchronize_data(world_size, local_rank, self.statistics.measures)
+        outputs = synchronize_data(world_size, gpu, self.statistics.measures)
         if global_rank == 0:
             self.statistics.write(outputs)
 

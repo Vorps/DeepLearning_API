@@ -243,7 +243,7 @@ class ResampleResize(Resample):
     
     def __call__(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Spacing" in cache_attribute:
-            cache_attribute["Spacing"] = torch.flip(torch.tensor(list(input.shape[1:]))/torch.tensor(self.size)*torch.flip(cache_attribute.get_np_array("Spacing"), dims=[0]), dims=[0])
+            cache_attribute["Spacing"] = torch.flip(torch.tensor(list(input.shape[1:]))/torch.tensor(self.size)*torch.flip(cache_attribute.get_tensor("Spacing"), dims=[0]), dims=[0])
         return self._resample(input, self.size)
 
 class ResampleTransform(Transform):

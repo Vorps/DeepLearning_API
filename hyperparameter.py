@@ -8,7 +8,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch
 import os
 import copy
-from typing import Union
 
 class Hyperparameter(DistributedObject):
 
@@ -94,6 +93,8 @@ class Hyperparameter(DistributedObject):
                                     for it in range(i-1):
                                         if self.isModuleArgsDict(data[i-it-1][0]):
                                             gradient_checkpoints.append(data[i-it-1][0])
+                                            print(gradient_checkpoints)
+                                            exit(0)
                                             break
                                     if it == 0:
                                         raise NameError("No ModuleArgsDict")

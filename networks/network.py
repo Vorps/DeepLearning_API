@@ -175,7 +175,7 @@ class Measure():
                         if criterionsAttr.isLoss:
                             loss = loss/nb_patch
                             loss.backward()
-                    
+
     def getLoss(self) -> list[torch.Tensor]:
         loss: dict[int, torch.Tensor] = {}
         for group in self._loss.keys():
@@ -216,6 +216,7 @@ class Measure():
         result = dict()
         for group in self._loss.keys():
             for name, loss in self._loss[group].items():
+                loss.updateValue()
                 if loss.isLoss == isLoss and len(loss._values) > 0:
                     result[name] = np.mean(loss._values)
         return result
@@ -398,7 +399,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                         if isinstance(module, ModuleArgsDict):
                             for k, out in module.named_forward(*[branchs[i] for i in self._modulesArgs[name].in_branch]):
                                 for ob in self._modulesArgs[name].out_branch:
-                                    if ob in module._modulesArgs[k.split(".")[0].replace("|accu|", "")].out_branch:
+                                    if ob in module._modulesArgs[k.split(".")[0].replace(";accu;", "")].out_branch:
                                         tmp.append(ob)
                                         branchs[ob] = out
                                 yield name+"."+k, out
@@ -664,7 +665,7 @@ class Network(ModuleArgsDict, ABC):
             buffer = []
             for i, patch_input in enumerate(patchIterator):
                 for (name, output_layer) in super().named_forward(*patch_input):
-                    yield "{}{}".format("|accu|", name), output_layer
+                    yield "{}{}".format(";accu;", name), output_layer
                     buffer.append((name.split(".")[0], output_layer))
                     if len(buffer) == 2:
                         if buffer[0][0] != buffer[1][0]:
@@ -691,8 +692,7 @@ class Network(ModuleArgsDict, ABC):
         it = 0
         debug = "DL_API_DEBUG" in os.environ
         for (nameTmp, output_layer) in self.named_forward(*inputs):
-            print(nameTmp, getGPUMemory(output_layer.device))
-            name = nameTmp.replace("|accu|", "")
+            name = nameTmp.replace(";accu;", "")
             if debug:
                 if "DL_API_DEBUG_LAST_LAYER" in os.environ:
                     os.environ["DL_API_DEBUG_LAST_LAYER"] = "{}|{}:{}:{}".format(os.environ["DL_API_DEBUG_LAST_LAYER"], name, getGPUMemory(output_layer.device), str(output_layer.device).replace("cuda:", ""))
@@ -700,9 +700,9 @@ class Network(ModuleArgsDict, ABC):
                     os.environ["DL_API_DEBUG_LAST_LAYER"] = "{}:{}:{}".format(name, getGPUMemory(output_layer.device), str(output_layer.device).replace("cuda:", ""))
             it += 1
             if name in layers_name or nameTmp in layers_name:
-                if "|accu|" in nameTmp:
+                if ";accu;" in nameTmp:
                     if name not in output_layer_patch_indexed:
-                        networkName = nameTmp.split(".|accu|")[-2].split(".")[-1]
+                        networkName = nameTmp.split(".;accu;")[-2].split(".")[-1] if ".;accu;" in nameTmp  else nameTmp.split(";accu;")[-2].split(".")[-1]
                         module = self
                         network = None
                         if networkName == "":
@@ -729,8 +729,9 @@ class Network(ModuleArgsDict, ABC):
                             output_layer_patch_indexed.pop(name)
                             layers_name.remove(nameTmp)
                             yield nameTmp, output_layer, None
+
                 if name in layers_name:
-                    if "|accu|" in nameTmp:
+                    if ";accu;" in nameTmp:
                         yield name, output_layer, output_layer_patch_indexed[name]
                         output_layer_patch_indexed[name].index += 1
                         if output_layer_patch_indexed[name].isFull():
@@ -763,7 +764,6 @@ class Network(ModuleArgsDict, ABC):
                 else:
                     input = {k[0] : patch_indexed.patch.getData(v, patch_indexed.index, 0, False) for k, v in data_dict.items()}
                     nb = patch_indexed.patch.getSize(0)
-                #self.outputsGroup[name]._requires_grad(list(self.outputsGroup[name].measure.outputsCriterions.keys()))
                 self.outputsGroup[name].measure.update(name, layer, input, self._it, nb)
             if name in output_layers:
                 results.append((name, layer))

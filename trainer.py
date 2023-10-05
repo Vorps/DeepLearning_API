@@ -22,10 +22,11 @@ import torch.distributed as dist
 
 class _Trainer():
 
-    def __init__(self, world_size: int, global_rank: int, local_rank: int, train_name: str, data_log: Union[list[str], None] , save_checkpoint_mode: str, epochs: int, epoch: int, autocast: bool, it_validation: Union[int, None], it: int, model: Union[DDP, CPU_Model], modelEMA: AveragedModel, dataloader_training: DataLoader, dataloader_validation: Union[DataLoader, None] = None) -> None:
+    def __init__(self, world_size: int, global_rank: int, local_rank: int, size: int, train_name: str, data_log: Union[list[str], None] , save_checkpoint_mode: str, epochs: int, epoch: int, autocast: bool, it_validation: Union[int, None], it: int, model: Union[DDP, CPU_Model], modelEMA: AveragedModel, dataloader_training: DataLoader, dataloader_validation: Union[DataLoader, None] = None) -> None:
         self.world_size = world_size        
         self.global_rank = global_rank
         self.local_rank = local_rank
+        self.size = size
 
         self.save_checkpoint_mode = save_checkpoint_mode
         self.train_name = train_name
@@ -82,11 +83,11 @@ class _Trainer():
                         self.modelEMA.module(input)
                     self.it += 1
                     if (self.it+1) % self.it_validation == 0:
-                        self.model.module.update_lr()
                         loss = self._train_log(data_dict)
 
                         if self.dataloader_validation is not None:
                             loss = self._validate()
+                        self.model.module.update_lr()
                         self.checkpoint_save(loss)
 
                 batch_iter.set_description(description()) 
@@ -148,7 +149,7 @@ class _Trainer():
         if self.modelEMA is not None:
             models["_EMA"] = self.modelEMA.module
         
-        measures = DistributedObject.getMeasure(self.world_size, self.global_rank, self.local_rank, models)
+        measures = DistributedObject.getMeasure(self.world_size, self.global_rank, self.local_rank*self.size+self.size-1, models)
         
         self.model.eval()
         self.model.module.setState(NetState.EVALUATION)
@@ -187,8 +188,6 @@ class _Trainer():
             loss = []
             for name, network in self.model.module.getNetworks().items():
                 if network.measure is not None:
-                    #print(measures["{}".format(name)][0])
-                    #print([v for v in measures["{}".format(name)][0].values()])
                     loss.append(sum([v for v in measures["{}".format(name)][0].values()]))
             return np.mean(loss)
         return None
@@ -236,6 +235,7 @@ class Trainer(DistributedObject):
         self.save_checkpoint_mode = save_checkpoint_mode
         self.config_namefile_src = CONFIG_FILE().replace(".yml", "")
         self.config_namefile = SETUPS_DIRECTORY()+self.name+"/"+self.config_namefile_src.split("/")[-1]+"_"+str(self.it)+".yml"
+        self.size = (len(self.gpu_checkpoints)+1 if self.gpu_checkpoints else 1)
     
     def __exit__(self, type, value, traceback):
         super().__exit__(type, value, traceback)
@@ -313,13 +313,12 @@ class Trainer(DistributedObject):
             os.makedirs(SETUPS_DIRECTORY()+self.name+"/")
         shutil.copyfile(self.config_namefile_src+".yml", self.config_namefile)
 
-        self.dataloader = self.dataset.getData(world_size//(len(self.gpu_checkpoints)+1) if self.gpu_checkpoints else world_size)
+        self.dataloader = self.dataset.getData(world_size//self.size)
 
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):
-        size = (len(self.gpu_checkpoints)+1 if self.gpu_checkpoints else 1)
-        model = Network.to(self.model, local_rank*size)
-        model = DDP(model) if torch.cuda.is_available() else CPU_Model(model)
+        model = Network.to(self.model, local_rank*self.size)
+        model = DDP(model, static_graph=True) if torch.cuda.is_available() else CPU_Model(model)
         if self.modelEMA is not None:
             self.modelEMA.module = Network.to(self.modelEMA.module, local_rank)
-        with _Trainer(world_size, global_rank, local_rank, self.name, self.data_log, self.save_checkpoint_mode, self.epochs, self.epoch, self.autocast, self.it_validation, self.it, model, self.modelEMA, *dataloaders) as t:
+        with _Trainer(world_size, global_rank, local_rank, self.size, self.name, self.data_log, self.save_checkpoint_mode, self.epochs, self.epoch, self.autocast, self.it_validation, self.it, model, self.modelEMA, *dataloaders) as t:
             t.run()

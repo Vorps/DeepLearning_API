@@ -27,7 +27,7 @@ def main():
         distributedObject.setup(n_gpu*int(config["num_nodes"]))
 
         executor = submitit.AutoExecutor(folder="./Cluster/")
-        executor.update_parameters(name=config["name"], mem_gb=config["memory"], gpus_per_node=n_gpu, tasks_per_node=n_gpu, cpus_per_task=config["num_workers"], nodes=config["num_nodes"], timeout_min=config["time_limit"])
+        executor.update_parameters(name=config["name"], mem_gb=config["memory"], gpus_per_node=n_gpu, tasks_per_node=n_gpu//distributedObject.size, cpus_per_task=config["num_workers"], nodes=config["num_nodes"], timeout_min=config["time_limit"])
         executor.submit(distributedObject)
 
 if __name__ == "__main__":

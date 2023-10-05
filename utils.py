@@ -41,10 +41,22 @@ class Attribute(dict[str, Any]):
     def __setitem__(self, key: str, value: Any) -> None:
         if "_" not in key:
             i = len([k for k in super().keys() if k.startswith(key)])
-            super().__setitem__("{}_{}".format(key, i), str(value.numpy()) if isinstance(value, torch.Tensor) else str(value))
+            result = None
+            if isinstance(value, torch.Tensor):
+                result = str(value.numpy())
+            else:
+                result = str(value)
+            result = result.replace('\n', '')
+            super().__setitem__("{}_{}".format(key, i), result)
         else:
-            super().__setitem__(key, str(value.numpy()) if isinstance(value, torch.Tensor) else str(value))
-            
+            result = None
+            if isinstance(value, torch.Tensor):
+                result = str(value.numpy())
+            else:
+                result = str(value)
+            result = result.replace('\n', '')
+            super().__setitem__(key, result)
+
     def pop(self, key: str) -> Any:
         i = len([k for k in super().keys() if k.startswith(key)])
         if i > 0 and "{}_{}".format(key, i-1) in super().keys():   
@@ -268,6 +280,7 @@ class DatasetUtils():
                 attributes["Origin"] = np.asarray(image.GetOrigin())
                 attributes["Spacing"] = np.asarray(image.GetSpacing())
                 attributes["Direction"] = np.asarray(image.GetDirection())
+                
                 for k in image.GetMetaDataKeys():
                     attributes[k] = image.GetMetaData(k)
                 data = sitk.GetArrayFromImage(image)
@@ -730,6 +743,10 @@ def _logImageFormat(input : np.ndarray):
         return input
     if len(input.shape) == 2:
         input = np.expand_dims(input, axis=0)
+
+    if len(input.shape) == 3 and input.shape[0] != 1:
+        input = np.expand_dims(input, axis=0)
+
     if len(input.shape) == 4:
         input = input[:, input.shape[1]//2]
     b = -np.min(input)
@@ -775,6 +792,7 @@ class DistributedObject():
         self.dataloader : list[list[DataLoader]]
         self.manual_seed: bool = None
         self.name = name
+        self.size = 1
     
     @abstractmethod
     def setup(self, world_size: int):
@@ -798,15 +816,14 @@ class DistributedObject():
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):
         pass 
     
-    def getMeasure(world_size: int, global_rank: int, local_rank: int, models: dict[str, torch.nn.Module]) -> dict[str, tuple[dict[str, float], dict[str, float]]]:
+    def getMeasure(world_size: int, global_rank: int, gpu: int, models: dict[str, torch.nn.Module]) -> dict[str, tuple[dict[str, float], dict[str, float]]]:
         data = {}
         for label, model in models.items():
             for name, network in model.getNetworks().items():
                 if network.measure is not None:
                     data["{}{}".format(name, label)] = (network.measure.format(isLoss=True), network.measure.format(isLoss=False))
-            print(data)
             model.measureClear()
-        outputs = synchronize_data(world_size, local_rank, data)
+        outputs = synchronize_data(world_size, gpu, data)
         result = {}
         if global_rank == 0:
             for output in outputs:
@@ -943,10 +960,10 @@ def cleanup():
     if torch.cuda.is_available():
         dist.destroy_process_group()
 
-def synchronize_data(world_size: int, local_rank: int, data: any) -> list[Any]:
+def synchronize_data(world_size: int, gpu: int, data: any) -> list[Any]:
     if torch.cuda.is_available():
         outputs: list[dict[str, tuple[dict[str, float], dict[str, float]]]] = [None for _ in range(world_size)]
-        torch.cuda.set_device(local_rank)
+        torch.cuda.set_device(gpu)
         dist.all_gather_object(outputs, data)
     else:
         outputs = [data]
