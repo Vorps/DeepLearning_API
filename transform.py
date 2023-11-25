@@ -118,8 +118,8 @@ class Standardize(Transform):
         if self.lazy:
             return input
         else:
-            mean = cache_attribute["Mean"].view(-1, *[1 for _ in range(len(input.shape)-1)])
-            std = cache_attribute["Std"].view(-1, *[1 for _ in range(len(input.shape)-1)])
+            mean = torch.tensor(float(cache_attribute["Mean"])).view(-1, *[1 for _ in range(len(input.shape)-1)])
+            std = torch.tensor(float(cache_attribute["Std"])).view(-1, *[1 for _ in range(len(input.shape)-1)])
             return (input - mean) / std
         
     def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -441,3 +441,16 @@ class Permute(Transform):
     
     def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return input.permute(tuple(np.argsort(self.dims)))
+    
+class Flip(Transform):
+
+    @config("Flip")
+    def __init__(self, dims: str = "1|0|2") -> None:
+        super().__init__()
+        self.dims = [0]+[int(d)+1 for d in dims.split("|")]
+
+    def __call__(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return input.flip(tuple(self.dims))
+    
+    def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return input.flip(tuple(self.dims))

@@ -76,6 +76,7 @@ class _Trainer():
             for _, data_dict in batch_iter:
                 with autocast(enabled=self.autocast):
                     input = self.getInput(data_dict)
+
                     self.model(input)
                     self.model.module.backward(self.model.module)
                     if self.modelEMA is not None:
@@ -317,7 +318,8 @@ class Trainer(DistributedObject):
 
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):
         model = Network.to(self.model, local_rank*self.size)
-        model = DDP(model, static_graph=True) if torch.cuda.is_available() else CPU_Model(model)
+        
+        model = DDP(model) if torch.cuda.is_available() else CPU_Model(model)
         if self.modelEMA is not None:
             self.modelEMA.module = Network.to(self.modelEMA.module, local_rank)
         with _Trainer(world_size, global_rank, local_rank, self.size, self.name, self.data_log, self.save_checkpoint_mode, self.epochs, self.epoch, self.autocast, self.it_validation, self.it, model, self.modelEMA, *dataloaders) as t:

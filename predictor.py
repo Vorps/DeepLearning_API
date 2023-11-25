@@ -15,7 +15,7 @@ from DeepLearning_API.networks.network import ModelLoader, Network, NetState
 from DeepLearning_API.transform import Transform, TransformLoader
 
 from torch.utils.tensorboard.writer import SummaryWriter
-from typing import Union, Callable
+from typing import Union
 import numpy as np
 import random
 import torch.distributed as dist
@@ -317,13 +317,17 @@ class Predictor(DistributedObject):
             except:
                 raise Exception("Model : {} does not exist !".format(URL_MODEL())) 
         else:
-            path = MODELS_DIRECTORY()+self.name.split("/")[0]+"/StateDict/"
-            if os.path.exists(path):
+            path = MODELS_DIRECTORY()
+            if MODELS_DIRECTORY() == "./Models/":
+                path += self.name.split("/")[0]+"/StateDict/"
                 if len(self.name.split("/")) == 2:
-                    state_dict = torch.load(path+self.name.split("/")[-1])
+                    name = self.name.split("/")[-1]
                 elif os.listdir(path):
                     name = sorted(os.listdir(path))[-1]
-                    state_dict = torch.load(path+name)
+            else:
+                name = self.name
+            if os.path.exists(MODELS_DIRECTORY()+name):
+                state_dict = torch.load(path+name)
             else:
                 raise Exception("Model : {} does not exist !".format(self.name))
         return state_dict

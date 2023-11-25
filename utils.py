@@ -18,9 +18,7 @@ import argparse
 import subprocess
 import random
 from torch.utils.data import DataLoader
-from torch.nn.parallel import DistributedDataParallel as DDP
 import multiprocessing
-from typing import Callable
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
 
@@ -531,7 +529,8 @@ def gpuInfo(device : Union[int, torch.device], showMemory: bool = True) -> str:
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
     else:
         return ""
-    return  "Node: {} GPU({}) Memory GPU ({:.2f}G ({:.2f} %)){}".format(os.environ["SLURMD_NODENAME"], device, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, " | {}".format(memoryInfo()) if showMemory else "")
+    node_name = "Node: {} " +os.environ["SLURMD_NODENAME"] if "SLURMD_NODENAME" in os.environ else ""
+    return  "{}GPU({}) Memory GPU ({:.2f}G ({:.2f} %)){}".format(node_name, device, float(memory.used)/(10**9), float(memory.used)/float(memory.total)*100, " | {}".format(memoryInfo()) if showMemory else "")
 
 def getMaxGPUMemory(device : Union[int, torch.device]) -> float:
     if isinstance(device, torch.device):
@@ -931,7 +930,10 @@ def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
 import submitit
 
 def setupGPU(world_size: int, port: int, rank: Union[int, None] = None) -> tuple[int , int]:
-    host_name = subprocess.check_output("scontrol show hostnames {}".format(os.getenv('SLURM_JOB_NODELIST')).split()).decode().splitlines()[0]
+    try:
+        host_name = subprocess.check_output("scontrol show hostnames {}".format(os.getenv('SLURM_JOB_NODELIST')).split()).decode().splitlines()[0]
+    except:
+        host_name = "localhost"
     if rank is None:
         job_env = submitit.JobEnvironment()
         global_rank = job_env.global_rank

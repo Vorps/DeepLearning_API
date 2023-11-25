@@ -117,7 +117,7 @@ class Accumulator():
             result = torch.zeros((list(self._layer_accumulator[0].shape[:N])+list(self.shape)), dtype=self._layer_accumulator[0].dtype).to(self._layer_accumulator[0].device)
             for patch_slice, data in zip(self.patch_slices, self._layer_accumulator):
                 slices_dest = tuple([slice(result.shape[i]) for i in range(N)] + list(patch_slice))
-                slices_source = tuple([slice(result.shape[i]) for i in range(N)] + [slice(0, s.stop-s.start) for s in patch_slice])
+                slices_source = tuple([slice(result.shape[i]) for i in range(N)] + [slice((data.shape[i+N]-(s.stop-s.start))//2, (data.shape[i+N]+(s.stop-s.start))//2) for i, s in enumerate(patch_slice)])
                 for dim, s in enumerate(patch_slice):
                     if s.stop-s.start == 1:
                         data = data.unsqueeze(dim=dim+N)

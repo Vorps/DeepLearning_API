@@ -17,12 +17,15 @@ class NormMode(Enum):
     GROUP = 3
     LAYER = 4
     SYNCBATCH = 5
+    INSTANCE_AFFINE = 6
 
 def getNorm(normMode: Enum, channels : int, dim: int) -> torch.nn.Module:
     if normMode == NormMode.BATCH:
         return getTorchModule("BatchNorm", dim = dim)(channels, affine=True, track_running_stats=True)
     if normMode == NormMode.INSTANCE:
         return getTorchModule("InstanceNorm", dim = dim)(channels, affine=False, track_running_stats=False)
+    if normMode == NormMode.INSTANCE_AFFINE:
+        return getTorchModule("InstanceNorm", dim = dim)(channels, affine=True, track_running_stats=False)
     if normMode == NormMode.SYNCBATCH:
         return torch.nn.SyncBatchNorm(channels, affine=True, track_running_stats=True)
     if normMode == NormMode.GROUP:
@@ -56,6 +59,8 @@ class BlockConfig():
         self.stride = stride
         self.padding = padding
         self.activation = activation
+        self.normMode = normMode
+
         if isinstance(normMode, str):
             self.norm = NormMode._member_map_[normMode]
         elif isinstance(normMode, NormMode):
@@ -69,14 +74,14 @@ class BlockConfig():
 
     def getActivation(self) -> torch.nn.Module:
         if isinstance(self.activation, str):
-            return getTorchModule(self.activation.split(";")[0])(*[ast.literal_eval(value) for value in self.activation.split(";")[1:]], inplace=True) if self.activation != "None" else torch.nn.Identity()
+            return getTorchModule(self.activation.split(";")[0])(*[ast.literal_eval(value) for value in self.activation.split(";")[1:]]) if self.activation != "None" else torch.nn.Identity()
         return self.activation()
     
 class ConvBlock(network.ModuleArgsDict):
     
-    def __init__(self, in_channels : int, out_channels : int, nb_conv: int, blockConfig : BlockConfig, dim : int, alias : list[list[str]]=[[], [], []]) -> None:
+    def __init__(self, in_channels : int, out_channels : int, blockConfigs : list[BlockConfig], dim : int, alias : list[list[str]]=[[], [], []]) -> None:
         super().__init__()
-        for i in range(nb_conv):
+        for i, blockConfig in enumerate(blockConfigs):
             self.add_module("Conv_{}".format(i), blockConfig.getConv(in_channels, out_channels, dim), alias=alias[0])
             self.add_module("Norm_{}".format(i), blockConfig.getNorm(out_channels, dim), alias=alias[1])
             self.add_module("Activation_{}".format(i), blockConfig.getActivation(), alias=alias[2])

@@ -39,6 +39,7 @@ class OptimizerLoader():
         self.name = name
     
     def getOptimizer(self, key: str, parameter: Iterator[torch.nn.parameter.Parameter]) -> torch.optim.Optimizer:
+        torch.optim.AdamW
         return config("{}.Model.{}.Optimizer".format(os.environ["DEEP_LEARNING_API_ROOT"], key))(getattr(importlib.import_module('torch.optim'), self.name))(parameter, config = None)
         
 class SchedulerStep():
@@ -376,6 +377,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             branchs: dict[str, torch.Tensor] = {}
             for i, sinput in enumerate(inputs):
                 branchs[str(i)] = sinput
+
             out = inputs[0]
             tmp = []
             for name, module in self.items():
@@ -533,7 +535,7 @@ class Network(ModuleArgsDict, ABC):
         if metadata is not None:
             state_dict._metadata = metadata 
 
-        def load(module, prefix=''):
+        def load(module: torch.nn.Module, prefix=''):
             local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
             module._load_from_state_dict(
                 state_dict, prefix, local_metadata, True, missing_keys, unexpected_keys, error_msgs)
@@ -578,7 +580,7 @@ class Network(ModuleArgsDict, ABC):
                         break
                 else:
                     model_state_dict[alias] = model_state_dict_tmp[alias]
-            self.load_state_dict(model_state_dict)
+            self.load_state_dict(model_state_dict, )
         if "{}_optimizer_state_dict".format(name) in state_dict and self.optimizer:
             self.optimizer.load_state_dict(state_dict['{}_optimizer_state_dict'.format(name)])
         self.initialized()
@@ -642,7 +644,7 @@ class Network(ModuleArgsDict, ABC):
     @_function_network()
     def init(self, autocast : bool, state : State, key: str) -> None:
         if state != State.PREDICTION:
-            self.scaler = torch.cuda.amp.grad_scaler.GradScaler(enabled=autocast)
+            self.scaler = torch.cuda.amp.GradScaler(enabled=autocast)
             if self.optimizerLoader:
                 self.optimizer = self.optimizerLoader.getOptimizer(key, self.parameters(state == State.TRANSFER_LEARNING))
                 self.optimizer.zero_grad()
@@ -756,7 +758,7 @@ class Network(ModuleArgsDict, ABC):
 
         self.resetLoss()
         results = []
-        for name, layer, patch_indexed in self.get_layers([v for k, v in data_dict.items() if k[1]], list(set(list(self.outputsGroup.keys())+output_layers))):
+        for name, layer, patch_indexed in self.get_layers([v for k, v in data_dict.items() if k[1]], list(set(list(self.outputsGroup.keys())+output_layers))): 
             if name in self.outputsGroup:
                 if patch_indexed is None:
                     input = {k[0] : v for k, v in data_dict.items()}
