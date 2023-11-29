@@ -1,6 +1,5 @@
 import torch
 from torch.utils.data import DataLoader
-from torch.backends import cudnn
 import tqdm
 import numpy as np
 import os
@@ -12,7 +11,6 @@ from DeepLearning_API.networks.network import Network, ModelLoader, NetState, CP
 import dill
 from typing import Union
 from torch.cuda.amp.autocast_mode import autocast
-import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 import shutil
@@ -319,7 +317,7 @@ class Trainer(DistributedObject):
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):
         model = Network.to(self.model, local_rank*self.size)
         
-        model = DDP(model) if torch.cuda.is_available() else CPU_Model(model)
+        model = DDP(model, static_graph=True) if torch.cuda.is_available() else CPU_Model(model)
         if self.modelEMA is not None:
             self.modelEMA.module = Network.to(self.modelEMA.module, local_rank)
         with _Trainer(world_size, global_rank, local_rank, self.size, self.name, self.data_log, self.save_checkpoint_mode, self.epochs, self.epoch, self.autocast, self.it_validation, self.it, model, self.modelEMA, *dataloaders) as t:

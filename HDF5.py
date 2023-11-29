@@ -117,12 +117,21 @@ class Accumulator():
             result = torch.zeros((list(self._layer_accumulator[0].shape[:N])+list(self.shape)), dtype=self._layer_accumulator[0].dtype).to(self._layer_accumulator[0].device)
             for patch_slice, data in zip(self.patch_slices, self._layer_accumulator):
                 slices_dest = tuple([slice(result.shape[i]) for i in range(N)] + list(patch_slice))
-                slices_source = tuple([slice(result.shape[i]) for i in range(N)] + [slice((data.shape[i+N]-(s.stop-s.start))//2, (data.shape[i+N]+(s.stop-s.start))//2) for i, s in enumerate(patch_slice)])
+                slices_source = [slice(result.shape[i]) for i in range(N)]
+                i = 0
+                for s in patch_slice:
+                    if s.stop-s.start == 1:
+                        slices_source += [slice(0, s.stop-s.start)]
+                    else:
+                        slices_source += [slice((data.shape[i+N]-(s.stop-s.start))//2, (data.shape[i+N]+(s.stop-s.start))//2) ]
+                        i += 1
+                        
+                slices_source = tuple(slices_source) 
                 for dim, s in enumerate(patch_slice):
                     if s.stop-s.start == 1:
                         data = data.unsqueeze(dim=dim+N)
                 if self.patchCombine is not None:
-                    result[slices_dest] +=self.patchCombine(data)[slices_source]
+                    result[slices_dest] += self.patchCombine(data)[slices_source]
                 else:
                     result[slices_dest] = data[slices_source]
         else:

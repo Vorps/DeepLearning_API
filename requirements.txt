@@ -1,0 +1,14 @@
+torch
+tqdm
+numpy
+scikit-learn
+SimpleITK
+h5py
+ruamel.yaml
+pynvml
+psutil
+dill
+tensorboard
+torchvision
+TotalSegmentator
+submitit

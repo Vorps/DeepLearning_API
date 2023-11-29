@@ -218,11 +218,11 @@ class MedPerceptualLoss(Criterion):
         self.models: dict[int, torch.nn.Module] = {}
 
     def preprocessing(self, input: torch.Tensor) -> torch.Tensor:
-        input = input.repeat(1, 3, *[1 for _ in range(len(input.shape)-2)])
+        """input = input.repeat(1, 3, *[1 for _ in range(len(input.shape)-2)])
         input = input-torch.min(input)
         if torch.max(input) - torch.min(input) > 0.0001:
             input= input/(torch.max(input)-torch.min(input))
-        input = (input-self.mean.to(input.device))/self.std.to(input.device)
+        input = (input-self.mean.to(input.device))/self.std.to(input.device)"""
         if not all([input.shape[-i-1] == size for i, size in enumerate(reversed(self.shape[2:]))]):
             input = F.interpolate(input, mode=self.mode, size=tuple(self.shape), align_corners=False).type(torch.float32)
         return input
@@ -248,7 +248,7 @@ class MedPerceptualLoss(Criterion):
             self.models[input.device.index] = Network.to(copy.deepcopy(self.model).eval(), input.device.index)
 
         loss = torch.zeros((1), requires_grad = True).to(input.device, non_blocking=False).type(torch.float32)
-        if len(input.shape) == 5:
+        if len(input.shape) == 5 and len(self.shape) == 2:
             for i in range(input.shape[2]):
                 loss = loss + self._compute(input[:, :, i, ...], [t[:, :, i, ...] for t in targets])/input.shape[2]
         else:

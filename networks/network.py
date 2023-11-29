@@ -39,7 +39,6 @@ class OptimizerLoader():
         self.name = name
     
     def getOptimizer(self, key: str, parameter: Iterator[torch.nn.parameter.Parameter]) -> torch.optim.Optimizer:
-        torch.optim.AdamW
         return config("{}.Model.{}.Optimizer".format(os.environ["DEEP_LEARNING_API_ROOT"], key))(getattr(importlib.import_module('torch.optim'), self.name))(parameter, config = None)
         
 class SchedulerStep():
@@ -113,6 +112,7 @@ class Measure():
 
             self._loss: list[torch.Tensor] = []
             self._values: list[float] = []
+            self._values_hist: list[float] = []
         
         def resetLoss(self) -> None:
             self._loss.clear()
@@ -131,6 +131,7 @@ class Measure():
         
         def updateValue(self) -> None:
             self._values.append(self.getLoss().item())
+            self._values_hist.append(self.getLoss().item())
 
         def __len__(self) -> int:
             return len(self._loss)
@@ -211,6 +212,12 @@ class Measure():
         result = {}
         for group in self._loss.keys():
             result.update({name : np.mean(value._values[-n:] if n > 0 else value._values) for name, value in self._loss[group].items() if n < 0 or len(value._values) >= n})
+        return result
+    
+    def getLastMetrics_hist(self, n: int = 1) -> dict[str, float]:
+        result = {}
+        for group in self._loss.keys():
+            result.update({name : np.mean(value._values_hist[-n:] if n > 0 else value._values_hist) for name, value in self._loss[group].items() if n < 0 or len(value._values_hist) >= n})
         return result
 
     def format(self, isLoss: bool) -> dict[str, float]:
@@ -393,7 +400,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                             branchs[branchs_key] = branchs[branchs_key].to(int(self._modulesArgs[name].gpu))
                     
                     if self._modulesArgs[name].isCheckpoint:
-                        out = checkpoint(module, *[branchs[i] for i in self._modulesArgs[name].in_branch])
+                        out = checkpoint(module, *[branchs[i] for i in self._modulesArgs[name].in_branch], use_reentrant=True)
                         for ob in self._modulesArgs[name].out_branch:
                             branchs[ob] = out
                         yield name, out
@@ -596,6 +603,8 @@ class Network(ModuleArgsDict, ABC):
                             last = k2
                     if last is not None:
                         v1._modulesArgs[last]._isEnd = True
+                    else:
+                        v1._modulesArgs[k2]._isEnd = True
 
         for k, v in module.items():
             if hasattr(v, "in_channels"):
