@@ -1,2 +1,6 @@
 __pycache__/
-networks/__pycache__/
+Test/
+!Test/Test_Augmentation.py
+!Test/Test_DatasetUtils.py
+!Test/Test_Transform.py
+

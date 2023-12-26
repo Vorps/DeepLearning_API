@@ -19,6 +19,7 @@ import subprocess
 import random
 from torch.utils.data import DataLoader
 import multiprocessing
+import torch.nn.functional as F
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
 
@@ -748,6 +749,7 @@ def _logImageFormat(input : np.ndarray):
 
     if len(input.shape) == 4:
         input = input[:, input.shape[1]//2]
+
     b = -np.min(input)
     if (np.max(input)+b) > 0:
         return (input+b)/(np.max(input)+b)
@@ -970,3 +972,28 @@ def synchronize_data(world_size: int, gpu: int, data: any) -> list[Any]:
     else:
         outputs = [data]
     return outputs
+
+
+def _resample(data: torch.Tensor, size: list[int]) -> torch.Tensor:
+    if data.dtype == torch.uint8:
+        mode = "nearest"
+    elif len(data.shape) < 4:
+        mode = "bilinear"
+    else:
+        mode = "trilinear"
+    return F.interpolate(data.type(torch.float32).unsqueeze(0), size=tuple([s for s in reversed(size)]), mode=mode).squeeze(0).type(data.dtype)
+
+def resampleIsotropic(image: sitk.Image, spacing : list[float] = [1., 1., 1.]) -> sitk.Image:
+    resize_factor = [y/x for x,y in zip(spacing, image.GetSpacing())]
+    result = sitk.GetImageFromArray(_resample(torch.tensor(sitk.GetArrayFromImage(image)).unsqueeze(0), [int(size*factor) for size, factor in zip(image.GetSize(), resize_factor)]).squeeze(0).numpy())
+    result.SetDirection(image.GetDirection())
+    result.SetOrigin(image.GetOrigin())
+    result.SetSpacing(spacing)
+    return result
+
+def resampleResize(image: sitk.Image, size : list[int] = [100,512,512]):
+    result =  sitk.GetImageFromArray(_resample(torch.tensor(sitk.GetArrayFromImage(image)).unsqueeze(0), size).squeeze(0).numpy())
+    result.SetDirection(image.GetDirection())
+    result.SetOrigin(image.GetOrigin())
+    result.SetSpacing([x/y*z for x,y,z in zip(image.GetSize(), size, image.GetSpacing())])
+    return result

@@ -7,7 +7,9 @@ from DeepLearning_API.networks import network, blocks
 from DeepLearning_API.HDF5 import ModelPatch
 from DeepLearning_API.models.generation.ddpm import DDPM
 from DeepLearning_API.models.segmentation import UNet, NestedUNet
+from DeepLearning_API import augmentation
 import numpy as np
+from DeepLearning_API.HDF5 import Attribute
 
 class Discriminator(network.Network):
 
@@ -20,32 +22,7 @@ class Discriminator(network.Network):
             self.linear_1 = torch.nn.Linear(out_channels, out_channels)
         
         def forward(self, input: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-            return input + self.linear_1(self.siLU(self.linear_0(t))).reshape(input.shape[0], -1, *[1 for _ in range(len(input.shape)-2)])
-        
-    class Discriminator_SampleT(torch.nn.Module):
-
-        def __init__(self, noise_step: int) -> None:
-            super().__init__()
-            self.noise_step_C = noise_step
-            self.noise_step = 0.1
-            self.measure = None
-            self.C = 1
-            self._it = 0
-            self.n = 4
-            self.d = 0.5
-
-        def setMeasure(self, measure: network.Measure, names: list[str]):
-            self.measure = measure
-            self.names = names
-
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
-            if self.measure is not None and self._it % self.n == 0:
-                value = sum([v for k, v in self.measure.getLastMetrics_hist(self.n).items() if k in self.names])
-                self.noise_step += np.sign(self.d - value)*self.C
-                self.noise_step = np.clip(self.noise_step, 1, self.noise_step_C)
-            result = torch.randint(0, int(np.clip(self.noise_step, 1, self.noise_step_C)), (input.shape[0],)).to(input.device)
-            self._it += 1
-            return result
+            return input + self.linear_1(self.siLU(self.linear_0(t))).reshape(input.shape[0], -1, *[1 for _ in range(len(input.shape)-2)]) 
         
     class DiscriminatorNLayers(network.ModuleArgsDict):
 
@@ -64,21 +41,92 @@ class Discriminator(network.Network):
             #self.add_module("AdaptiveAvgPool", blocks.getTorchModule("AdaptiveAvgPool", dim)(tuple([1]*dim)))
             #self.add_module("Flatten", torch.nn.Flatten(1))
 
+    class UpdateP(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self._it = 0
+            self.n = 12
+            self.ada_target = 0.25
+            self.ada_interval = 0.001
+            self.ada_kimg = 500
+
+            self.measure = None
+            self.names = None
+            self.p = 0
+        
+        def setMeasure(self, measure: network.Measure, names: list[str]):
+            self.measure = measure
+            self.names = names
+    
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            if self.measure is not None and self._it % self.n == 0:
+                value = sum([v for k, v in self.measure.getLastMetrics_hist(self.n).items() if k in self.names])
+                adjust = np.sign(self.ada_target-value) * (self.ada_interval)
+                self.p += adjust
+                self.p = np.clip(self.p, 0, 1)
+            return torch.tensor(self.p).to(input.device)
+        
+    class DiscriminatorAugmentation(torch.nn.Module):
+
+        def __init__(self, dim: int):
+            super().__init__()
+
+            self.dataAugmentations : dict[augmentation.DataAugmentation, float] = {}
+            pixel_blitting = {
+                augmentation.Flip([1/3]*3 if dim == 3 else [1/2]*2) : 0,
+                augmentation.Rotate([[90,180,270]]* (3 if dim == 3 else 1)): 0,
+                augmentation.Translate([(-0.5, 0.5)]* (3 if dim == 3 else 2), is_int=True) : 0
+                }
+            
+            self.dataAugmentations.update(pixel_blitting)
+            geometric = {
+                augmentation.Scale([0.2]) : 0,
+                augmentation.Rotate(a_min=0, a_max=360): 0,
+                augmentation.Scale([0.2]*3 if dim == 3 else [0.2]*2) : 0,
+                augmentation.Rotate(a_min=0, a_max=360): 0,
+                augmentation.Translate([(-0.5, 0.5)]* (3 if dim == 3 else 2)) : 0,
+                augmentation.Elastix(16, 16) : 1
+                }
+            self.dataAugmentations.update(geometric)
+            color = {
+                augmentation.Brightness(0.2) : 0.1,
+                augmentation.Contrast(0.5) : 0.1,
+                augmentation.Saturation(1): 0.1,
+                augmentation.HUE(1) : 0,
+                augmentation.LumaFlip(): 0
+            }
+            self.dataAugmentations.update(color)
+            
+            corruptions =  {
+                augmentation.Noise(1) : 1,
+                augmentation.CutOUT(0.5, 0.5, -1) : 0.5
+            }
+            self.dataAugmentations.update(corruptions)
+                
+        def _setP(self, prob: float):
+            for augmentation, p  in self.dataAugmentations.items():
+                augmentation.load(prob*p)
+
+        def forward(self, input: torch.Tensor, prob: torch.Tensor) -> torch.Tensor:
+            self._setP(prob.item())
+            out = input
+            for augmentation in self.dataAugmentations.keys():
+                augmentation.state_init(None, [input.shape[2:]]*input.shape[0], [Attribute()]*input.shape[0])
+                out = augmentation(0, [data for data in out], None)
+            return torch.cat([data.unsqueeze(0) for data in out], 0)
+
+
     class DiscriminatorBlock(network.ModuleArgsDict):
 
         def __init__(self,  channels: list[int] = [1, 16, 32, 64, 64],
                             strides: list[int] = [2,2,2,1],
                             dim : int = 3) -> None:
             super().__init__()
-            noise_step = 1000
-            beta_start = 1e-4
-            beta_end = 0.02
-            time_embedding_dim = 100
-            self.add_module("Noise", blocks.NormalNoise(), out_branch=["eta"])
-            self.add_module("Sample", Discriminator.Discriminator_SampleT(noise_step), out_branch=["t"])
-            self.add_module("Forward", DDPM.DDPM_ForwardProcess(noise_step, beta_start, beta_end), in_branch=[0, "t", "eta"])
-            self.add_module("t", DDPM.DDPM_TimeEmbedding(noise_step, time_embedding_dim), in_branch=["t"], out_branch=["te"])
-            self.add_module("Layers", Discriminator.DiscriminatorNLayers(channels, strides, time_embedding_dim, dim), in_branch=[0, "te"])
+            self.add_module("Prob", Discriminator.UpdateP(), out_branch=["p"])
+            self.add_module("Sample", Discriminator.DiscriminatorAugmentation(dim), in_branch=[0, "p"])
+            self.add_module("t", DDPM.DDPM_TimeEmbedding(1000, 100), in_branch=["p"], out_branch=["te"])
+            self.add_module("Layers", Discriminator.DiscriminatorNLayers(channels, strides, 100, dim), in_branch=[0, "te"])
             self.add_module("Head", Discriminator.DiscriminatorHead(channels[-1], dim))
 
     @config("Discriminator")
@@ -93,7 +141,7 @@ class Discriminator(network.Network):
         self.add_module("DiscriminatorModel", Discriminator.DiscriminatorBlock(channels, strides, dim))
 
     def initialized(self):
-        self["DiscriminatorModel"]["Sample"].setMeasure(self.measure, ["Discriminator_B.DiscriminatorModel.Head.Conv:None:PatchGanLoss"])
+        self["DiscriminatorModel"]["Prob"].setMeasure(self.measure, ["Discriminator_B.DiscriminatorModel.Head.Conv:None:PatchGanLoss"])
 
 class Generator_V1(network.Network):
 
@@ -135,8 +183,10 @@ class Generator_V1(network.Network):
         def __init__(self, channels : int, dim : int):
             super().__init__()
             self.add_module("Conv_0", blocks.getTorchModule("Conv", dim)(channels, channels, kernel_size=3, padding=1, bias=False))
-            self.add_module("Norm", torch.nn.LeakyReLU(0.2, inplace=True))
+            self.add_module("Norm_0", blocks.getTorchModule("BatchNorm", dim)(channels))
+            self.add_module("Activation_0", torch.nn.ReLU())
             self.add_module("Conv_1", blocks.getTorchModule("Conv", dim)(channels, channels, kernel_size=3, padding=1, bias=False))
+            self.add_module("Norm_1", blocks.getTorchModule("BatchNorm", dim)(channels))
             self.add_module("Residual", blocks.Add(), in_branch=[0,1])
 
     class GeneratorNResnetBlock(network.ModuleArgsDict):

@@ -88,6 +88,7 @@ class DataSet(data.Dataset):
         self.nb_dataset = len(data[list(data.keys())[0]])
         self.buffer_size = buffer_size
         self._index_cache: list[int] = []
+        self.device = None
 
     def getPatchConfig(self) -> tuple[list[int], list[int]]:
         return self.patch_size, self.overlap
@@ -96,8 +97,7 @@ class DataSet(data.Dataset):
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 self.groups_src[group_src][group_dest].to(device)
-        for dataAugmentations in self.dataAugmentationsList:
-            dataAugmentations.to(device)
+        self.device = device
 
     def getDatasetFromIndex(self, group_dest: str, index: int) -> Dataset:
         return self.data[group_dest][index]
@@ -118,7 +118,7 @@ class DataSet(data.Dataset):
                 self.loadData(group_src, group_dest, index)
 
     def loadData(self, group_src: str, group_dest : str, index : int) -> None:
-        self.data[group_dest][index].load(self.groups_src[group_src][group_dest].pre_transforms, self.dataAugmentationsList)
+        self.data[group_dest][index].load(self.groups_src[group_src][group_dest].pre_transforms, self.dataAugmentationsList, self.device)
 
     def _unloadData(self, index : int) -> None:
         self._index_cache.remove(index)

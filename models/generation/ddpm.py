@@ -110,9 +110,10 @@ class DDPM(network.Network):
             self.time_embed = torch.nn.Embedding(noise_step, time_embedding_dim)
             self.time_embed.weight.data = DDPM.DDPM_TimeEmbedding.sinusoidal_embedding(noise_step, time_embedding_dim)
             self.time_embed.requires_grad_(False)
+            self.noise_step = noise_step
         
         def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return self.time_embed(input)
+            return self.time_embed((input*self.noise_step).long())
 
     class DDPM_UNet(network.ModuleArgsDict):
 

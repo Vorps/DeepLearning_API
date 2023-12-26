@@ -188,7 +188,7 @@ class Measure():
                     l = v.getLoss()
                     loss[v.group] = loss[v.group].to(l.device)+l
         return loss.values()
-    
+
 
     def getLastLoss(self) -> float:
         loss = 0

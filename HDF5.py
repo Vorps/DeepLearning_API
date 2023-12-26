@@ -259,7 +259,7 @@ class Dataset():
                 i+=1
         self.cache_attributes_bak = copy.deepcopy(self.cache_attributes)
 
-    def load(self, pre_transform : list[Transform], dataAugmentationsList : list[DataAugmentationsList]) -> None:
+    def load(self, pre_transform : list[Transform], dataAugmentationsList : list[DataAugmentationsList], device: torch.device) -> None:
         if self.loaded:
             return
         i = len(pre_transform)
@@ -292,7 +292,7 @@ class Dataset():
         for dataAugmentations in dataAugmentationsList:
             a_data = [data.clone() for _ in range(dataAugmentations.nb)]
             for dataAugmentation in dataAugmentations.dataAugmentations:
-                a_data = dataAugmentation(self.index, a_data)
+                a_data = dataAugmentation(self.index, a_data, device)
             
             for d in a_data:
                 self.data.append(d)

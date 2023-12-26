@@ -346,12 +346,11 @@ class Mask(Transform):
             mask = None
             for datasetUtils in self.datasetsUtils:
                 if datasetUtils.isDatasetExist(self.path, name):
-                    mask = datasetUtils.readData(self.path, name)
+                    mask, _ = datasetUtils.readData(self.path, name)
                     break
             if mask is None:
                 raise NameError("Mask : {}/{} not found".format(self.path, name))
-        input[torch.where(mask != 1)] = self.value_outside
-        return input
+        return torch.where(torch.tensor(mask) > 0, input, self.value_outside)
 
     def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return input

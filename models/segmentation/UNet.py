@@ -27,7 +27,8 @@ class UNetBlock(network.ModuleArgsDict):
         if len(channels) > 2:
             self.add_module("UNetBlock_{}".format(i+1), UNetBlock(channels[1:], nb_conv_per_stage, blockConfig, downSampleMode, upSampleMode, attention, block, nb_class, dim, i+1))
             self.add_module("UpConvBlock", block(in_channels=(channels[1]+channels[2]) if upSampleMode != blocks.UpSampleMode.CONV_TRANSPOSE else channels[1]*2, out_channels=channels[1], blockConfigs=[blockConfig]*nb_conv_per_stage, dim=dim))
-            self.add_module("Head", UNetHead(channels[1], nb_class, dim), out_branch=[-1])
+            if nb_class > 0:
+                self.add_module("Head", UNetHead(channels[1], nb_class, dim), out_branch=[-1])
         if i > 0:
             if attention:
                 self.add_module("Attention", blocks.Attention(F_g=channels[1], F_l=channels[0], F_int=channels[0], dim=dim), in_branch=[1, 0], out_branch=[1])
