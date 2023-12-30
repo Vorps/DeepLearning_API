@@ -3,7 +3,7 @@ import datetime
 
 MODELS_DIRECTORY = lambda : os.environ["DL_API_MODELS_DIRECTORY"]
 CHECKPOINTS_DIRECTORY =lambda : os.environ["DL_API_CHECKPOINTS_DIRECTORY"]
-URL_MODEL =lambda : os.environ["DL_API_URL_MODEL"]
+MODEL = lambda : os.environ["DL_API_MODEL"]
 PREDICTIONS_DIRECTORY =lambda : os.environ["DL_API_PREDICTIONS_DIRECTORY"]
 METRICS_DIRECTORY =lambda : os.environ["DL_API_METRICS_DIRECTORY"]
 STATISTICS_DIRECTORY = lambda : os.environ["DL_API_STATISTICS_DIRECTORY"]

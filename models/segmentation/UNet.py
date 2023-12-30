@@ -10,7 +10,7 @@ class UNetHead(network.ModuleArgsDict):
     def __init__(self, in_channels: int, nb_class: int, dim: int) -> None:
         super().__init__()
         self.add_module("Conv", blocks.getTorchModule("Conv", dim)(in_channels = in_channels, out_channels = nb_class, kernel_size = 1, stride = 1, padding = 0))
-        #self.add_module("Softmax", torch.nn.Softmax(dim=1))
+        self.add_module("Softmax", torch.nn.Softmax(dim=1))
         self.add_module("Argmax", blocks.ArgMax(dim=1))
 
 class UNetBlock(network.ModuleArgsDict):
@@ -52,5 +52,5 @@ class UNet(network.Network):
                     upSampleMode: str = "CONV_TRANSPOSE",
                     attention : bool = False,
                     blockType: str = "Conv") -> None:
-        super().__init__(in_channels = channels[0], optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, patch=patch, dim = dim)
+        super().__init__(in_channels = channels[0], optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, patch=patch, dim = dim)        
         self.add_module("UNetBlock_0", UNetBlock(channels, nb_conv_per_stage, blockConfig, downSampleMode=blocks.DownSampleMode._member_map_[downSampleMode], upSampleMode=blocks.UpSampleMode._member_map_[upSampleMode], attention=attention, block = blocks.ConvBlock if blockType == "Conv" else blocks.ResBlock, nb_class=nb_class, dim=dim))    

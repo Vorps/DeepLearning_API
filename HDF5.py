@@ -13,36 +13,70 @@ from DeepLearning_API.augmentation import DataAugmentationsList
 from typing import Union
 import itertools
 import copy 
+from functools import partial
 
 class PathCombine(ABC):
 
     def __init__(self) -> None:
         self.data: torch.Tensor = None
-        self.dim: int = None
+        self.overlap: int = None
+    
+    """
+    A = slice(0, overlap)
+    B = slice(-overlap, None)
+    C = slice(overlap, -overlap)
+    
+    1D 
+        A+B
+    2D : 
+        AA+AB+BA+BB
+        
+        AC+BC
+        CA+CB
+    3D : 
+        AAA+AAB+ABA+ABB+BAA+BAB+BBA+BBB
+        
+        AAC+ABC+BAC+BBC
+        ACA+ACB+BCA+BCB
+        CAA+CAB+CBA+CBB
 
-    def setPatchConfig(self, patch_size: list[int], overlap: list[int]):
-        self.data = torch.ones([size-o*2 for size, o in zip(patch_size, overlap)])
-        padding = []
-        for o in reversed(overlap):
-            padding.append(o)
-            padding.append(o)
-        self.dim = len([o for o in overlap if o > 0])
-        self.data = self._setSides(self.data, padding)
+        ACC+BCC
+        CAC+CBC
+        CCA+CCB
+    
+    """
+    def setPatchConfig(self, patch_size: list[int], overlap: int):
+        self.data = F.pad(torch.ones([size-overlap*2 for size in patch_size]), [overlap]*2*len(patch_size), mode="constant", value=0)
+        self.data = self._setFunction(self.data, overlap)
+        dim = len(patch_size)
+
+        A = slice(0, overlap)
+        B = slice(-overlap, None)
+        C = slice(overlap, -overlap)
         
-        
-        slices = [[slice(0, o), slice(-o, None)] if o > 0 else [slice(None, None)] for o in overlap]
-        for i, s in enumerate(itertools.product(*slices)):
-            self.data[s] = self._setCorners(self.data[s], i)
+        for i in range(dim):
+            slices_badge = list(itertools.product(*[[A, B] for _ in range(dim-i)]))
+            for indexs in itertools.combinations([0,1,2], i):
+                result = []
+                for slices in slices_badge:
+                    slices = list(slices)
+                    for index in indexs:
+                        slices.insert(index, C)    
+                    result.append(tuple(slices))
+                for patch, s in zip(PathCombine._normalise([self.data[s] for s in result]), result):
+                    self.data[s] = patch
+
+
+    @staticmethod
+    def _normalise(patchs: list[torch.Tensor]) -> list[torch.Tensor]:
+        data_sum = torch.sum(torch.concat([patch.unsqueeze(0) for patch in patchs], dim=0), dim=0)
+        return [d/data_sum for d in patchs]
             
     def __call__(self, input: torch.Tensor) -> torch.Tensor:
         return self.data.repeat([input.shape[0]]+[1]*(len(input.shape)-1)).to(input.device)*input
-
-    @abstractmethod
-    def _setCorners(self, data: torch.Tensor, i: int) -> torch.Tensor:
-        pass
     
     @abstractmethod
-    def _setSides(self, data: torch.Tensor, padding: list[int]):
+    def _setFunction(self, data: torch.Tensor, overlap: int) -> torch.Tensor:
         pass
 
 class Mean(PathCombine):
@@ -51,55 +85,34 @@ class Mean(PathCombine):
     def __init__(self) -> None:
         super().__init__()
 
-    def _setCorners(self, data: torch.Tensor, i: int) -> torch.Tensor:
-        return data/2
-    
-    def _setSides(self, data: torch.Tensor, padding: list[int]) -> torch.Tensor:
-        return F.pad(data, padding, mode="constant", value=1/(2**(self.dim-1)))
+    def _setFunction(self, data: torch.Tensor, overlap: int) -> torch.Tensor:
+        return torch.ones_like(self.data)
     
 class Cosinus(PathCombine):
 
     @config("Cosinus")
     def __init__(self) -> None:
         super().__init__()
-        self.overlap: int = None 
 
-    def setPatchConfig(self, patch_size: list[int], overlap: list[int]):
-        assert len(np.unique(np.asarray([o for o in overlap if o > 0]))) == 1, "Overlap must be the same in each dimension"
-        self.overlap = [o for o in overlap if o > 0][0]
-        super().setPatchConfig(patch_size, overlap)
-    
-    def _setCorners(self, data: torch.Tensor, i: int) -> torch.Tensor:
-        result = torch.zeros_like(data)
-        suport_invert = list(reversed(range(self.overlap)))
-        suport =  list(range(self.overlap))
+    def _function_sides(self, overlap: int, x: float):
+        return np.clip(np.cos(np.pi/(2*(overlap+1))*x), 0, 1)
 
-        func = lambda l: torch.tensor(np.asarray([np.cos(np.pi*1/(2*(self.overlap-1))*(x))**2/2 for x in l]))
-
-        if i == 0 or i == 2:
-            for i in range(self.overlap):
-                result[:, i, :] = func(suport_invert)   
-        elif i == 1 or i == 3:
-            for i in range(self.overlap):
-                result[:, i, :] = func(suport)   
-
-        return result
-    
-    def _function_sides(self, x):
-        return np.clip(np.cos(np.pi*1/(2*(self.overlap-1))*((x-1) if x > 0 else 0))**2, 0, 1)
-
-    def _setSides(self, data: torch.Tensor, padding: list[int]) -> torch.Tensor:
-        data = F.pad(self.data, padding, mode="constant", value=0)
+    def _setFunction(self, data: torch.Tensor, overlap: int) -> torch.Tensor:
         image = sitk.GetImageFromArray(np.asarray(data, dtype=np.uint8))
         danielssonDistanceMapImageFilter = sitk.DanielssonDistanceMapImageFilter()
         distance = torch.tensor(sitk.GetArrayFromImage(danielssonDistanceMapImageFilter.Execute(image)))
-        return distance.apply_(self._function_sides)
+        return distance.apply_(partial(self._function_sides, overlap))
         
 class Accumulator():
 
     def __init__(self, patch_slices: list[tuple[slice]], patch_size: list[int], patchCombine: Union[PathCombine, None] = None, batch: bool = True) -> None:
         self._layer_accumulator: list[Union[torch.Tensor, None]] = [None for i in range(len(patch_slices))]
-        self.patch_slices = patch_slices
+        self.patch_slices = []
+        for patch in patch_slices:
+            slices = []
+            for s, shape in zip(patch, patch_size):
+                slices.append(slice(s.start, s.start+shape))
+            self.patch_slices.append(tuple(slices))
         self.shape = max([[v.stop for v in patch] for patch in patch_slices])
         self.patch_size = patch_size
         self.patchCombine = patchCombine
@@ -114,26 +127,20 @@ class Accumulator():
     def assemble(self) -> torch.Tensor:
         if all([self._layer_accumulator[0].shape[i-len(self.patch_size)] == size for i, size in enumerate(self.patch_size)]): 
             N = 2 if self.batch else 1
-            result = torch.zeros((list(self._layer_accumulator[0].shape[:N])+list(self.shape)), dtype=self._layer_accumulator[0].dtype).to(self._layer_accumulator[0].device)
+            
+            result = torch.zeros((list(self._layer_accumulator[0].shape[:N])+list(max([[v.stop for v in patch] for patch in self.patch_slices]))), dtype=self._layer_accumulator[0].dtype).to(self._layer_accumulator[0].device)
             for patch_slice, data in zip(self.patch_slices, self._layer_accumulator):
                 slices_dest = tuple([slice(result.shape[i]) for i in range(N)] + list(patch_slice))
-                slices_source = [slice(result.shape[i]) for i in range(N)]
-                i = 0
-                for s in patch_slice:
-                    if s.stop-s.start == 1:
-                        slices_source += [slice(0, s.stop-s.start)]
-                    else:
-                        slices_source += [slice((data.shape[i+N]-(s.stop-s.start))//2, (data.shape[i+N]+(s.stop-s.start))//2) ]
-                        i += 1
-                        
-                slices_source = tuple(slices_source) 
+
                 for dim, s in enumerate(patch_slice):
                     if s.stop-s.start == 1:
                         data = data.unsqueeze(dim=dim+N)
                 if self.patchCombine is not None:
-                    result[slices_dest] += self.patchCombine(data)[slices_source]
+                    result[slices_dest] += self.patchCombine(data)
                 else:
-                    result[slices_dest] = data[slices_source]
+                    result[slices_dest] = data
+            result = result[tuple([slice(None, None)]+[slice(0, s) for s in self.shape])]
+
         else:
             result = torch.cat(tuple(self._layer_accumulator), dim=0)
         self._layer_accumulator.clear()
@@ -141,7 +148,7 @@ class Accumulator():
 
 class Patch(ABC):
 
-    def __init__(self, patch_size: list[int], overlap: Union[list[int], None], path_mask: Union[str, None] = None, padValue: float = 0, extend_slice: int = 0) -> None:
+    def __init__(self, patch_size: list[int], overlap: Union[int, None], path_mask: Union[str, None] = None, padValue: float = 0, extend_slice: int = 0) -> None:
         self.patch_size = patch_size
         self.overlap = overlap
         self._patch_slices : dict[int, list[tuple[slice]]] = {}
@@ -182,8 +189,9 @@ class Patch(ABC):
                 padding = []
                 for dim_it, _slice in enumerate(reversed(slices)):
                     p = 0 if _slice.start+self.patch_size[-dim_it-1] <= data.shape[-dim_it-1] else self.patch_size[-dim_it-1]-(data.shape[-dim_it-1]-_slice.start)
-                    padding.append(p//2)
-                    padding.append(int(np.ceil(p/2)))
+                    padding.append(0)
+                    padding.append(p)
+
                 data_sliced = F.pad(data_sliced, tuple(padding), "constant", 0 if data_sliced.dtype == torch.uint8 and self.padValue < 0 else self.padValue)
                 if self.mask is not None:
                     outside = torch.ones_like(data_sliced)*(0 if data_sliced.dtype == torch.uint8 and self.padValue < 0 else self.padValue)
@@ -200,17 +208,17 @@ class Patch(ABC):
 class DatasetPatch(Patch):
 
     @config("Patch")
-    def __init__(self, patch_size : list[int] = [128, 256, 256], overlap : Union[list[int], None] = None, mask: Union[str, None] = None, padValue: float = 0, extend_slice: int = 0) -> None:
+    def __init__(self, patch_size : list[int] = [128, 256, 256], overlap : Union[int, None] = None, mask: Union[str, None] = None, padValue: float = 0, extend_slice: int = 0) -> None:
         super().__init__(patch_size, overlap, mask, padValue, extend_slice)
 
-    def getData(self, data : torch.Tensor, index : int, a: int, isInput: bool) -> torch.Tensor:      
+    def getData(self, data : torch.Tensor, index : int, a: int, isInput: bool) -> torch.Tensor:
         data = torch.cat(super()._getData(data, index, a, isInput), dim=0)
         return data
     
 class ModelPatch(Patch):
 
     @config("Patch")
-    def __init__(self, patch_size : list[int] = [128, 256, 256], overlap : Union[list[int], None] = None, patchCombine: Union[str, None] = None, mask: Union[str, None] = None, padValue: float = 0, extend_slice: int = 0) -> None:
+    def __init__(self, patch_size : list[int] = [128, 256, 256], overlap : Union[int, None] = None, patchCombine: Union[str, None] = None, mask: Union[str, None] = None, padValue: float = 0, extend_slice: int = 0) -> None:
         super().__init__(patch_size, overlap, mask, padValue, extend_slice)
         self.patchCombine = patchCombine
 
@@ -237,6 +245,7 @@ class Dataset():
         _shape = list(_shape[1:])
         
         self.data : list[torch.Tensor] = list()
+
         for transformFunction in pre_transforms:
             _shape = transformFunction.transformShape(_shape, cache_attribute)
         

@@ -587,7 +587,8 @@ class Network(ModuleArgsDict, ABC):
                         break
                 else:
                     model_state_dict[alias] = model_state_dict_tmp[alias]
-            self.load_state_dict(model_state_dict, )
+            self.load_state_dict(model_state_dict)
+
         if "{}_optimizer_state_dict".format(name) in state_dict and self.optimizer:
             self.optimizer.load_state_dict(state_dict['{}_optimizer_state_dict'.format(name)])
         self.initialized()

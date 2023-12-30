@@ -8,6 +8,7 @@ from DeepLearning_API.config import config
 from abc import ABC, abstractmethod
 import torch.nn.functional as F
 from typing import Any, Union
+import ast
 
 class Transform(NeedDevice, ABC):
     
@@ -141,7 +142,7 @@ class TensorCast(Transform):
         return input.type(self.dtype)
     
     def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return input.type(cache_attribute.pop("dtype"))
+        return input.to(eval(cache_attribute.pop("dtype")))
 
 class Padding(Transform):
 
@@ -389,12 +390,15 @@ class Gradient(Transform):
 class ArgMax(Transform):
 
     @config("ArgMax") 
-    def __init__(self, dim: int) -> None:
+    def __init__(self, dim: int = 0) -> None:
         self.dim = dim
     
-    def __call__(self, name: str, input : torch.Tensor) -> torch.Tensor:
+    def __call__(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.argmax(input, dim=self.dim).unsqueeze(self.dim)
-
+    
+    def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return input
+    
 class FlatLabel(Transform):
 
     @config("FlatLabel")
@@ -446,7 +450,8 @@ class Flip(Transform):
     @config("Flip")
     def __init__(self, dims: str = "1|0|2") -> None:
         super().__init__()
-        self.dims = [0]+[int(d)+1 for d in dims.split("|")]
+
+        self.dims = [int(d)+1 for d in str(dims).split("|")]
 
     def __call__(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return input.flip(tuple(self.dims))

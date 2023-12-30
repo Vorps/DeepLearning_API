@@ -178,6 +178,16 @@ class Print(torch.nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         print(input.shape)
         return input
+
+class Write(torch.nn.Module):
+
+    def __init__(self) -> None:
+        super().__init__()
+    
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        import SimpleITK as sitk
+        sitk.WriteImage(sitk.GetImageFromArray(input.clone()[0][0].cpu().numpy()), "./Data.mha")
+        return input
     
 class Exit(torch.nn.Module):
 

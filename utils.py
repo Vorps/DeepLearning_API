@@ -525,6 +525,9 @@ def gpuInfo(device : Union[int, torch.device], showMemory: bool = True) -> str:
             device = int(str(device).replace("cuda:", ""))
         else:
             return ""
+    
+    device = [int(i) for i in os.environ["CUDA_VISIBLE_DEVICES"].split(",")][device]
+    
     if device < pynvml.nvmlDeviceGetCount():
         handle = pynvml.nvmlDeviceGetHandleByIndex(device)
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
@@ -539,6 +542,7 @@ def getMaxGPUMemory(device : Union[int, torch.device]) -> float:
             device = int(str(device).replace("cuda:", ""))
         else:
             return 0
+    device = [int(i) for i in os.environ["CUDA_VISIBLE_DEVICES"].split(",")][device]
     if device < pynvml.nvmlDeviceGetCount():
         handle = pynvml.nvmlDeviceGetHandleByIndex(device)
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
@@ -553,6 +557,7 @@ def getGPUMemory(device : Union[int, torch.device]) -> float:
             device = int(str(device).replace("cuda:", ""))
         else:
             return 0
+    device = [int(i) for i in os.environ["CUDA_VISIBLE_DEVICES"].split(",")][device]
     if device < pynvml.nvmlDeviceGetCount():
         handle = pynvml.nvmlDeviceGetHandleByIndex(device)
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
@@ -585,11 +590,11 @@ class State(Enum):
     def __str__(self) -> str:
         return self.value
 
-def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: list[int], nb_patch_per_dim : list[tuple[int, bool]], overlap: Union[list[int], None]) -> list[tuple[slice]]:
+def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: list[int], nb_patch_per_dim : list[tuple[int, bool]], overlap: Union[int, None]) -> list[tuple[slice]]:
     patch_slices = []
     slices : list[list[slice]] = []
     if overlap is None:
-        overlap = [0 for _ in range(len(nb_patch_per_dim))]
+        overlap = 0
     patch_size = []
     i = 0
     for nb in nb_patch_per_dim:
@@ -602,14 +607,14 @@ def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: list[int], nb_patch_p
     for dim, nb in enumerate(nb_patch_per_dim):
         slices.append([])
         for index in range(nb[0]):
-            start = (patch_size[dim]-overlap[dim])*index
+            start = (patch_size[dim]-overlap)*index
             end = start + patch_size[dim]
             slices[dim].append(slice(start,end))
     for chunk in itertools.product(*slices):
         patch_slices.append(tuple(chunk))
     return patch_slices
 
-def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overlap: Union[list[int], None]) -> tuple[list[tuple[slice]], list[tuple[int, bool]]]:
+def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overlap: Union[int, None]) -> tuple[list[tuple[slice]], list[tuple[int, bool]]]:
     if len(shape) != len(patch_size):
         return [tuple([slice(0, s) for s in shape])], [(1, True)]*len(shape)
     
@@ -618,22 +623,23 @@ def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overla
     slices : list[list[slice]] = []
     if overlap is None:
         size = [np.ceil(a/b) for a, b in zip(shape, patch_size)]
-        overlap_tmp = np.zeros(len(size), dtype=np.int_)
+        tmp = np.zeros(len(size), dtype=np.int_)
         for i, s in enumerate(size):
             if s > 1:
-                overlap_tmp[i] = np.mod(patch_size[i]-np.mod(shape[i], patch_size[i]), patch_size[i])//(size[i]-1)
+                tmp[i] = np.mod(patch_size[i]-np.mod(shape[i], patch_size[i]), patch_size[i])//(size[i]-1)
+        overlap = tmp
     else:
-        overlap_tmp = overlap
+        overlap = [overlap for _ in range(len(patch_size))]
     
     for dim in range(len(shape)):
-        assert overlap_tmp[dim] < patch_size[dim],  "Overlap must be less than patch size"
+        assert overlap[dim] < patch_size[dim],  "Overlap must be less than patch size"
             
 
     for dim in range(len(shape)):
         slices.append([])
         index = 0
         while True:
-            start = (patch_size[dim]-overlap_tmp[dim])*index
+            start = (patch_size[dim]-overlap[dim])*index
 
             end = start + patch_size[dim]
             if end >= shape[dim]:
@@ -739,8 +745,6 @@ def parameterMap_to_ITK_BSplineTransform(path_src: str, path_dest: str) -> None:
         f.write("FixedParameters: "+" ".join([str(i) for i in GridSize])+" "+" ".join([str(i) for i in GridOrigin])+" "+" ".join([str(i) for i in GridSpacing])+" "+" ".join([str(i) for i in GridDirection])+"\n")
 
 def _logImageFormat(input : np.ndarray):
-    if input.dtype == np.uint8:
-        return input
     if len(input.shape) == 2:
         input = np.expand_dims(input, axis=0)
 
@@ -749,7 +753,11 @@ def _logImageFormat(input : np.ndarray):
 
     if len(input.shape) == 4:
         input = input[:, input.shape[1]//2]
-
+    
+    if input.dtype == np.uint8:
+        return input
+        
+    input = input.astype(float)
     b = -np.min(input)
     if (np.max(input)+b) > 0:
         return (input+b)/(np.max(input)+b)
@@ -778,7 +786,6 @@ def _logVideoFormat(input : np.ndarray):
     for i, channels in enumerate(channel_split):
         input[:,:,i] = np.mean(channels, axis=0)
     return input
-
 
 class DataLog(Enum):
     IMAGE   = lambda tb, name, layer, it : tb.add_image(name, _logImageFormat(layer[0]), it),
@@ -873,7 +880,7 @@ def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
     api_args.add_argument('--num-workers', '--num_workers', default=4, type=int, help='No. of workers per DataLoader & GPU')
     api_args.add_argument("-models_dir", "--MODELS_DIRECTORY", type=str, default="./Models/", help="Models location")
     api_args.add_argument("-checkpoints_dir", "--CHECKPOINTS_DIRECTORY", type=str, default="./Checkpoints/", help="Checkpoints location")
-    api_args.add_argument("-url", "--URL_MODEL", type=str, default="", help="URL Model")
+    api_args.add_argument("-model", "--MODEL", type=str, default="", help="URL Model")
     api_args.add_argument("-predictions_dir", "--PREDICTIONS_DIRECTORY", type=str, default="./Predictions/", help="Predictions location")
     api_args.add_argument("-metrics_dir", "--METRICS_DIRECTORY", type=str, default="./Metrics/", help="Metrics location")
     api_args.add_argument("-statistics_dir", "--STATISTICS_DIRECTORY", type=str, default="./Statistics/", help="Statistics location")
@@ -888,9 +895,10 @@ def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
     os.environ["DL_API_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
     os.environ["DL_API_METRICS_DIRECTORY"] = config["METRICS_DIRECTORY"]
     os.environ["DL_API_STATISTICS_DIRECTORY"] = config["STATISTICS_DIRECTORY"]
+    
     os.environ["DL_API_STATE"] = str(config["type"])
     
-    os.environ["DL_API_URL_MODEL"] = config["URL_MODEL"]
+    os.environ["DL_API_MODEL"] = config["MODEL"]
 
     os.environ["DL_API_SETUPS_DIRECTORY"] = config["SETUPS_DIRECTORY"]
 

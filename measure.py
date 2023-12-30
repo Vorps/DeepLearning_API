@@ -42,24 +42,20 @@ class MaskedLoss(Criterion):
                 result = result*mask
         return result
 
-    def forward(self, input: torch.Tensor, *target : list[torch.Tensor]) -> torch.Tensor:
-        loss = torch.tensor(0, dtype=torch.float32).to(input.device)
-        for batch in range(input.shape[0]):
+    def forward(self, input1: torch.Tensor, *target : list[torch.Tensor]) -> torch.Tensor:
+        loss = torch.tensor(0, dtype=torch.float32).to(input1.device)
+        for batch in range(input1.shape[0]):
             mask = self.getMask(target[1:])
             if mask is not None:
-                import SimpleITK as sitk
-                sitk.WriteImage(sitk.GetImageFromArray(input.squeeze(0).squeeze(0).detach().cpu().numpy()), "Input.mha")
-                sitk.WriteImage(sitk.GetImageFromArray(target[0].squeeze(0).squeeze(0).cpu().numpy()), "Target.mha")
-                sitk.WriteImage(sitk.GetImageFromArray(mask.squeeze(0).squeeze(0).to(torch.uint8).cpu().numpy()), "Mask.mha")
                 if self.mode_image_masked:
                     for i in torch.unique(mask):
-                        loss += self.loss(input[batch, ...]*torch.where(mask == i, 1, 0), target[0][batch, ...]*torch.where(mask == i, 1, 0))
+                        loss += self.loss(input1[batch, ...]*torch.where(mask == i, 1, 0), target[0][batch, ...]*torch.where(mask == i, 1, 0))
                 else:
                     for i in torch.unique(mask):
-                        loss += self.loss(torch.masked_select(input[batch, ...], mask[batch, ...] == i), torch.masked_select(target[0][batch, ...], mask[batch, ...] == i))
+                        loss += self.loss(torch.masked_select(input1[batch, ...], mask[batch, ...] == i), torch.masked_select(target[0][batch, ...], mask[batch, ...] == i))
             else:
-                loss += self.loss(input[batch, ...], target[0][batch, ...])
-        return loss/input.shape[0]
+                loss += self.loss(input1[batch, ...], target[0][batch, ...])
+        return loss/input1.shape[0]
     
 class MSE(MaskedLoss):
 
@@ -116,8 +112,8 @@ class Dice(Criterion):
         return (2.*(input * target).sum() + self.smooth)/(input.sum() + target.sum() + self.smooth)
 
     def forward(self, input1: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        target = F.one_hot(target.type(torch.int64)).permute(0, len(target.shape), *[i+1 for i in range(len(target.shape)-1)]).float().squeeze(2)
-        input1 = F.one_hot(input1.type(torch.int64)).permute(0, len(input1.shape), *[i+1 for i in range(len(input1.shape)-1)]).float().squeeze(2)
+        target = F.one_hot(target.type(torch.int64), num_classes=input1.shape[1]).permute(0, len(target.shape), *[i+1 for i in range(len(target.shape)-1)]).float().squeeze(2)
+        #input1 = F.one_hot(input1.type(torch.int64)).permute(0, len(input1.shape), *[i+1 for i in range(len(input1.shape)-1)]).float().squeeze(2)
         return 1-torch.mean(self.dice_per_channel(input1, target))
 
 class GradientImages(Criterion):

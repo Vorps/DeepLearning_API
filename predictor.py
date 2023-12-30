@@ -6,7 +6,7 @@ import torch
 import tqdm
 import os
 
-from DeepLearning_API import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, URL_MODEL
+from DeepLearning_API import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, MODEL
 from DeepLearning_API.config import config
 from DeepLearning_API.utils import DatasetUtils, State, gpuInfo, Attribute, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule, DistributedObject, DataLog
 from DeepLearning_API.dataset import DataPrediction, DataSet
@@ -59,7 +59,7 @@ class OutDataset(DatasetUtils, NeedDevice, ABC):
             module, name = _getModule(self._patchCombine, "HDF5")
             self.patchCombine = getattr(importlib.import_module(module), name)(config = None, DL_args =  "{}.outsDataset.{}.OutDataset".format(os.environ["DEEP_LEARNING_API_ROOT"], name_layer))
     
-    def setPatchConfig(self, patchSize: Union[list[int], None], overlap: Union[list[int], None], nb_data_augmentation: int) -> None:
+    def setPatchConfig(self, patchSize: Union[list[int], None], overlap: Union[int, None], nb_data_augmentation: int) -> None:
         if patchSize is not None and overlap is not None:
             if self.patchCombine is not None:
                 self.patchCombine.setPatchConfig(patchSize, overlap)
@@ -135,22 +135,24 @@ class OutSameAsGroupDataset(OutDataset):
                         layer = dataAugmentation.inverse(index, index_augmentation_tmp, layer)
                 i += dataAugmentations.nb
 
+        for transform in self.post_transforms:
+            layer = transform(name, layer, self.attributes[index][index_augmentation][0])
+            
         if self.inverse_transform:
             for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].pre_transforms):
                 layer = transform.inverse(name, layer, self.attributes[index][index_augmentation][0])
-
-        for transform in self.post_transforms:
-            layer = transform(name, layer, self.attributes[index][index_augmentation][0])
         return layer
 
     def getOutput(self, index: int, dataset: DataSet) -> torch.Tensor:
         result = torch.cat([self._getOutput(index, index_augmentation, dataset).unsqueeze(0) for index_augmentation in self.output_layer_accumulator[index].keys()], dim=0)
         name = self.names[index]
         self.output_layer_accumulator.pop(index)
+        dtype = result.dtype
+
         if self.redution == "mean":
-            result = torch.mean(result, dim=0)
+            result = torch.mean(result.float(), dim=0).to(dtype)
         elif self.redution == "median":
-            result, _ = torch.median(result, dim=0)
+            result, _ = torch.median(result.float(), dim=0).to(dtype)
         else:
             raise NameError("Reduction method does not exist (mean, median)")
         for transform in self.final_transforms:
@@ -311,22 +313,22 @@ class Predictor(DistributedObject):
         pass
 
     def _load(self) -> dict[str, dict[str, torch.Tensor]]:
-        if URL_MODEL().startswith("https://"):
+        if MODEL().startswith("https://"):
             try:
-                state_dict = {URL_MODEL().split(":")[1]: torch.hub.load_state_dict_from_url(url=URL_MODEL().split(":")[0], map_location="cpu", check_hash=True)}
+                state_dict = {MODEL().split(":")[1]: torch.hub.load_state_dict_from_url(url=MODEL().split(":")[0], map_location="cpu", check_hash=True)}
             except:
-                raise Exception("Model : {} does not exist !".format(URL_MODEL())) 
+                raise Exception("Model : {} does not exist !".format(MODEL())) 
         else:
-            path = MODELS_DIRECTORY()
-            if MODELS_DIRECTORY() == "./Models/":
-                path += self.name.split("/")[0]+"/StateDict/"
+            if MODEL() != "":
+                path = ""
+                name = MODEL() 
+            else:
+                path = MODELS_DIRECTORY()+self.name.split("/")[0]+"/StateDict/"
                 if len(self.name.split("/")) == 2:
                     name = self.name.split("/")[-1]
                 elif os.listdir(path):
                     name = sorted(os.listdir(path))[-1]
-            else:
-                name = self.name
-            if os.path.exists(MODELS_DIRECTORY()+name):
+            if os.path.exists(path+name):
                 state_dict = torch.load(path+name)
             else:
                 raise Exception("Model : {} does not exist !".format(self.name))

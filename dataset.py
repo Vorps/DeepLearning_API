@@ -14,6 +14,8 @@ from DeepLearning_API.config import config
 from DeepLearning_API.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, DatasetUtils, State
 from DeepLearning_API.transform import TransformLoader, Transform
 from DeepLearning_API.augmentation import DataAugmentationsList
+from multiprocessing import Manager
+import time
 
 class GroupTransform:
 
@@ -76,7 +78,7 @@ class CustomSampler(Sampler[int]):
 
 class DataSet(data.Dataset):
 
-    def __init__(self, rank: int, data : dict[str, list[Dataset]], map: dict[int, tuple[int, int, int]], groups_src : dict[str, Group], dataAugmentationsList : list[DataAugmentationsList], patch_size: Union[list[int], None], overlap: Union[list[int], None], buffer_size: int, use_cache = True) -> None:
+    def __init__(self, rank: int, data : dict[str, list[Dataset]], map: dict[int, tuple[int, int, int]], groups_src : dict[str, Group], dataAugmentationsList : list[DataAugmentationsList], patch_size: Union[list[int], None], overlap: Union[int, None], buffer_size: int, use_cache = True) -> None:
         self.rank = rank
         self.data = data
         self.map = map
@@ -87,10 +89,10 @@ class DataSet(data.Dataset):
         self.use_cache = use_cache
         self.nb_dataset = len(data[list(data.keys())[0]])
         self.buffer_size = buffer_size
-        self._index_cache: list[int] = []
+        self._index_cache = list()
         self.device = None
 
-    def getPatchConfig(self) -> tuple[list[int], list[int]]:
+    def getPatchConfig(self) -> tuple[list[int], int]:
         return self.patch_size, self.overlap
     
     def to(self, device: int):
@@ -139,7 +141,7 @@ class DataSet(data.Dataset):
             if len(self._index_cache) >= self.buffer_size and not self.use_cache:
                 self._unloadData(self._index_cache[0])
             self._loadData(x)
-            
+
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 dataset = self.data[group_dest][x]
@@ -212,7 +214,7 @@ class Data(ABC):
         self.dataAugmentationsList = dataAugmentationsList
         self.batch_size = batch_size
         self.dataSet_args = dict(groups_src=self.groups_src, dataAugmentationsList = list(self.dataAugmentationsList.values()), use_cache = use_cache, buffer_size=batch_size+1, patch_size=self.patch.patch_size if self.patch is not None else None, overlap=self.patch.overlap if self.patch is not None else None)
-        self.dataLoader_args = dict(num_workers=num_workers, pin_memory=pin_memory)
+        self.dataLoader_args = dict(num_workers=num_workers if use_cache else 0, pin_memory=pin_memory)
         self.data : list[list[dict[str, list[Dataset]]], dict[str, list[Dataset]]] = []
         self.map : list[list[list[tuple[int, int, int]]], list[tuple[int, int, int]]] = []
         self.datasets: dict[str, DatasetUtils] = {}
@@ -273,7 +275,6 @@ class Data(ABC):
 
             for group_dest in self.groups_src[group_src]:
                 self.groups_src[group_src][group_dest].load(group_src, group_dest, [self.datasets[filename] for filename in datasets[group_src]])
-
         for key, dataAugmentations in self.dataAugmentationsList.items():
             dataAugmentations.load(key)
 

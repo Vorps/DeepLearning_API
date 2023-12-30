@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader
 import tqdm
 import numpy as np
 import os
-from DeepLearning_API import MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, URL_MODEL, DATE
+from DeepLearning_API import MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, MODEL, DATE
 from DeepLearning_API.dataset import DataTrain
 from DeepLearning_API.config import config
 from DeepLearning_API.utils import gpuInfo, State, DataLog, DistributedObject
@@ -172,7 +172,7 @@ class _Trainer():
                     if len(images_log):
                         for name, layer, _ in model.get_layers([v.to(0) for k, v in self.getInput(data_dict).items() if k[1]], images_log):
                             self.data_log[name][0](self.tb, "{}/{}{}".format(type_log, name, label), layer[:self.data_log[name][1]].detach().cpu().numpy(), self.it)
-            
+                        
             if type_log == "Trainning":
                 for name, network in self.model.module.getNetworks().items():
                     if network.optimizer is not None:
@@ -240,18 +240,27 @@ class Trainer(DistributedObject):
         self._save()
 
     def _load(self) -> dict[str, dict[str, torch.Tensor]]:
-        if URL_MODEL().startswith("https://"):
+        if MODEL().startswith("https://"):
             try:
-                state_dict = {URL_MODEL().split(":")[1]: torch.hub.load_state_dict_from_url(url=URL_MODEL().split(":")[0], map_location="cpu", check_hash=True)}
+                state_dict = {MODEL().split(":")[1]: torch.hub.load_state_dict_from_url(url=MODEL().split(":")[0], map_location="cpu", check_hash=True)}
             except:
-                raise Exception("Model : {} does not exist !".format(URL_MODEL())) 
+                raise Exception("Model : {} does not exist !".format(MODEL())) 
         else:
-            path = CHECKPOINTS_DIRECTORY()+self.name+"/"
-            if os.path.exists(path) and os.listdir(path):
-                name = sorted(os.listdir(path))[-1]
+            if MODEL() != "":
+                path = ""
+                name = MODEL()
+            else:
+                path += self.name.split("/")[0]+"/StateDict/"
+                if len(self.name.split("/")) == 2:
+                    name = self.name.split("/")[-1]
+                elif os.listdir(path):
+                    name = sorted(os.listdir(path))[-1]
+            
+            if os.path.exists(path+name):
                 state_dict = torch.load(path+name)
             else:
                 raise Exception("Model : {} does not exist !".format(self.name))
+            
         if "epoch" in state_dict:
             self.epoch = state_dict['epoch']
         if "it" in state_dict:
@@ -285,7 +294,7 @@ class Trainer(DistributedObject):
     
     def setup(self, world_size: int):
         state = State._member_map_[os.environ["DL_API_STATE"]]
-        if state == State.TRAIN and os.path.exists(STATISTICS_DIRECTORY()+self.name+"/"):
+        if state != State.RESUME and os.path.exists(STATISTICS_DIRECTORY()+self.name+"/"):
             if os.environ["DL_API_OVERWRITE"] != "True":
                 accept = input("The model {} already exists ! Do you want to overwrite it (yes,no) : ".format(self.name))
                 if accept != "yes":
