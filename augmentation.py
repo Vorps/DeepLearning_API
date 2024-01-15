@@ -126,11 +126,8 @@ class EulerTransform(DataAugmentation):
             results.append(F.grid_sample(input.unsqueeze(0).type(torch.float32), F.affine_grid(matrix[:, :-1,...], [1]+list(input.shape), align_corners=True).to(input.device), align_corners=True, mode="bilinear", padding_mode="reflection").type(input.dtype).squeeze(0))
         return results
     
-    def _inverse(self, index: int, a: int, inputs : torch.Tensor) -> torch.Tensor:
-        results = []
-        for input, matrix in zip(inputs, self.matrix[index].inverse()):
-            results.append(F.grid_sample(input.unsqueeze(0).type(torch.float32), F.affine_grid(matrix, list(input.shape), align_corners=True).to(input.device), align_corners=True, mode="bilinear", padding_mode="reflection").type(input.dtype).squeeze(0))
-        return results
+    def _inverse(self, index: int, a: int, input : torch.Tensor) -> torch.Tensor:
+        return F.grid_sample(input.unsqueeze(0).type(torch.float32), F.affine_grid(self.matrix[index][a].inverse()[:, :-1,...], [1]+list(input.shape), align_corners=True).to(input.device), align_corners=True, mode="bilinear", padding_mode="reflection").type(input.dtype).squeeze(0)
 
 class Translate(EulerTransform):
     

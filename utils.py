@@ -629,11 +629,10 @@ def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overla
                 tmp[i] = np.mod(patch_size[i]-np.mod(shape[i], patch_size[i]), patch_size[i])//(size[i]-1)
         overlap = tmp
     else:
-        overlap = [overlap for _ in range(len(patch_size))]
+        overlap = [overlap if size > 1 else 0 for size in patch_size]
     
     for dim in range(len(shape)):
         assert overlap[dim] < patch_size[dim],  "Overlap must be less than patch size"
-            
 
     for dim in range(len(shape)):
         slices.append([])
@@ -919,6 +918,8 @@ def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
             os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Config.yml"
     else:
         os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = config["config"]
+    torch.autograd.set_detect_anomaly(True)
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     
     if config["type"] is State.PREDICTION:    
         from DeepLearning_API.predictor import Predictor

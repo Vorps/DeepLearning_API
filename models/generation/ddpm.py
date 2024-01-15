@@ -112,8 +112,8 @@ class DDPM(network.Network):
             self.time_embed.requires_grad_(False)
             self.noise_step = noise_step
         
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return self.time_embed((input*self.noise_step).long())
+        def forward(self, input: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+            return self.time_embed((p*self.noise_step).long().repeat((input.shape[0])))
 
     class DDPM_UNet(network.ModuleArgsDict):
 

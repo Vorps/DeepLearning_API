@@ -35,7 +35,6 @@ class MaskedLoss(Criterion):
 
     def getMask(self, targets: list[torch.Tensor]) -> torch.Tensor:
         result = None
-        
         if len(targets) > 0:
             result = targets[0]
             for mask in targets[1:]:
@@ -49,10 +48,12 @@ class MaskedLoss(Criterion):
             if mask is not None:
                 if self.mode_image_masked:
                     for i in torch.unique(mask):
-                        loss += self.loss(input1[batch, ...]*torch.where(mask == i, 1, 0), target[0][batch, ...]*torch.where(mask == i, 1, 0))
+                        if i != 0:
+                            loss += self.loss(input1[batch, ...]*torch.where(mask == i, 1, 0), target[0][batch, ...]*torch.where(mask == i, 1, 0))
                 else:
                     for i in torch.unique(mask):
-                        loss += self.loss(torch.masked_select(input1[batch, ...], mask[batch, ...] == i), torch.masked_select(target[0][batch, ...], mask[batch, ...] == i))
+                        if i != 0:
+                            loss += self.loss(torch.masked_select(input1[batch, ...], mask[batch, ...] == i), torch.masked_select(target[0][batch, ...], mask[batch, ...] == i))
             else:
                 loss += self.loss(input1[batch, ...], target[0][batch, ...])
         return loss/input1.shape[0]
@@ -199,13 +200,25 @@ class Gram(Criterion):
 
 class MedPerceptualLoss(Criterion):
     
-    def __init__(self, modelLoader : ModelLoader = ModelLoader(), path_model : str = "name", module_names : list[str] = ["ConvNextEncoder.ConvNexStage_2.BottleNeckBlock_0.Linear_2", "ConvNextEncoder.ConvNexStage_3.BottleNeckBlock_0.Linear_2"], shape: list[int] = [128, 256, 256], losses: list[str] = ["Gram", "torch_nn_L1Loss"]) -> None:
-        super().__init__()
+    class Module():
         
-        DEEP_LEARNING_API_CONFIG_PATH = ".".join(os.environ['DEEP_LEARNING_API_CONFIG_PATH'].split(".")[:-1])
+        @config(None)
+        def __init__(self, losses: dict[str, float] = {"Gram": 1, "torch_nn_L1Loss": 1}) -> None:
+            self.losses = losses
+            self.DL_args = os.environ['DEEP_LEARNING_API_CONFIG_PATH'] if "DEEP_LEARNING_API_CONFIG_PATH" in os.environ else ""
+
+        def getLoss(self) -> dict[torch.nn.Module, float]:
+            result: dict[torch.nn.Module, float] = {}
+            for loss, l in self.losses.items():
+                module, name = _getModule(loss, "measure")
+                result[config(self.DL_args)(getattr(importlib.import_module(module), name))(config=None)] = l   
+            return result
+        
+    def __init__(self, modelLoader : ModelLoader = ModelLoader(), path_model : str = "name", modules : dict[str, Module] = {"UNetBlock_0.DownConvBlock.Activation_1": Module({"Gram": 1, "torch_nn_L1Loss": 1})}, shape: list[int] = [128, 256, 256]) -> None:
+        super().__init__()
         self.path_model = path_model
         if self.path_model not in modelsRegister:
-            self.model = modelLoader.getModel(train=False, DL_args=os.environ['DEEP_LEARNING_API_CONFIG_PATH'], DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain", "outputsCriterions", "drop_p"])
+            self.model = modelLoader.getModel(train=False, DL_args=os.environ['DEEP_LEARNING_API_CONFIG_PATH'].split("MedPerceptualLoss")[0]+"MedPerceptualLoss.Model", DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain", "outputsCriterions", "drop_p"])
             if path_model.startswith("https"):
                 state_dict = torch.hub.load_state_dict_from_url(path_model)
                 state_dict = {"Model": {self.model.getName() : state_dict["model"]}}
@@ -216,25 +229,17 @@ class MedPerceptualLoss(Criterion):
         else:
             self.model = modelsRegister[self.path_model]
 
-        self.module_names = list(set(module_names))
         self.shape = shape
         self.mode = "trilinear" if  len(shape) == 3 else "bilinear"
-        self.losses = []
-        for loss in losses:
-            module, name = _getModule(loss, "measure")
-            self.losses.append(config(DEEP_LEARNING_API_CONFIG_PATH)(getattr(importlib.import_module(module), name))(config = None))
-        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
-        self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+        self.modules_loss: dict[str, dict[torch.nn.Module, float]] = {}
+        for name, losses in modules.items():
+            self.modules_loss[name.replace(":", ".")] = losses.getLoss()
+
         self.model.eval()
         self.model.requires_grad_(False)
         self.models: dict[int, torch.nn.Module] = {}
 
     def preprocessing(self, input: torch.Tensor) -> torch.Tensor:
-        """input = input.repeat(1, 3, *[1 for _ in range(len(input.shape)-2)])
-        input = input-torch.min(input)
-        if torch.max(input) - torch.min(input) > 0.0001:
-            input= input/(torch.max(input)-torch.min(input))
-        input = (input-self.mean.to(input.device))/self.std.to(input.device)"""
         if not all([input.shape[-i-1] == size for i, size in enumerate(reversed(self.shape[2:]))]):
             input = F.interpolate(input, mode=self.mode, size=tuple(self.shape), align_corners=False).type(torch.float32)
         return input
@@ -247,11 +252,11 @@ class MedPerceptualLoss(Criterion):
             input = zipped_input[0]
             targets = zipped_input[1:]
            
-            for zipped_layers in list(zip(self.models[input.device.index].get_layers([input], self.module_names.copy()), *[self.models[input.device.index].get_layers([target], self.module_names.copy()) for target in targets])):
+            for zipped_layers in list(zip(self.models[input.device.index].get_layers([input], set(self.modules_loss.keys()).copy()), *[self.models[input.device.index].get_layers([target], set(self.modules_loss.keys()).copy()) for target in targets])):
                 input_layer = zipped_layers[0][1].view(zipped_layers[0][1].shape[0], zipped_layers[0][1].shape[1], int(np.prod(zipped_layers[0][1].shape[2:])))
-                for i, target_layer in enumerate(zipped_layers[1:]):
+                for (loss_function, l), target_layer in zip(self.modules_loss[zipped_layers[0][0]].items() , zipped_layers[1:]):
                     target_layer = target_layer[1].view(target_layer[1].shape[0], target_layer[1].shape[1], int(np.prod(target_layer[1].shape[2:])))
-                    loss = loss+self.losses[i](input_layer.float(), target_layer.float())/input_layer.shape[0]
+                    loss = loss+l*loss_function(input_layer.float(), target_layer.float())/input_layer.shape[0]
         return loss
     
     def forward(self, input : torch.Tensor, *targets : torch.Tensor) -> torch.Tensor:
@@ -298,23 +303,24 @@ class KLDivergence(Criterion):
     def forward(self, input : torch.Tensor) -> torch.Tensor:
         mu = input[:, 0, :]
         log_std = input[:, 1, :]
-        """z = input[:, 2, :]
+        return torch.mean(-0.5 * torch.sum(1 + log_std - mu**2 - torch.exp(log_std), dim= 0))
+
+    def forward(self, input : torch.Tensor) -> torch.Tensor:
+        z = input[:, 2, :]
 
         q = torch.distributions.Normal(mu, std)
-        
+
         target_mu = torch.ones((self.latentDim)).to(input.device)*self.mu.to(input.device)
         target_std = torch.ones((self.latentDim)).to(input.device)*self.std.to(input.device)
 
         p = torch.distributions.Normal(target_mu, target_std)
+        
         log_pz = p.log_prob(z)
-
         log_qzx = q.log_prob(z)
 
-        
-
         kl = (log_pz - log_qzx)
-        kl = kl.sum(-1)"""
-        return torch.mean(-0.5 * torch.sum(1 + log_std - mu**2 - torch.exp(log_std), dim= 0))
+        kl = kl.sum(-1)
+        return kl
 
 class Accuracy(Criterion):
 

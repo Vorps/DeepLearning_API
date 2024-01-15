@@ -295,7 +295,6 @@ class Dataset():
                     datasetUtils = DatasetUtils(filename, format)
                     datasetUtils.write(self.group_dest, self.name, data.numpy(), self.cache_attributes[0])
         self.data : list[torch.Tensor] = list()
-        
         self.data.append(data)
             
         for dataAugmentations in dataAugmentationsList:

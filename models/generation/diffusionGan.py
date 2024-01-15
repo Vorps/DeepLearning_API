@@ -90,9 +90,9 @@ class Discriminator(network.Network):
                 }
             self.dataAugmentations.update(geometric)
             color = {
-                augmentation.Brightness(0.2) : 0.1,
-                augmentation.Contrast(0.5) : 0.1,
-                augmentation.Saturation(1): 0.1,
+                augmentation.Brightness(0.2) : 0,
+                augmentation.Contrast(0.5) : 0,
+                augmentation.Saturation(1): 0,
                 augmentation.HUE(1) : 0,
                 augmentation.LumaFlip(): 0
             }
@@ -100,7 +100,7 @@ class Discriminator(network.Network):
             
             corruptions =  {
                 augmentation.Noise(1) : 1,
-                augmentation.CutOUT(0.5, 0.5, -1) : 0.5
+                augmentation.CutOUT(0.5, 0.5, -1) : 0
             }
             self.dataAugmentations.update(corruptions)
                 
@@ -125,7 +125,7 @@ class Discriminator(network.Network):
             super().__init__()
             self.add_module("Prob", Discriminator.UpdateP(), out_branch=["p"])
             self.add_module("Sample", Discriminator.DiscriminatorAugmentation(dim), in_branch=[0, "p"])
-            self.add_module("t", DDPM.DDPM_TimeEmbedding(1000, 100), in_branch=["p"], out_branch=["te"])
+            self.add_module("t", DDPM.DDPM_TimeEmbedding(1000, 100), in_branch=[0, "p"], out_branch=["te"])
             self.add_module("Layers", Discriminator.DiscriminatorNLayers(channels, strides, 100, dim), in_branch=[0, "te"])
             self.add_module("Head", Discriminator.DiscriminatorHead(channels[-1], dim))
 
@@ -143,7 +143,7 @@ class Discriminator(network.Network):
     def initialized(self):
         self["DiscriminatorModel"]["Prob"].setMeasure(self.measure, ["Discriminator_B.DiscriminatorModel.Head.Conv:None:PatchGanLoss"])
 
-class Generator_V1(network.Network):
+class GeneratorV1(network.Network):
 
     class GeneratorStem(network.ModuleArgsDict):
 
@@ -176,17 +176,19 @@ class Generator_V1(network.Network):
         def __init__(self, channels: list[int], dim: int) -> None:
             super().__init__()
             for i, (in_channels, out_channels) in enumerate(zip(channels, channels[1:])):
-                self.add_module("DownSample_{}".format(i), Generator_V1.GeneratorDownSample(in_channels=in_channels, out_channels=out_channels, dim=dim))
+                self.add_module("DownSample_{}".format(i), GeneratorV1.GeneratorDownSample(in_channels=in_channels, out_channels=out_channels, dim=dim))
     
     class GeneratorResnetBlock(network.ModuleArgsDict):
 
         def __init__(self, channels : int, dim : int):
             super().__init__()
             self.add_module("Conv_0", blocks.getTorchModule("Conv", dim)(channels, channels, kernel_size=3, padding=1, bias=False))
-            self.add_module("Norm_0", blocks.getTorchModule("BatchNorm", dim)(channels))
-            self.add_module("Activation_0", torch.nn.ReLU())
+            #self.add_module("Norm_0", torch.nn.SyncBatchNorm(channels))
+            #self.add_module("Activation_0", torch.nn.LeakyReLU(0.2, inplace=True))
+            self.add_module("Norm", torch.nn.LeakyReLU(0.2, inplace=True))
+            
             self.add_module("Conv_1", blocks.getTorchModule("Conv", dim)(channels, channels, kernel_size=3, padding=1, bias=False))
-            self.add_module("Norm_1", blocks.getTorchModule("BatchNorm", dim)(channels))
+            #self.add_module("Norm_1", torch.nn.SyncBatchNorm(channels))
             self.add_module("Residual", blocks.Add(), in_branch=[0,1])
 
     class GeneratorNResnetBlock(network.ModuleArgsDict):
@@ -194,32 +196,32 @@ class Generator_V1(network.Network):
         def __init__(self, channels: int, nb_conv: int, dim: int) -> None:
             super().__init__()
             for i in range(nb_conv):
-                self.add_module("ResnetBlock_{}".format(i), Generator_V1.GeneratorResnetBlock(channels=channels, dim=dim))
+                self.add_module("ResnetBlock_{}".format(i), GeneratorV1.GeneratorResnetBlock(channels=channels, dim=dim))
 
     class GeneratorDecoder(network.ModuleArgsDict):
         def __init__(self, channels: list[int], dim: int) -> None:
             super().__init__()
             for i, (in_channels, out_channels) in enumerate(zip(reversed(channels), reversed(channels[:-1]))):
-                self.add_module("UpSample_{}".format(i), Generator_V1.GeneratorUpSample(in_channels=in_channels, out_channels=out_channels, dim=dim))
+                self.add_module("UpSample_{}".format(i), GeneratorV1.GeneratorUpSample(in_channels=in_channels, out_channels=out_channels, dim=dim))
     
     class GeneratorAutoEncoder(network.ModuleArgsDict):
 
         def __init__(self, ngf: int, dim: int) -> None:
             super().__init__()
             channels = [ngf, ngf*2]
-            self.add_module("Encoder", Generator_V1.GeneratorEncoder(channels, dim))
-            self.add_module("NResBlock", Generator_V1.GeneratorNResnetBlock(channels=channels[-1], nb_conv=6, dim=dim))
-            self.add_module("Decoder", Generator_V1.GeneratorDecoder(channels, dim))
+            self.add_module("Encoder", GeneratorV1.GeneratorEncoder(channels, dim))
+            self.add_module("NResBlock", GeneratorV1.GeneratorNResnetBlock(channels=channels[-1], nb_conv=6, dim=dim))
+            self.add_module("Decoder", GeneratorV1.GeneratorDecoder(channels, dim))
 
     class GeneratorBlock(network.ModuleArgsDict):
 
         def __init__(self, ngf: int, dim: int) -> None:
             super().__init__()
-            self.add_module("Stem", Generator_V1.GeneratorStem(3, ngf, dim))
-            self.add_module("AutoEncoder", Generator_V1.GeneratorAutoEncoder(ngf, dim))
-            self.add_module("Head", Generator_V1.GeneratorHead(in_channels=ngf, out_channels=1, dim=dim))
+            self.add_module("Stem", GeneratorV1.GeneratorStem(3, ngf, dim))
+            self.add_module("AutoEncoder", GeneratorV1.GeneratorAutoEncoder(ngf, dim))
+            self.add_module("Head", GeneratorV1.GeneratorHead(in_channels=ngf, out_channels=1, dim=dim))
 
-    @config("Generator_V1")
+    @config("GeneratorV1")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
@@ -227,9 +229,9 @@ class Generator_V1(network.Network):
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3) -> None:
         super().__init__(optimizer=optimizer, in_channels=3, schedulers=schedulers, patch=patch, outputsCriterions=outputsCriterions, dim=dim)
-        self.add_module("GeneratorModel", Generator_V1.GeneratorBlock(32, dim))
+        self.add_module("GeneratorModel", GeneratorV1.GeneratorBlock(32, dim))
 
-class Generator_V2(network.Network):
+class GeneratorV2(network.Network):
 
     class NestedUNetHead(network.ModuleArgsDict):
 
@@ -251,9 +253,9 @@ class Generator_V2(network.Network):
                     dim : int,) -> None:
             super().__init__()
             self.add_module("UNetBlock_0", NestedUNet.NestedUNetBlock(channels, nb_conv_per_stage, blockConfig, downSampleMode=blocks.DownSampleMode._member_map_[downSampleMode], upSampleMode=blocks.UpSampleMode._member_map_[upSampleMode], attention=attention, block = blocks.ConvBlock if blockType == "Conv" else blocks.ResBlock, dim=dim), out_branch=["X_0_{}".format(j+1) for j in range(len(channels)-2)])    
-            self.add_module("Head", Generator_V2.NestedUNetHead(channels[:2], dim=dim), in_branch=["X_0_{}".format(len(channels)-2)])
+            self.add_module("Head", GeneratorV2.NestedUNetHead(channels[:2], dim=dim), in_branch=["X_0_{}".format(len(channels)-2)])
 
-    @config("Generator_V2")
+    @config("GeneratorV2")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
@@ -268,9 +270,9 @@ class Generator_V2(network.Network):
                     blockType: str = "Conv",
                     dim : int = 3) -> None:
         super().__init__(in_channels = channels[0], optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, patch=patch, dim = dim)
-        self.add_module("GeneratorModel", Generator_V2.GeneratorBlock(channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, blockType, dim))
+        self.add_module("GeneratorModel", GeneratorV2.GeneratorBlock(channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, blockType, dim))
 
-class Generator_V3(network.Network):
+class GeneratorV3(network.Network):
 
     class NestedUNetHead(network.ModuleArgsDict):
 
@@ -292,9 +294,9 @@ class Generator_V3(network.Network):
                     dim : int,) -> None:
             super().__init__()
             self.add_module("UNetBlock_0", UNet.UNetBlock(channels, nb_conv_per_stage, blockConfig, downSampleMode=blocks.DownSampleMode._member_map_[downSampleMode], upSampleMode=blocks.UpSampleMode._member_map_[upSampleMode], attention=attention, block = blocks.ConvBlock if blockType == "Conv" else blocks.ResBlock, nb_class=1, dim=dim), out_branch=["X_0_{}".format(j+1) for j in range(len(channels)-2)])    
-            self.add_module("Head", Generator_V3.NestedUNetHead(channels[:2], dim=dim), in_branch=["X_0_{}".format(len(channels)-2)])
+            self.add_module("Head", GeneratorV3.NestedUNetHead(channels[:2], dim=dim), in_branch=["X_0_{}".format(len(channels)-2)])
 
-    @config("Generator_V3")
+    @config("GeneratorV3")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
@@ -309,12 +311,12 @@ class Generator_V3(network.Network):
                     blockType: str = "Conv",
                     dim : int = 3) -> None:
         super().__init__(in_channels = channels[0], optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, patch=patch, dim = dim)
-        self.add_module("GeneratorModel", Generator_V3.GeneratorBlock(channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, blockType, dim), out_branch=["pB"])
+        self.add_module("GeneratorModel", GeneratorV3.GeneratorBlock(channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, blockType, dim), out_branch=["pB"])
 
 class DiffusionGan(network.Network):
 
     @config("DiffusionGan")
-    def __init__(self, generator : Generator_V1 = Generator_V1(), discriminator : Discriminator = Discriminator()) -> None:
+    def __init__(self, generator : GeneratorV1 = GeneratorV1(), discriminator : Discriminator = Discriminator()) -> None:
         super().__init__()
         self.add_module("Generator_A_to_B", generator, in_branch=[0], out_branch=["pB"])
         self.add_module("Discriminator_B", discriminator, in_branch=[1], out_branch=[-1], requires_grad=True)
@@ -341,9 +343,9 @@ class CycleGanDiscriminator(network.Network):
         self["Discriminator_A"]["Sample"].setMeasure(self.measure, ["Discriminator.Discriminator_A.Head.Flatten:None:PatchGanLoss"])
         self["Discriminator_B"]["Sample"].setMeasure(self.measure, ["Discriminator.Discriminator_B.Head.Flatten:None:PatchGanLoss"])
 
-class CycleGanGenerator_V1(network.Network):
+class CycleGanGeneratorV1(network.Network):
 
-    @config("CycleGanGenerator_V1")
+    @config("CycleGanGeneratorV1")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
@@ -351,12 +353,12 @@ class CycleGanGenerator_V1(network.Network):
                     patch : Union[ModelPatch, None] = None,
                     dim : int = 3) -> None:
         super().__init__(in_channels = 1, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions,  patch=patch, dim=dim)
-        self.add_module("Generator_A_to_B", Generator_V1.GeneratorBlock(32, dim), in_branch=[0], out_branch=["pB"])
-        self.add_module("Generator_B_to_A", Generator_V1.GeneratorBlock(32, dim), in_branch=[1], out_branch=["pA"])
+        self.add_module("Generator_A_to_B", GeneratorV1.GeneratorBlock(32, dim), in_branch=[0], out_branch=["pB"])
+        self.add_module("Generator_B_to_A", GeneratorV1.GeneratorBlock(32, dim), in_branch=[1], out_branch=["pA"])
 
-class CycleGanGenerator_V2(network.Network):
+class CycleGanGeneratorV2(network.Network):
 
-    @config("CycleGanGenerator_V2")
+    @config("CycleGanGeneratorV2")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
@@ -371,12 +373,12 @@ class CycleGanGenerator_V2(network.Network):
                     blockType: str = "Conv",
                     dim : int = 3) -> None:
         super().__init__(in_channels = 1, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, patch=patch, dim=dim)
-        self.add_module("Generator_A_to_B", Generator_V2.GeneratorBlock(channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, blockType, dim), in_branch=[0], out_branch=["pB"])
-        self.add_module("Generator_B_to_A", Generator_V2.GeneratorBlock(channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, blockType, dim), in_branch=[1], out_branch=["pA"])
+        self.add_module("Generator_A_to_B", GeneratorV2.GeneratorBlock(channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, blockType, dim), in_branch=[0], out_branch=["pB"])
+        self.add_module("Generator_B_to_A", GeneratorV2.GeneratorBlock(channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, blockType, dim), in_branch=[1], out_branch=["pA"])
 
-class CycleGanGenerator_V3(network.Network):
+class CycleGanGeneratorV3(network.Network):
 
-    @config("CycleGanGenerator_V3")
+    @config("CycleGanGeneratorV3")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers : network.SchedulersLoader = network.SchedulersLoader(),
@@ -391,13 +393,13 @@ class CycleGanGenerator_V3(network.Network):
                     blockType: str = "Conv",
                     dim : int = 3) -> None:
         super().__init__(in_channels = 1, optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, patch=patch, dim=dim)
-        self.add_module("Generator_A_to_B", Generator_V3.GeneratorBlock(channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, blockType, dim), in_branch=[0], out_branch=["pB"])
-        self.add_module("Generator_B_to_A", Generator_V3.GeneratorBlock(channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, blockType, dim), in_branch=[1], out_branch=["pA"])
+        self.add_module("Generator_A_to_B", GeneratorV3.GeneratorBlock(channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, blockType, dim), in_branch=[0], out_branch=["pB"])
+        self.add_module("Generator_B_to_A", GeneratorV3.GeneratorBlock(channels, blockConfig, nb_conv_per_stage, downSampleMode, upSampleMode, attention, blockType, dim), in_branch=[1], out_branch=["pA"])
 
 class DiffusionCycleGan(network.Network):
 
     @config("DiffusionCycleGan")
-    def __init__(self, generators : CycleGanGenerator_V3 = CycleGanGenerator_V3(), discriminators : CycleGanDiscriminator = CycleGanDiscriminator()) -> None:
+    def __init__(self, generators : CycleGanGeneratorV3 = CycleGanGeneratorV3(), discriminators : CycleGanDiscriminator = CycleGanDiscriminator()) -> None:
         super().__init__()
         self.add_module("Generator", generators, in_branch=[0, 1], out_branch=["pB", "pA"])
         self.add_module("Discriminator", discriminators, in_branch=[0, 1], out_branch=[-1], requires_grad=True)

@@ -250,7 +250,7 @@ class Trainer(DistributedObject):
                 path = ""
                 name = MODEL()
             else:
-                path += self.name.split("/")[0]+"/StateDict/"
+                path = CHECKPOINTS_DIRECTORY()+self.name.split("/")[0]+"/"
                 if len(self.name.split("/")) == 2:
                     name = self.name.split("/")[-1]
                 elif os.listdir(path):

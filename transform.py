@@ -212,9 +212,10 @@ class Resample(Transform, ABC):
         pass
     
     def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        spacing_0 = cache_attribute.pop_np_array("Spacing")
-        spacing_1 = cache_attribute.get_np_array("Spacing")
-        return self._resample(input, [int(np.ceil(i)) for i in np.flip(spacing_0, axis=0)/np.flip(spacing_1, axis=0)*input.shape[1:]])
+        size_0 = cache_attribute.pop_np_array("Size")
+        size_1 = cache_attribute.pop_np_array("Size")
+        _ = cache_attribute.pop_np_array("Spacing")
+        return self._resample(input, [int(size) for size in size_1])
 
 class ResampleIsotropic(Resample):
 
@@ -231,7 +232,10 @@ class ResampleIsotropic(Resample):
         assert "Spacing" in cache_attribute, "Error no spacing"
         resize_factor = self.spacing/cache_attribute.get_tensor("Spacing").flip(0)
         cache_attribute["Spacing"] = self.spacing.flip(0)
-        return self._resample(input, [int(x) for x in (torch.tensor(input.shape[1:]) * 1/resize_factor)])
+        cache_attribute["Size"] = np.asarray([int(x) for x in torch.tensor(input.shape[1:])])
+        size = [int(x) for x in (torch.tensor(input.shape[1:]) * 1/resize_factor)]
+        cache_attribute["Size"] = np.asarray(size)
+        return self._resample(input, size)
 
 class ResampleResize(Resample):
 
@@ -245,6 +249,8 @@ class ResampleResize(Resample):
     def __call__(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Spacing" in cache_attribute:
             cache_attribute["Spacing"] = torch.flip(torch.tensor(list(input.shape[1:]))/torch.tensor(self.size)*torch.flip(cache_attribute.get_tensor("Spacing"), dims=[0]), dims=[0])
+        cache_attribute["Size"] = np.asarray([int(x) for x in torch.tensor(input.shape[1:])])
+        cache_attribute["Size"] = self.size
         return self._resample(input, self.size)
 
 class ResampleTransform(Transform):

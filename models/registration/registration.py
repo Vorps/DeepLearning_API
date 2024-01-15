@@ -40,8 +40,9 @@ class VoxelMorph(network.Network):
                     shape : list[int] = [192, 192, 192],
                     int_steps : int = 7,
                     int_downsize : int = 2,
-                    nb_field: int = 1):
-        super().__init__(in_channels = channels[0], optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim)
+                    nb_field: int = 1, 
+                    nb_batch_per_step : int = 1):
+        super().__init__(in_channels = channels[0], optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim = dim, nb_batch_per_step=nb_batch_per_step)
         self.add_module("Concat", blocks.Concat(), in_branch=[0,1,2,3], out_branch=["input_concat"])
         self.add_module("UNetBlock_0", UNet.UNetBlock(channels, nb_conv_per_stage, blockConfig, downSampleMode=blocks.DownSampleMode._member_map_[downSampleMode], upSampleMode=blocks.UpSampleMode._member_map_[upSampleMode], attention=attention, block = blocks.ConvBlock, nb_class=0, dim=dim), in_branch=["input_concat"], out_branch=["unet"])
         for i in range(nb_field):
@@ -86,7 +87,7 @@ class SpatialTransformer(torch.nn.Module):
             new_locs[:, i, ...] = 2 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
         new_locs = new_locs.permute(0, 2, 3, 4, 1)
         new_locs = new_locs[..., [2, 1, 0]]
-        result = F.grid_sample(src, new_locs, align_corners=True, mode="nearest" if self.mask else "bilinear")
+        result = F.grid_sample(src, new_locs, align_corners=True, mode="bilinear")
         return result
     
 class VecInt(torch.nn.Module):

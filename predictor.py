@@ -93,7 +93,7 @@ class OutDataset(DatasetUtils, NeedDevice, ABC):
 class OutSameAsGroupDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, final_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, redution: str = "mean", inverse_transform: bool = True) -> None:
+    def __init__(self, dataset_filename: str = "Dataset:h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, final_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, redution: str = "mean", inverse_transform: bool = True) -> None:
         super().__init__(dataset_filename, group, pre_transforms, post_transforms, final_transforms, patchCombine)
         self.group_src, self.group_dest = sameAsGroup.split(":")
         self.redution = redution
@@ -125,14 +125,17 @@ class OutSameAsGroupDataset(OutDataset):
     def _getOutput(self, index: int, index_augmentation: int, dataset: DataSet) -> torch.Tensor:
         layer = self.output_layer_accumulator[index][index_augmentation].assemble()
         name = self.names[index]
+        #import SimpleITK as sitk
+        #sitk.WriteImage(sitk.GetImageFromArray(layer.numpy()[0]), "Pre_{}.mha".format(index_augmentation))
         if index_augmentation > 0:
+            
             i = 0
             index_augmentation_tmp = index_augmentation-1
             for dataAugmentations in dataset.dataAugmentationsList:
-                if index_augmentation_tmp < i+dataAugmentations.nb:
-                    index_augmentation_tmp -= i
+                if index_augmentation_tmp >= i and index_augmentation_tmp < i+dataAugmentations.nb:
                     for dataAugmentation in reversed(dataAugmentations.dataAugmentations):
-                        layer = dataAugmentation.inverse(index, index_augmentation_tmp, layer)
+                        layer = dataAugmentation.inverse(index, index_augmentation_tmp-i, layer)
+                    break
                 i += dataAugmentations.nb
 
         for transform in self.post_transforms:
@@ -141,6 +144,7 @@ class OutSameAsGroupDataset(OutDataset):
         if self.inverse_transform:
             for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].pre_transforms):
                 layer = transform.inverse(name, layer, self.attributes[index][index_augmentation][0])
+        #sitk.WriteImage(sitk.GetImageFromArray(layer.numpy()[0]), "Aug_{}.mha".format(index_augmentation))
         return layer
 
     def getOutput(self, index: int, dataset: DataSet) -> torch.Tensor:
@@ -214,7 +218,7 @@ class _Predictor():
         self.dataset: DataSet = self.dataloader_prediction.dataset
         patch_size, overlap = self.dataset.getPatchConfig()
         for outDataset in self.outsDataset.values():
-            outDataset.setPatchConfig(patch_size, overlap, np.max([int(np.sum([data_augmentation.nb for data_augmentation in self.dataset.dataAugmentationsList])+1), 1]))
+            outDataset.setPatchConfig([size for size in patch_size if size > 1], overlap, np.max([int(np.sum([data_augmentation.nb for data_augmentation in self.dataset.dataAugmentationsList])+1), 1]))
         self.data_log : dict[str, tuple(DataLog, int)] = {}
         if data_log is not None:
             for data in data_log:
@@ -266,9 +270,9 @@ class _Predictor():
                         images_log.append(name.replace(":", "."))
 
             for name, network in self.model.module.getNetworks().items():
-                if network.measure is not None:
+                """if network.measure is not None:
                     self.tb.add_scalars("Prediction/{}/Loss".format(name), measures["{}".format(name)][0], self.it)
-                    self.tb.add_scalars("Prediction/{}/Metric".format(name), measures["{}".format(name)][1], self.it)
+                    self.tb.add_scalars("Prediction/{}/Metric".format(name), measures["{}".format(name)][1], self.it)"""
                 if len(images_log):
                     for name, layer, _ in self.model.module.get_layers([v.to(0) for k, v in self.getInput(data_dict).items() if k[1]], images_log):
                         self.data_log[name][0](self.tb, "Prediction/{}".format(name), layer[:self.data_log[name][1]].detach().cpu().numpy(), self.it)

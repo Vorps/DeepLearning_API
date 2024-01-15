@@ -567,6 +567,12 @@ class Network(ModuleArgsDict, ABC):
             raise RuntimeError('Error(s) in loading state_dict for {}:\n\t{}'.format(
                                self.__class__.__name__, "\n\t".join(error_msgs)))
         
+    def apply(self, fn: Callable[[torch.nn.Module], None]) -> None:
+        for module in self.children():
+            if not isinstance(module, Network):
+                module.apply(fn)
+        fn(self)
+        
     @_function_network(True)
     def load(self, state_dict : dict[str, dict[str, torch.Tensor]], init: bool = True, ema : bool =False):
         if init:
