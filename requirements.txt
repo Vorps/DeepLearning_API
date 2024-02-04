@@ -12,3 +12,4 @@ tensorboard
 torchvision
 TotalSegmentator
 submitit
+lxml

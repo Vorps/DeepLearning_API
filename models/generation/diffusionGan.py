@@ -132,7 +132,7 @@ class Discriminator(network.Network):
     @config("Discriminator")
     def __init__(self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     channels: list[int] = [1, 16, 32, 64, 64],
                     strides: list[int] = [2,2,2,1],
@@ -224,7 +224,7 @@ class GeneratorV1(network.Network):
     @config("GeneratorV1")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     patch : ModelPatch = ModelPatch(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3) -> None:
@@ -258,7 +258,7 @@ class GeneratorV2(network.Network):
     @config("GeneratorV2")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     channels: list[int]=[1, 64, 128, 256, 512, 1024],
@@ -299,7 +299,7 @@ class GeneratorV3(network.Network):
     @config("GeneratorV3")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     channels: list[int]=[1, 64, 128, 256, 512, 1024],
@@ -329,7 +329,7 @@ class CycleGanDiscriminator(network.Network):
     @config("CycleGanDiscriminator")
     def __init__(self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     channels: list[int] = [1, 16, 32, 64, 64],
@@ -348,7 +348,7 @@ class CycleGanGeneratorV1(network.Network):
     @config("CycleGanGeneratorV1")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     dim : int = 3) -> None:
@@ -361,7 +361,7 @@ class CycleGanGeneratorV2(network.Network):
     @config("CycleGanGeneratorV2")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     channels: list[int]=[1, 64, 128, 256, 512, 1024],
@@ -381,7 +381,7 @@ class CycleGanGeneratorV3(network.Network):
     @config("CycleGanGeneratorV3")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     channels: list[int]=[1, 64, 128, 256, 512, 1024],

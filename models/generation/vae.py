@@ -28,7 +28,7 @@ class VAE(network.Network):
     @config("VAE")
     def __init__(self,
                     optimizer: network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers: network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers: network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3,
                     channels: list[int]=[1, 64, 128, 256, 512, 1024],
@@ -41,3 +41,32 @@ class VAE(network.Network):
         super().__init__(in_channels = channels[0], init_type="normal", optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=dim, nb_batch_per_step=1)
         self.add_module("AutoEncoder_0", VAE.AutoEncoderBlock(channels, nb_conv_per_stage, blockConfig, downSampleMode=blocks.DownSampleMode._member_map_[downSampleMode], upSampleMode=blocks.UpSampleMode._member_map_[upSampleMode], dim=dim, block = blocks.ConvBlock if blockType == "Conv" else blocks.ResBlock))
         self.add_module("Head", VAE.VAE_Head(channels[1], channels[0], dim))
+
+
+class LinearVAE(network.Network):
+
+    class LinearVAE_DenseLayer(network.ModuleArgsDict):
+
+        def __init__(self, in_features: int, out_features: int) -> None:
+            super().__init__()
+            self.add_module("Linear", torch.nn.Linear(in_features, out_features))
+            self.add_module("Norm", torch.nn.BatchNorm1d(out_features))
+            self.add_module("Activation", torch.nn.LeakyReLU())
+
+    class LinearVAE_Head(network.ModuleArgsDict):
+
+        def __init__(self, in_features: int, out_features: int) -> None:
+            super().__init__()
+            self.add_module("Linear", torch.nn.Linear(in_features, out_features))
+            self.add_module("Tanh", torch.nn.Tanh())
+
+    @config("LinearVAE")
+    def __init__(self,
+                    optimizer: network.OptimizerLoader = network.OptimizerLoader(),
+                    schedulers: network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},) -> None:
+        super().__init__(in_channels = 1, init_type="normal", optimizer = optimizer, schedulers = schedulers, outputsCriterions = outputsCriterions, dim=1, nb_batch_per_step=1)
+        self.add_module("DenseLayer_0", LinearVAE.LinearVAE_DenseLayer(28590, 1000))
+        #self.add_module("Head", LinearVAE.DenseLayer(100, 28590))
+        self.add_module("Head", LinearVAE.LinearVAE_Head(1000, 28590))
+        #self.add_module("DenseLayer_5", LinearVAE.DenseLayer(5000, 28590))

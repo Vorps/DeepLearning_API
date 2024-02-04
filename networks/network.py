@@ -17,6 +17,7 @@ from collections import OrderedDict
 from torch.utils.checkpoint import checkpoint
 from typing import Union
 from enum import Enum
+from DeepLearning_API.schedulers import Scheduler, Constant
 
 class NetState(Enum):
     TRAIN = 0,
@@ -47,7 +48,7 @@ class SchedulerStep():
     def __init__(self, nb_step : int = 0) -> None:
         self.nb_step = nb_step
 
-class SchedulersLoader():
+class LRSchedulersLoader():
         
     @config("Schedulers")
     def __init__(self, params: dict[str, SchedulerStep] = {"default:ReduceLROnPlateau" : SchedulerStep(0)}) -> None:
@@ -60,10 +61,23 @@ class SchedulersLoader():
                 shedulers[config("Trainer.Model.{}.Schedulers.{}".format(key, name))(getattr(importlib.import_module('torch.optim.lr_scheduler'), name))(optimizer, config = None)] = step.nb_step
         return shedulers
 
-class CriterionsAttr():
+class SchedulersLoader():
+        
+    @config("Schedulers")
+    def __init__(self, params: dict[str, SchedulerStep] = {"default:Constant" : SchedulerStep(0)}) -> None:
+        self.params = params
 
+    def getShedulers(self, key: str) -> dict[torch.optim.lr_scheduler._LRScheduler, int]:
+        shedulers : dict[Scheduler, int] = {}
+        for name, step in self.params.items():
+            if name:    
+                shedulers[getattr(importlib.import_module("DeepLearning_API.schedulers"), name)(config = None, DL_args = key)] = step.nb_step
+        return shedulers
+    
+class CriterionsAttr():
+    
     @config()
-    def __init__(self, l: float = 1.0, isLoss: bool = True, group: int = 0, stepStart:int = 0, stepStop: Union[int, None] = None, accumulation: bool = False) -> None:
+    def __init__(self, l: SchedulersLoader = SchedulersLoader(), isLoss: bool = True, group: int = 0, stepStart: int = 0, stepStop: Union[int, None] = None, accumulation: bool = False) -> None:
         self.l = l
         self.isTorchCriterion = True
         self.isLoss = isLoss
@@ -71,6 +85,7 @@ class CriterionsAttr():
         self.stepStop = stepStop
         self.group = group
         self.accumulation = accumulation
+        self.sheduler = None
         
 class CriterionsLoader():
 
@@ -83,6 +98,7 @@ class CriterionsLoader():
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
             module, name = _getModule(module_classpath, "measure")
             criterionsAttr.isTorchCriterion = module.startswith("torch")
+            criterionsAttr.sheduler = criterionsAttr.l.getShedulers("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(os.environ["DEEP_LEARNING_API_ROOT"], model_classname, output_group, target_group, module_classpath))
             criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(os.environ["DEEP_LEARNING_API_ROOT"], model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
         return criterions
 
@@ -111,31 +127,25 @@ class Measure():
             self.group = group
 
             self._loss: list[torch.Tensor] = []
+            self._weight: list[float] = []
             self._values: list[float] = []
-            self._values_hist: list[float] = []
         
         def resetLoss(self) -> None:
             self._loss.clear()
 
-        def resetMetrics(self) -> None:
-            self._values.clear()
-
-        def add(self, value: torch.Tensor) -> None:
+        def add(self, weight: float, value: torch.Tensor) -> None:
             self._loss.append(value if self.isLoss else value.detach())
+            self._values.append(value.item())
+            self._weight.append(weight)
 
         def getLastLoss(self) -> torch.Tensor:
-            return self._loss[-1] if len(self._loss) else torch.zeros((1), requires_grad = True) 
+            return self._loss[-1]*self._weight[-1] if len(self._loss) else torch.zeros((1), requires_grad = True)
         
         def getLoss(self) -> torch.Tensor:
-            return torch.stack(self._loss, dim=0).mean(dim=0) if len(self._loss) else torch.zeros((1), requires_grad = True) 
-        
-        def updateValue(self) -> None:
-            self._values.append(self.getLoss().item())
-            self._values_hist.append(self.getLoss().item())
+            return torch.stack([w*l for w, l in zip(self._weight, self._loss)], dim=0).mean(dim=0) if len(self._loss) else torch.zeros((1), requires_grad = True) 
 
         def __len__(self) -> int:
             return len(self._loss)
-        
         
     def __init__(self, model_classname : str, outputsCriterions: dict[str, TargetCriterionsLoader]) -> None:
         super().__init__()
@@ -168,13 +178,14 @@ class Measure():
             target = [data_dict[group].to(output.device) for group in target_group.split("/") if group in data_dict]
             for criterion, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
                 if it >= criterionsAttr.stepStart and (criterionsAttr.stepStop is None or it <= criterionsAttr.stepStop):
-                    self._loss[criterionsAttr.group]["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)].add(criterionsAttr.l*criterion(output, *target))
+                    scheduler = self.update_scheduler(criterionsAttr.sheduler, it)
+                    self._loss[criterionsAttr.group]["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)].add(scheduler.get_value(), criterion(output, *target))
                     if len(np.unique([len(l) for l in self._loss[criterionsAttr.group].values() if l.accumulation and l.isLoss])) == 1:
-                        loss = torch.zeros((1), requires_grad = True)
-                        for v in [l for l in self._loss[criterionsAttr.group].values() if l.accumulation and l.isLoss]:
-                            l = v.getLastLoss()
-                            loss = loss.to(l.device)+l
                         if criterionsAttr.isLoss:
+                            loss = torch.zeros((1), requires_grad = True)
+                            for v in [l for l in self._loss[criterionsAttr.group].values() if l.accumulation and l.isLoss]:
+                                l = v.getLastLoss()
+                                loss = loss.to(l.device)+l
                             loss = loss/nb_patch
                             loss.backward()
 
@@ -183,52 +194,47 @@ class Measure():
         for group in self._loss.keys():
             loss[group] = torch.zeros((1), requires_grad = True)
             for v in self._loss[group].values():
-                v.updateValue()
                 if v.isLoss and not v.accumulation:
                     l = v.getLoss()
                     loss[v.group] = loss[v.group].to(l.device)+l
         return loss.values()
 
-
-    def getLastLoss(self) -> float:
-        loss = 0
-        for group in self._loss.keys():
-            for v in self._loss[group].values():
-                if v.isLoss:
-                    loss+=v.getLoss().item()
-        return loss
-    
     def resetLoss(self) -> None:
         for group in self._loss.keys():
             for v in self._loss[group].values():
                 v.resetLoss()
         
-    def resetMetrics(self) -> None:
-        for group in self._loss.keys():
-            for v in self._loss[group].values():
-                v.resetMetrics()
-        
-    def getLastMetrics(self, n: int = 1) -> dict[str, float]:
+    def getLastValues(self, n: int = 1) -> dict[str, float]:
         result = {}
         for group in self._loss.keys():
             result.update({name : np.mean(value._values[-n:] if n > 0 else value._values) for name, value in self._loss[group].items() if n < 0 or len(value._values) >= n})
         return result
     
-    def getLastMetrics_hist(self, n: int = 1) -> dict[str, float]:
+    def getLastWeights(self, n: int = 1) -> dict[str, float]:
         result = {}
         for group in self._loss.keys():
-            result.update({name : np.mean(value._values_hist[-n:] if n > 0 else value._values_hist) for name, value in self._loss[group].items() if n < 0 or len(value._values_hist) >= n})
+            result.update({name : np.mean(value._weight[-n:] if n > 0 else value._weight) for name, value in self._loss[group].items() if n < 0 or len(value._values) >= n})
         return result
 
-    def format(self, isLoss: bool) -> dict[str, float]:
+    def format(self, isLoss: bool, n: int) -> dict[str, tuple[float, float]]:
         result = dict()
         for group in self._loss.keys():
             for name, loss in self._loss[group].items():
-                loss.updateValue()
-                if loss.isLoss == isLoss and len(loss._values) > 0:
-                    result[name] = np.mean(loss._values)
+                if loss.isLoss == isLoss and len(loss._values) >= n:
+                    result[name] = (np.mean(loss._weight[-n:]), np.mean(loss._values[-n:]))
         return result
 
+    def update_scheduler(self, schedulers: dict[Scheduler, int], it: int) -> Scheduler:
+        step = 0
+        scheduler = None
+        for scheduler, value in schedulers.items():
+            if value is None or (it >= step  and it < step+value):
+                break
+            step += value
+        if scheduler:
+            scheduler.step(it-step)
+        return scheduler
+    
 class ModuleArgsDict(torch.nn.Module, ABC):
    
     class ModuleArgs:
@@ -488,7 +494,7 @@ class Network(ModuleArgsDict, ABC):
     def __init__(   self,
                     in_channels : int = 1,
                     optimizer: Union[OptimizerLoader, None] = None, 
-                    schedulers: Union[SchedulersLoader, None] = None, 
+                    schedulers: Union[LRSchedulersLoader, None] = None, 
                     outputsCriterions: Union[dict[str, TargetCriterionsLoader], None] = None,
                     patch : Union[ModelPatch, None] = None,
                     nb_batch_per_step : int = 1,
@@ -501,7 +507,7 @@ class Network(ModuleArgsDict, ABC):
         self.optimizerLoader  = optimizer
         self.optimizer : Union[torch.optim.Optimizer, None] = None
 
-        self.schedulersLoader  = schedulers
+        self.LRSchedulersLoader  = schedulers
         self.schedulers : Union[dict[torch.optim.lr_scheduler._LRScheduler, int], None] = None
 
         self.outputsCriterionsLoader = outputsCriterions
@@ -525,7 +531,7 @@ class Network(ModuleArgsDict, ABC):
         for name, module in self._modules.items():
             if module is not None:
                 if not isinstance(module, Network):   
-                    module.state_dict(destination, "" + name + '.', keep_vars=False)
+                    module.state_dict(destination=destination, prefix="" + name + '.', keep_vars=False)
         for hook in self._state_dict_hooks.values():
             hook_result = hook(self, destination, "", local_metadata)
             if hook_result is not None:
@@ -658,18 +664,18 @@ class Network(ModuleArgsDict, ABC):
         return in_channels, in_is_channel, out_channels, out_is_channel
 
     @_function_network()
-    def init(self, autocast : bool, state : State, key: str) -> None:
+    def init(self, autocast : bool, state : State, key: str) -> None: 
+        if self.outputsCriterionsLoader:
+            self.measure = Measure(key, self.outputsCriterionsLoader)
+            self.measure.init(self)
         if state != State.PREDICTION:
             self.scaler = torch.cuda.amp.GradScaler(enabled=autocast)
             if self.optimizerLoader:
                 self.optimizer = self.optimizerLoader.getOptimizer(key, self.parameters(state == State.TRANSFER_LEARNING))
                 self.optimizer.zero_grad()
 
-            if self.schedulersLoader and self.optimizer:
-                self.schedulers = self.schedulersLoader.getShedulers(key, self.optimizer)
-        if self.outputsCriterionsLoader:
-            self.measure = Measure(key, self.outputsCriterionsLoader)
-            self.measure.init(self)
+            if self.LRSchedulersLoader and self.optimizer:
+                self.schedulers = self.LRSchedulersLoader.getShedulers(key, self.optimizer)
     
     def initialized(self):
         pass
@@ -822,11 +828,6 @@ class Network(ModuleArgsDict, ABC):
                 scheduler.step()     
 
     @_function_network()
-    def measureClear(self):
-        if self.measure:
-            self.measure.resetMetrics()
-    
-    @_function_network()
     def getNetworks(self) -> Self:
         return self
 
@@ -863,7 +864,7 @@ class ModelLoader():
 
     @config("Model")
     def __init__(self, classpath : str = "default:segmentation.UNet") -> None:
-        self.module, self.name = _getModule(classpath.split(".")[-1] if len(classpath.split(".")) > 1 else classpath, "models" + "."+".".join(classpath.split(".")[:-1]) if len(classpath.split(".")) > 1 else "")
+        self.module, self.name = _getModule(classpath.split(".")[-1] if len(classpath.split(".")) > 1 else classpath, ".".join(classpath.split(".")[:-1]) if len(classpath.split(".")) > 1 else "")
         
     def getModel(self, train : bool = True, DL_args: Union[str, None] = None, DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain"]) -> Network:
         if not DL_args:

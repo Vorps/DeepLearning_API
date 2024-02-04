@@ -27,7 +27,7 @@ class Discriminator(network.Network):
     @config("Discriminator")
     def __init__(self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     nb_batch_per_step: int = 64,
                     dim : int = 3) -> None:
@@ -106,7 +106,7 @@ class Generator(network.Network):
     @config("Generator")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     patch : ModelPatch = ModelPatch(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     nb_batch_per_step: int = 64,

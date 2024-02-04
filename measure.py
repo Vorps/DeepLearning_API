@@ -281,34 +281,38 @@ class KLDivergence(Criterion):
         self.std = torch.Tensor([std])
         self.modelDim = 3
         self.shape = shape
+        self.loss = torch.nn.KLDivLoss()
         
     def init(self, model : Network, output_group : str, target_group : str) -> str:
         super().init(model, output_group, target_group)
         model._compute_channels_trace(model, model.in_channels, None, None)
-        self.modelDim = model.dim
+
         last_module = model
         for name in output_group.split(".")[:-1]:
             last_module = last_module[name]
 
         modules = last_module._modules.copy()
-        modulesArgs = last_module._modulesArgs.copy()
         last_module._modules.clear()
         
         for name, value in modules.items():
             last_module._modules[name] = value
             if name == output_group.split(".")[-1]:
-                last_module.add_module("LatentDistribution", LatentDistribution(in_channels=modulesArgs[name].out_channels, shape = self.shape, out_is_channel=modulesArgs[name].out_is_channel , latentDim=self.latentDim, modelDim=self.modelDim, out_branch=modulesArgs[name].out_branch))
+                last_module.add_module("LatentDistribution", LatentDistribution(shape = self.shape, latentDim=self.latentDim))
         return ".".join(output_group.split(".")[:-1])+".LatentDistribution.Concat"
-    
+
     def forward(self, input : torch.Tensor) -> torch.Tensor:
         mu = input[:, 0, :]
         log_std = input[:, 1, :]
-        return torch.mean(-0.5 * torch.sum(1 + log_std - mu**2 - torch.exp(log_std), dim= 0))
+        return torch.mean(-0.5 * torch.sum(1 + log_std - mu**2 - torch.exp(log_std), dim = 1), dim = 0)
 
+    """
     def forward(self, input : torch.Tensor) -> torch.Tensor:
+        mu = input[:, 0, :]
+        log_std = input[:, 1, :]
+
         z = input[:, 2, :]
 
-        q = torch.distributions.Normal(mu, std)
+        q = torch.distributions.Normal(mu, log_std)
 
         target_mu = torch.ones((self.latentDim)).to(input.device)*self.mu.to(input.device)
         target_std = torch.ones((self.latentDim)).to(input.device)*self.std.to(input.device)
@@ -321,7 +325,8 @@ class KLDivergence(Criterion):
         kl = (log_pz - log_qzx)
         kl = kl.sum(-1)
         return kl
-
+    """
+    
 class Accuracy(Criterion):
 
     def __init__(self) -> None:

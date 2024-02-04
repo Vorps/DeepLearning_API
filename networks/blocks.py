@@ -280,6 +280,14 @@ class HistogramNoise(torch.nn.Module):
             result[torch.where(input == value)] = torch.tensor(x, device=input.device).float()
         return result
 
+class Subset(torch.nn.Module):
+	def __init__(self, slices: list[slice]):
+		super().__init__()
+		self.slices = [slice(None, None), slice(None, None)] + slices
+
+	def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+		return tensor[self.slices]
+
 class View(torch.nn.Module):
 	def __init__(self, size: list[int]):
 		super().__init__()
@@ -287,25 +295,23 @@ class View(torch.nn.Module):
 
 	def forward(self, tensor: torch.Tensor) -> torch.Tensor:
 		return tensor.view(self.size)
-
+        
 class LatentDistribution(network.ModuleArgsDict):
 
     class LatentDistribution_Linear(torch.nn.Module):
 
         def __init__(self, shape: list[int], latentDim: int) -> None:
             super().__init__()
-            self.latentDim = latentDim
-            self.linear = torch.nn.Linear(torch.prod(torch.tensor(shape)), self.latentDim)
+            self.linear = torch.nn.Linear(torch.prod(torch.tensor(shape)), latentDim)
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return torch.unsqueeze(self.linear(input), 1)
-
-    class LatentDistribution_DecoderInput(torch.nn.Module):
+        
+    class LatentDistribution_Decoder(torch.nn.Module):
         
         def __init__(self, shape: list[int], latentDim: int) -> None:
             super().__init__()
-            self.latentDim = latentDim
-            self.linear = torch.nn.Linear(self.latentDim, torch.prod(torch.tensor(shape)))
+            self.linear = torch.nn.Linear(latentDim, torch.prod(torch.tensor(shape)))
             self.shape = shape
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -316,24 +322,18 @@ class LatentDistribution(network.ModuleArgsDict):
         def __init__(self) -> None:
             super().__init__()
 
-        def forward(self, mu: torch.Tensor, log_std: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
-            return torch.exp(log_std/2)*noise+mu
+        def forward(self, mu: torch.Tensor, log_std: torch.Tensor) -> torch.Tensor:
+            return torch.exp(log_std/2)*torch.rand_like(mu)+mu
     
-    def __init__(self, in_channels: int, shape: list[int], out_is_channel : bool, latentDim: int, modelDim: int, out_branch : list[int]) -> None:
-        super().__init__()
-        if not out_is_channel:
-            self.add_module("ToChannels", ToChannels(modelDim))
-        shape = [in_channels]+shape
+    def __init__(self, shape: list[int], latentDim: int) -> None:
+        super().__init__()        
         self.add_module("Flatten", torch.nn.Flatten(1))
         self.add_module("mu", LatentDistribution.LatentDistribution_Linear(shape, latentDim), out_branch = [1])
         self.add_module("log_std", LatentDistribution.LatentDistribution_Linear(shape, latentDim), out_branch = [2])
 
-        self.add_module("NormalSample", NormalNoise(), in_branch=[1], out_branch=[3])
-        self.add_module("z", LatentDistribution.LatentDistribution_Z(), in_branch=[1,2,3], out_branch=[3])
+        self.add_module("z", LatentDistribution.LatentDistribution_Z(), in_branch=[1,2], out_branch=[3])
         self.add_module("Concat", Concat(), in_branch=[1,2,3])
-        self.add_module("DecoderInput", LatentDistribution.LatentDistribution_DecoderInput(shape, latentDim), in_branch=[3])
-
-
+        self.add_module("DecoderInput", LatentDistribution.LatentDistribution_Decoder(shape, latentDim), in_branch=[3])
 
 class Attention(network.ModuleArgsDict):
 
@@ -347,56 +347,3 @@ class Attention(network.ModuleArgsDict):
         self.add_module("Sigmoid", torch.nn.Sigmoid())
         self.add_module("Upsample", torch.nn.Upsample(scale_factor=2))
         self.add_module("Multiply", Multiply(), in_branch=[2,0])
-        
-"""class Attention(nn.Module):
-    def __init__(self, dim, heads=4, dim_head=32):
-        super().__init__()
-        self.scale = dim_head**-0.5
-        self.heads = heads
-        hidden_dim = dim_head * heads
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
-        self.to_out = nn.Conv2d(hidden_dim, dim, 1)
-
-    def forward(self, x):
-        b, c, h, w = x.shape
-        qkv = self.to_qkv(x).chunk(3, dim=1)
-        q, k, v = map(
-            lambda t: rearrange(t, "b (h c) x y -> b h c (x y)", h=self.heads), qkv
-        )
-        q = q * self.scale
-
-        sim = einsum("b h d i, b h d j -> b h i j", q, k)
-        sim = sim - sim.amax(dim=-1, keepdim=True).detach()
-        attn = sim.softmax(dim=-1)
-
-        out = einsum("b h i j, b h d j -> b h i d", attn, v)
-        out = rearrange(out, "b h (x y) d -> b (h d) x y", x=h, y=w)
-        return self.to_out(out)
-
-class LinearAttention(nn.Module):
-    def __init__(self, dim, heads=4, dim_head=32):
-        super().__init__()
-        self.scale = dim_head**-0.5
-        self.heads = heads
-        hidden_dim = dim_head * heads
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
-
-        self.to_out = nn.Sequential(nn.Conv2d(hidden_dim, dim, 1), 
-                                    nn.GroupNorm(1, dim))
-
-    def forward(self, x):
-        b, c, h, w = x.shape
-        qkv = self.to_qkv(x).chunk(3, dim=1)
-        q, k, v = map(
-            lambda t: rearrange(t, "b (h c) x y -> b h c (x y)", h=self.heads), qkv
-        )
-
-        q = q.softmax(dim=-2)
-        k = k.softmax(dim=-1)
-
-        q = q * self.scale
-        context = torch.einsum("b h d n, b h e n -> b h d e", k, v)
-
-        out = torch.einsum("b h d e, b h d n -> b h e n", context, q)
-        out = rearrange(out, "b h c (x y) -> b (h c) x y", h=self.heads, x=h, y=w)
-        return self.to_out(out)"""

@@ -15,7 +15,7 @@ class Generator(network.Network):
     @config("Generator")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3,
                     channels: list[int]=[1, 64, 128, 256, 512, 1024],

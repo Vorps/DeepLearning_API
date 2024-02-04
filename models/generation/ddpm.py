@@ -176,7 +176,7 @@ class DDPM(network.Network):
     @config("DDPM")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     train_noise_step: int = 1000,

@@ -310,12 +310,6 @@ class Predictor(DistributedObject):
         
         self.gpu_checkpoints = gpu_checkpoints
 
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, type, value, traceback):
-        pass
-
     def _load(self) -> dict[str, dict[str, torch.Tensor]]:
         if MODEL().startswith("https://"):
             try:

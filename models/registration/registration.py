@@ -28,7 +28,7 @@ class VoxelMorph(network.Network):
     @config("VoxelMorph")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.SchedulersLoader = network.SchedulersLoader(),
+                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3,
                     channels : list[int] = [4, 16,32,32,32],

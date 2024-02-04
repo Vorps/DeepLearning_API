@@ -6,7 +6,7 @@ import os
 from DeepLearning_API import MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, MODEL, DATE
 from DeepLearning_API.dataset import DataTrain
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import gpuInfo, State, DataLog, DistributedObject
+from DeepLearning_API.utils import gpuInfo, State, DataLog, DistributedObject, description
 from DeepLearning_API.networks.network import Network, ModelLoader, NetState, CPU_Model
 import dill
 from typing import Union
@@ -68,9 +68,8 @@ class _Trainer():
             self.modelEMA.eval()
             self.modelEMA.module.setState(NetState.TRAIN)
 
-        description = lambda : "Training : Loss ("+" ".join(["{}({:.6f}) : {:.4f}".format(name, network.optimizer.param_groups[0]['lr'], network.measure.getLastLoss()) for name, network in self.model.module.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastLoss()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "")+gpuInfo(self.local_rank, False)
-        
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = description(), total=len(self.dataloader_training), disable=self.global_rank != 0 and "DL_API_CLUSTER" not in os.environ) as batch_iter:
+        desc = lambda : "Training : {}".format(description(self.model, self.modelEMA))
+        with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = desc(), total=len(self.dataloader_training), disable=self.global_rank != 0 and "DL_API_CLUSTER" not in os.environ) as batch_iter:
             for _, data_dict in batch_iter:
                 with autocast(enabled=self.autocast):
                     input = self.getInput(data_dict)
@@ -80,7 +79,7 @@ class _Trainer():
                         self.modelEMA.update_parameters(self.model)
                         self.modelEMA.module(input)
                     self.it += 1
-                    if (self.it+1) % self.it_validation == 0:
+                    if (self.it) % self.it_validation == 0:
                         loss = self._train_log(data_dict)
 
                         if self.dataloader_validation is not None:
@@ -88,10 +87,8 @@ class _Trainer():
                         self.model.module.update_lr()
                         self.checkpoint_save(loss)
 
-                batch_iter.set_description(description()) 
+                batch_iter.set_description(desc()) 
                 
-    
-
     @torch.no_grad()
     def _validate(self) -> float:
         self.model.eval()
@@ -99,16 +96,16 @@ class _Trainer():
         if self.modelEMA is not None:
             self.modelEMA.module.setState(NetState.EVALUATION)
 
-        description = lambda : "Validation : Loss ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastLoss()) for name, network in self.model.module.getNetworks().items() if network.measure is not None])+") "+("Loss_EMA ("+" ".join(["{} : {:.4f}".format(name, network.measure.getLastLoss()) for name, network in self.modelEMA.module.getNetworks().items() if network.measure is not None])+") " if self.modelEMA is not None else "") +gpuInfo(self.local_rank, False)
+        desc = lambda : "Validation : {}".format(description(self.model, self.modelEMA))
         data_dict = None
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = description(), total=len(self.dataloader_validation), leave=False, disable=self.global_rank != 0 and "DL_API_CLUSTER" not in os.environ) as batch_iter:
+        with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = desc(), total=len(self.dataloader_validation), leave=False, disable=self.global_rank != 0 and "DL_API_CLUSTER" not in os.environ) as batch_iter:
             for _, data_dict in batch_iter:
                 input = self.getInput(data_dict)
                 self.model(input)
                 if self.modelEMA is not None:
                     self.modelEMA.module(input)
 
-                batch_iter.set_description(description())
+                batch_iter.set_description(desc())
         dist.barrier()
         return self._validation_log(data_dict)
 
@@ -147,7 +144,7 @@ class _Trainer():
         if self.modelEMA is not None:
             models["_EMA"] = self.modelEMA.module
         
-        measures = DistributedObject.getMeasure(self.world_size, self.global_rank, self.local_rank*self.size+self.size-1, models)
+        measures = DistributedObject.getMeasure(self.world_size, self.global_rank, self.local_rank*self.size+self.size-1, models, self.it_validation)
         
         self.model.eval()
         self.model.module.setState(NetState.EVALUATION)
@@ -166,8 +163,11 @@ class _Trainer():
             for label, model in models.items():
                 for name, network in model.getNetworks().items():
                     if network.measure is not None:
-                        self.tb.add_scalars("{}/{}/Loss/{}".format(type_log, name, label), measures["{}{}".format(name, label)][0], self.it)
-                        self.tb.add_scalars("{}/{}/Metric/{}".format(type_log, name, label), measures["{}{}".format(name, label)][1], self.it)
+                        self.tb.add_scalars("{}/{}/Loss/{}".format(type_log, name, label), {k : v[1] for k, v in measures["{}{}".format(name, label)][0].items()}, self.it)
+                        self.tb.add_scalars("{}/{}/Loss_weight/{}".format(type_log, name, label), {k : v[0] for k, v in measures["{}{}".format(name, label)][0].items()}, self.it)
+
+                        self.tb.add_scalars("{}/{}/Metric/{}".format(type_log, name, label), {k : v[1] for k, v in measures["{}{}".format(name, label)][1].items()}, self.it)
+                        self.tb.add_scalars("{}/{}/Metric_weight/{}".format(type_log, name, label), {k : v[0] for k, v in measures["{}{}".format(name, label)][1].items()}, self.it)
                 
                     if len(images_log):
                         for name, layer, _ in model.get_layers([v.to(0) for k, v in self.getInput(data_dict).items() if k[1]], images_log):
@@ -186,7 +186,7 @@ class _Trainer():
             loss = []
             for name, network in self.model.module.getNetworks().items():
                 if network.measure is not None:
-                    loss.append(sum([v for v in measures["{}".format(name)][0].values()]))
+                    loss.append(sum([v[1] for v in measures["{}".format(name)][0].values()]))
             return np.mean(loss)
         return None
     

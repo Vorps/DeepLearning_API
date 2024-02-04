@@ -339,7 +339,6 @@ class Data(ABC):
             dataLoaders.append([])
             for data, map in zip(datas, maps):
                 dataLoaders[i].append(DataLoader(dataset=DataSet(rank=i, data=data, map=map, **self.dataSet_args), sampler=CustomSampler(len(map), self.subset.shuffle), batch_size=self.batch_size,**self.dataLoader_args))
-        print(len(dataLoaders))
         return dataLoaders
 
 class DataTrain(Data):
