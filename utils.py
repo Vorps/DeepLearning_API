@@ -24,11 +24,12 @@ from lxml import etree
 import sys
 import matplotlib.pyplot as pyplot
 import pandas as pd
+import vtk
 
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
 
 
-def description(model, modelEMA, showMemory: bool = True) -> str:
+def description(model, modelEMA = None, showMemory: bool = True) -> str:
     values_desc = lambda weights, values: " ".join(["{}({:.2f}) : {:.6f}".format(name.split(":")[-1], weight, value) for (name, value), weight in zip(values.items(), weights.values())])
 
     model_desc = lambda model : "("+" ".join(["{}({:.6f}) : {}".format(name, network.optimizer.param_groups[0]['lr'], values_desc(network.measure.getLastWeights(), network.measure.getLastValues())) for name, network in model.module.getNetworks().items() if network.measure is not None])+")"
@@ -460,7 +461,7 @@ class DatasetUtils():
             return data, attributes
                 
         def data_to_file(self, name : str, data : Union[sitk.Image, sitk.Transform, np.ndarray], attributes : Attribute = Attribute()) -> None:
-            if not os.path.exists(self.filename) and (isinstance(data, sitk.Image) or isinstance(data, sitk.Transform) or isAnImage(attributes) or (len(data.shape) == 2 and data.shape[1] == 3 and data.shape[0] > 0)):
+            if not os.path.exists(self.filename) and (isinstance(data, sitk.Image) or isinstance(data, sitk.Transform) or isinstance(data, vtk.vtkPolyData) or isAnImage(attributes) or (len(data.shape) == 2 and data.shape[1] == 3 and data.shape[0] > 0)):
                 os.makedirs(self.filename)
             if isinstance(data, sitk.Image):
                 for k, v in attributes.items():
@@ -468,6 +469,11 @@ class DatasetUtils():
                 sitk.WriteImage(data, "{}{}.{}".format(self.filename, name, self.format))
             elif isinstance(data, sitk.Transform):
                 sitk.WriteTransform(data, "{}{}.itk.txt".format(self.filename, name))
+            elif isinstance(data, vtk.vtkPolyData):
+                vtkWriter = vtk.vtkPolyDataWriter()
+                vtkWriter.SetFileName("{}{}.vtk".format(self.filename, name))
+                vtkWriter.SetInputData(data)
+                vtkWriter.Write()
             elif isAnImage(attributes):   
                 self.data_to_file(name, data_to_image(data, attributes), attributes)
             elif (len(data.shape) == 2 and data.shape[1] == 3 and data.shape[0] > 0):
@@ -1134,3 +1140,13 @@ def _resample(data: torch.Tensor, size: list[int]) -> torch.Tensor:
     else:
         mode = "trilinear"
     return F.interpolate(data.type(torch.float32).unsqueeze(0), size=tuple([s for s in reversed(size)]), mode=mode).squeeze(0).type(data.dtype)
+
+def getFlatLabel(mask: sitk.Image, labels: list[int]) -> sitk.Image:
+    data = sitk.GetArrayFromImage(mask)
+    result_data = np.zeros_like(data, np.uint8)
+    for label in labels:
+        result_data[np.where(data == label)] = 1
+
+    result = sitk.GetImageFromArray(result_data)
+    result.CopyInformation(mask)        
+    return result

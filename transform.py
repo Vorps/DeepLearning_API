@@ -195,7 +195,7 @@ class Resample(Transform, ABC):
             mode = "bilinear"
         else:
             mode = "trilinear"
-        return F.interpolate(input.type(torch.float32).to(self.device).unsqueeze(0), size=tuple(size), mode=mode).squeeze(0).type(input.dtype).cpu()
+        return F.interpolate(input.type(torch.float32).unsqueeze(0), size=tuple(size), mode=mode).squeeze(0).type(input.dtype).cpu()
 
     @abstractmethod
     def __call__(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:

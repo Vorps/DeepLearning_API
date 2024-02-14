@@ -97,12 +97,12 @@ class DataAugmentation(ABC):
 
     def __call__(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         if len(self.who_index[index]) > 0:
-            for i, result in enumerate(self._compute(index, [inputs[i] if device is None else inputs[i].to(device) for i in self.who_index[index]])):
+            for i, result in enumerate(self._compute(index, [inputs[i] for i in self.who_index[index]], device)):
                 inputs[self.who_index[index][i]] = result if device is None else result.cpu()
         return inputs
     
     @abstractmethod
-    def _compute(self, index: int, inputs : list[torch.Tensor]) -> list[torch.Tensor]:
+    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         pass
 
     def inverse(self, index: int, a: int, input : torch.Tensor) -> torch.Tensor:
@@ -120,7 +120,7 @@ class EulerTransform(DataAugmentation):
         super().__init__()
         self.matrix: dict[int, list[torch.Tensor]] = {}
 
-    def _compute(self, index: int, inputs : list[torch.Tensor]) -> list[torch.Tensor]:
+    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, matrix in zip(inputs, self.matrix[index]):
             results.append(F.grid_sample(input.unsqueeze(0).type(torch.float32), F.affine_grid(matrix[:, :-1,...], [1]+list(input.shape), align_corners=True).to(input.device), align_corners=True, mode="bilinear", padding_mode="reflection").type(input.dtype).squeeze(0))
@@ -202,7 +202,7 @@ class ColorTransform(DataAugmentation):
         super().__init__()
         self.matrix: dict[int, list[torch.Tensor]] = {}
     
-    def _compute(self, index: int, inputs : list[torch.Tensor]) -> list[torch.Tensor]:
+    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, matrix in zip(inputs, self.matrix[index]):
             result = input.reshape([*input.shape[:1], int(np.prod(input.shape[1:]))])
@@ -401,7 +401,7 @@ class Noise(DataAugmentation):
             self.ts[index] = [torch.randint(0, int(self.max_T), (1,)) for _ in shapes]
         return shapes
     
-    def _compute(self, index: int, inputs : list[torch.Tensor]) -> list[torch.Tensor]:
+    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, t in zip(inputs, self.ts[index]):
             alpha_hat_t = self.alpha_hat[t].to(input.device).reshape(*[1 for _ in range(len(input.shape))])
@@ -425,7 +425,7 @@ class CutOUT(DataAugmentation):
         self.centers[index] = [torch.rand((3) if len(shape) == 3 else (2)) for shape in shapes]
         return shapes
     
-    def _compute(self, index: int, inputs : list[torch.Tensor]) -> list[torch.Tensor]:
+    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, center in zip(inputs, self.centers[index]):
             masks = []
@@ -500,7 +500,7 @@ class Elastix(DataAugmentation):
             print("Compute in progress : {:.2f} %".format((i+1)/len(shapes)*100))
         return shapes
     
-    def _compute(self, index: int, inputs : list[torch.Tensor]) -> list[torch.Tensor]:
+    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, displacement_field in zip(inputs, self.displacement_fields[index]):
             results.append(F.grid_sample(input.type(torch.float32).unsqueeze(0), displacement_field.to(input.device), align_corners=True, mode="bilinear", padding_mode="border").type(input.dtype).squeeze(0))
@@ -533,7 +533,7 @@ class Permute(DataAugmentation):
                     shapes[i] = [shapes[i][dim-1] for dim in permute[1:]]
         return shapes
     
-    def _compute(self, index: int, inputs : list[torch.Tensor]) -> list[torch.Tensor]:
+    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, prob in zip(inputs, self.permute[index]):
             res = input

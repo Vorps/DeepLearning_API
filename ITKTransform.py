@@ -50,7 +50,7 @@ def _openRigidTransform(transform_files: dict[Union[str, sitk.Transform], bool])
         matrix_result = matrix.dot(matrix_result)
     return np.linalg.inv(matrix_result), -translation_result
 
-def composeTransform(transform_files : dict[Union[str, sitk.Transform], bool]) -> sitk.CompositeTransform:
+def composeTransform(transform_files : dict[Union[str, sitk.Transform], bool]) -> None:#sitk.CompositeTransform:
     transforms = _openTransform(transform_files)
     result = sitk.CompositeTransform(transforms)
     return result
@@ -81,10 +81,10 @@ def apply_to_data_Transform(data: np.ndarray, transform_files: dict[Union[str, s
         result[i, :] =  _LPS(transforms.TransformPoint(np.asarray(_LPS(data[i, :]), dtype=np.double)))
     return result
 
-def resampleITK(image_reference : sitk.Image, image : sitk.Image, transform_files : dict[str, bool], mask = True, defaultPixelValue: Union[float, None] = None):
+def resampleITK(image_reference : sitk.Image, image : sitk.Image, transform_files : dict[Union[str, sitk.Transform], bool], mask = True, defaultPixelValue: Union[float, None] = None):
     return sitk.Resample(image, image_reference, composeTransform(transform_files), sitk.sitkNearestNeighbor if mask else sitk.sitkBSpline, (defaultPixelValue if defaultPixelValue is not None else (0 if mask else -1024)))
 
-def parameterMap_to_transform(path_src: str) -> None:
+def parameterMap_to_transform(path_src: str) -> sitk.Transform:
     transform = sitk.ReadParameterFile("{}.0.txt".format(path_src))
     
     if transform["Transform"][0] == "EulerTransform":

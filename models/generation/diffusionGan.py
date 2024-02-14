@@ -61,7 +61,7 @@ class Discriminator(network.Network):
     
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             if self.measure is not None and self._it % self.n == 0:
-                value = sum([v for k, v in self.measure.getLastMetrics_hist(self.n).items() if k in self.names])
+                value = sum([v for k, v in self.measure.getLastValues(self.n).items() if k in self.names])
                 adjust = np.sign(self.ada_target-value) * (self.ada_interval)
                 self.p += adjust
                 self.p = np.clip(self.p, 0, 1)

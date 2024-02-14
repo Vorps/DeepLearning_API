@@ -17,8 +17,6 @@ def cosine_beta_schedule(timesteps, s=0.008):
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0.0001, 0.9999)
 
-import SimpleITK as sitk
-
 class DDPM(network.Network):
     
     class DDPM_TE(torch.nn.Module):
@@ -97,6 +95,7 @@ class DDPM(network.Network):
     class DDPM_TimeEmbedding(torch.nn.Module):
         
         def sinusoidal_embedding(noise_step: int, time_embedding_dim: int):
+            noise_step += 1
             embedding = torch.zeros(noise_step, time_embedding_dim)
             wk = torch.tensor([1 / 10_000 ** (2 * j / time_embedding_dim) for j in range(time_embedding_dim)])
             wk = wk.reshape((1, time_embedding_dim))
@@ -114,7 +113,7 @@ class DDPM(network.Network):
         
         def forward(self, input: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
             return self.time_embed((p*self.noise_step).long().repeat((input.shape[0])))
-
+        
     class DDPM_UNet(network.ModuleArgsDict):
 
         def __init__(self, noise_step: int, channels: list[int], blockConfig: blocks.BlockConfig, nb_conv_per_stage: int, downSampleMode: str, upSampleMode: str, attention : bool, time_embedding_dim: int, dim : int) -> None:

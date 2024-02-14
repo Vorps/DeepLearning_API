@@ -8,7 +8,7 @@ import os
 
 from DeepLearning_API import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, MODEL
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import DatasetUtils, State, gpuInfo, Attribute, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule, DistributedObject, DataLog
+from DeepLearning_API.utils import DatasetUtils, State, gpuInfo, Attribute, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule, DistributedObject, DataLog, description
 from DeepLearning_API.dataset import DataPrediction, DataSet
 from DeepLearning_API.HDF5 import Accumulator, PathCombine
 from DeepLearning_API.networks.network import ModelLoader, Network, NetState
@@ -239,9 +239,9 @@ class _Predictor():
     def run(self):
         self.model.eval()  
         self.model.module.setState(NetState.PREDICTION) 
-        description = lambda : "Prediction : Metric ("+" ".join(["{} : ".format(name)+" ".join(["{} : {:.4f}".format(nameMetric, value) for nameMetric, value in network.measure.getLastMetrics().items()]) for name, network in self.model.module.getNetworks().items() if network.measure is not None])+") "+gpuInfo(self.device)
-
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), desc = description(), total=len(self.dataloader_prediction), disable=self.global_rank != 0 and "DL_API_CLUSTER" not in os.environ) as batch_iter:
+        desc = lambda : "Prediction : {}".format(description(self.model))
+        
+        with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), desc = desc(), total=len(self.dataloader_prediction), disable=self.global_rank != 0 and "DL_API_CLUSTER" not in os.environ) as batch_iter:
             dist.barrier()
             for _, data_dict in batch_iter:
                 input = self.getInput(data_dict)
@@ -253,7 +253,7 @@ class _Predictor():
                         if outDataset.isDone(index):
                             outDataset.write(index, self.dataset.getDatasetFromIndex(list(data_dict.keys())[0], index).name.split("/")[-1], outDataset.getOutput(index, self.dataset))
 
-                batch_iter.set_description(description())
+                batch_iter.set_description(desc())
                 self.it += 1
 
 
