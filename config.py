@@ -189,7 +189,7 @@ def config(key : Union[str, None] = None):
                             continue
                         if not annotation == inspect._empty:
                             if annotation not in [int, str, bool, float, torch.Tensor]:
-                                if str(annotation).startswith("list") or str(annotation).startswith("tuple"):
+                                if str(annotation).startswith("list") or str(annotation).startswith("tuple") or str(annotation).startswith("typing.Tuple"):
                                     if annotation.__args__[0] in [int, str, bool, float]:
                                         values = config.getValue(param.name, param.default)
                                         kwargs[param.name] = values

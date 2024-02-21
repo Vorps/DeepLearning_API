@@ -434,11 +434,11 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             pass
         return v
 
-    def named_parameters(self, pretrained: bool = False) -> Iterator[tuple[str, torch.nn.parameter.Parameter]]:
+    def named_parameters(self, pretrained: bool = False, recurse=False) -> Iterator[tuple[str, torch.nn.parameter.Parameter]]:
         for name, moduleArgs in self._modulesArgs.items():
             module = self[name]
             if isinstance(module, ModuleArgsDict):
-                for k, v in module.named_parameters(pretrained):
+                for k, v in module.named_parameters(pretrained = pretrained):
                     yield name+"."+k, v
             elif isinstance(module, torch.nn.Module):
                 if not pretrained or not moduleArgs.pretrained:
@@ -447,7 +447,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                             yield name+"."+k, v
 
     def parameters(self, pretrained: bool = False):
-        for _, v in self.named_parameters(pretrained):
+        for _, v in self.named_parameters(pretrained = pretrained):
             yield v
     
     def named_ModuleArgsDict(self) -> Iterator[tuple[str, Self, ModuleArgs]]:
@@ -555,6 +555,20 @@ class Network(ModuleArgsDict, ABC):
             for name, child in module._modules.items():
                 if child is not None:
                     if not isinstance(child, Network):
+                        if isinstance(child, torch.nn.modules.conv._ConvNd) or isinstance(module, torch.nn.Linear):
+
+                            current_size = child.weight.shape[0]
+                            last_size = state_dict[prefix + name+".weight"].shape[0]
+
+                            if current_size != last_size:
+                                print("Warning: The size of '{}' has changed from {} to {}. Please check for potential impacts".format(prefix + name, last_size, current_size))
+                                ModuleArgsDict.init_func(child, self.init_type, self.init_gain)
+
+                                with torch.no_grad():
+                                    child.weight[:last_size] = state_dict[prefix + name+".weight"]
+                                    if child.bias is not None:
+                                        child.bias[:last_size] = state_dict[prefix + name+".bias"]
+                                return
                         load(child, prefix + name + '.')
 
         load(self)
@@ -600,7 +614,7 @@ class Network(ModuleArgsDict, ABC):
                 else:
                     model_state_dict[alias] = model_state_dict_tmp[alias]
             self.load_state_dict(model_state_dict)
-
+            
         if "{}_optimizer_state_dict".format(name) in state_dict and self.optimizer:
             self.optimizer.load_state_dict(state_dict['{}_optimizer_state_dict'.format(name)])
         self.initialized()

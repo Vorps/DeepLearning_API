@@ -13,16 +13,15 @@ def _openTransform(transform_files: dict[Union[str, sitk.Transform], bool]) -> l
             transform = sitk.ReadTransform(transform_file+".itk.txt")
         else:
             transform = transform_file
+
         if len(transform.GetParameters()) == 6:
             transform = sitk.Euler3DTransform(transform)
             if invert:
                 transform = sitk.Euler3DTransform(transform.GetInverse())
-            transforms.append(transform)
         elif len(transform.GetParameters()) == 12:
             transform = sitk.AffineTransform(transform)
             if invert:
                 transform = sitk.AffineTransform(transform.GetInverse())
-            transforms.append(transform)
         else:
             transform = sitk.BSplineTransform(transform)
             if invert:
@@ -33,7 +32,7 @@ def _openTransform(transform_files: dict[Union[str, sitk.Transform], bool]) -> l
                 iterativeInverseDisplacementFieldImageFilter.SetNumberOfIterations(20)
                 inverseDisplacementField = iterativeInverseDisplacementFieldImageFilter.Execute(displacementField)
                 transform = sitk.DisplacementFieldTransform(inverseDisplacementField)
-            transforms.append(transform)
+        transforms.append(transform)
     return transforms
 
 def _openRigidTransform(transform_files: dict[Union[str, sitk.Transform], bool]) -> tuple[np.ndarray, np.ndarray]:
@@ -82,27 +81,45 @@ def apply_to_data_Transform(data: np.ndarray, transform_files: dict[Union[str, s
     return result
 
 def resampleITK(image_reference : sitk.Image, image : sitk.Image, transform_files : dict[Union[str, sitk.Transform], bool], mask = True, defaultPixelValue: Union[float, None] = None):
-    return sitk.Resample(image, image_reference, composeTransform(transform_files), sitk.sitkNearestNeighbor if mask else sitk.sitkBSpline, (defaultPixelValue if defaultPixelValue is not None else (0 if mask else -1024)))
+    return sitk.Resample(image, image_reference, composeTransform(transform_files), sitk.sitkNearestNeighbor if mask else sitk.sitkBSpline, (defaultPixelValue if defaultPixelValue is not None else (0 if mask else np.min(sitk.GetArrayFromImage(image)))))
 
-def parameterMap_to_transform(path_src: str) -> sitk.Transform:
+def parameterMap_to_transform(path_src: str) -> Union[sitk.Transform, list[sitk.Transform]]:
     transform = sitk.ReadParameterFile("{}.0.txt".format(path_src))
-    
+    format = lambda x: np.array([float(i) for i in x])
+
     if transform["Transform"][0] == "EulerTransform":
         result = sitk.Euler3DTransform()
-        parameters = np.array([float(i) for i in transform["TransformParameters"]])
-        fixedParameters = np.array([float(i) for i in transform["CenterOfRotationPoint"]]+[0])
+        parameters = format(transform["TransformParameters"])
+        fixedParameters = format(transform["CenterOfRotationPoint"]+[0])
     elif transform["Transform"][0] == "AffineTransform":
         result = sitk.AffineTransform(3)
-        parameters = np.array([float(i) for i in transform["TransformParameters"]])
-        fixedParameters = np.array([float(i) for i in transform["CenterOfRotationPoint"]]+[0])
+        parameters = format(transform["TransformParameters"])
+        fixedParameters = format(transform["CenterOfRotationPoint"]+[0])
+    elif transform["Transform"][0] == "BSplineStackTransform":
+        GridSize = format(transform["GridSize"])
+        GridOrigin = format(transform["GridOrigin"])
+        GridSpacing = format(transform["GridSpacing"])
+        GridDirection = format(transform["GridDirection"]).reshape((3,3)).T.flatten() 
+        fixedParameters = np.concatenate([GridSize, GridOrigin, GridSpacing, GridDirection])
+
+        nb = int(format(transform["Size"])[-1])
+        sub = int(np.prod(GridSize))*3
+        results = []
+        for i in range(nb):
+            result = sitk.BSplineTransform(3)
+            sub_parameters = parameters[i*sub:(i+1)*sub]
+            result.SetFixedParameters(fixedParameters)
+            result.SetParameters(sub_parameters)
+            results.append(result)
+            return results
     else:
-        result = sitk.BSplineTransform()
+        result = sitk.BSplineTransform(3)
         
-        parameters = np.array([float(i) for i in transform["TransformParameters"]])
+        parameters = format(transform["TransformParameters"])
         GridSize = np.array([int(i) for i in transform["GridSize"]])
-        GridOrigin = np.array([float(i) for i in transform["GridOrigin"]])
-        GridSpacing = np.array([float(i) for i in transform["GridSpacing"]])
-        GridDirection = np.array(np.array([float(i) for i in transform["GridDirection"]])).reshape((3,3)).T.flatten() 
+        GridOrigin = format(transform["GridOrigin"])
+        GridSpacing = format(transform["GridSpacing"])
+        GridDirection = np.array(format(transform["GridDirection"])).reshape((3,3)).T.flatten() 
         fixedParameters = np.concatenate([GridSize, GridOrigin, GridSpacing, GridDirection])
 
     result.SetFixedParameters(fixedParameters)

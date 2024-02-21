@@ -219,7 +219,7 @@ class _Predictor():
         patch_size, overlap = self.dataset.getPatchConfig()
         for outDataset in self.outsDataset.values():
             outDataset.setPatchConfig([size for size in patch_size if size > 1], overlap, np.max([int(np.sum([data_augmentation.nb for data_augmentation in self.dataset.dataAugmentationsList])+1), 1]))
-        self.data_log : dict[str, tuple(DataLog, int)] = {}
+        self.data_log : dict[str, tuple[DataLog, int]] = {}
         if data_log is not None:
             for data in data_log:
                 self.data_log[data.split("/")[0].replace(":", ".")] = (DataLog.__getitem__(data.split("/")[1]).value[0], int(data.split("/")[2]))

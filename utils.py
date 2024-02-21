@@ -231,6 +231,19 @@ def data_to_image(data : np.ndarray, attributes: Attribute) -> sitk.Image:
     image.SetDirection(attributes.get_np_array("Direction").tolist())
     return image
 
+def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray(image.GetOrigin())
+    attributes["Spacing"] = np.asarray(image.GetSpacing())
+    attributes["Direction"] = np.asarray(image.GetDirection())
+    data = sitk.GetArrayFromImage(image)
+
+    if image.GetNumberOfComponentsPerPixel() == 1:
+        data = np.expand_dims(data, 0)
+    else:
+        data = np.transpose(data, (len(data.shape)-1, *[i for i in range(len(data.shape)-1)]))
+    return data, attributes
+
 class DatasetUtils():
 
     class AbstractFile(ABC):
@@ -302,16 +315,8 @@ class DatasetUtils():
             if attributes is None:
                 attributes = Attribute()
             if isinstance(data, sitk.Image):
-                image = data
-                attributes["Origin"] = np.asarray(image.GetOrigin())
-                attributes["Spacing"] = np.asarray(image.GetSpacing())
-                attributes["Direction"] = np.asarray(image.GetDirection())
-                data = sitk.GetArrayFromImage(image)
-
-                if image.GetNumberOfComponentsPerPixel() == 1:
-                    data = np.expand_dims(data, 0)
-                else:
-                    data = np.transpose(data, (len(data.shape)-1, *[i for i in range(len(data.shape)-1)]))
+                data, attributes_tmp = image_to_data(data)
+                attributes.update(attributes_tmp)
             elif isinstance(data, sitk.Transform):
                 transforms = []
                 if isinstance(data, sitk.CompositeTransform):
@@ -412,18 +417,8 @@ class DatasetUtils():
             attributes = Attribute()
             if os.path.exists("{}{}.{}".format(self.filename, name, self.format)):
                 image = sitk.ReadImage("{}{}.{}".format(self.filename, name, self.format))
-                
-                attributes["Origin"] = np.asarray(image.GetOrigin())
-                attributes["Spacing"] = np.asarray(image.GetSpacing())
-                attributes["Direction"] = np.asarray(image.GetDirection())
-                
-                for k in image.GetMetaDataKeys():
-                    attributes[k] = image.GetMetaData(k)
-                data = sitk.GetArrayFromImage(image)
-                if image.GetNumberOfComponentsPerPixel() == 1:
-                    data = np.expand_dims(data, 0)
-                else:
-                    data = np.transpose(data, (len(data.shape)-1, *[i for i in range(len(data.shape)-1)]))
+                data, attributes_tmp = image_to_data(image)
+                attributes.update(attributes_tmp)
             elif os.path.exists("{}{}.itk.txt".format(self.filename, name)): 
                 data = sitk.ReadTransform("{}{}.itk.txt".format(self.filename, name))
                 transforms = []
@@ -1141,6 +1136,17 @@ def _resample(data: torch.Tensor, size: list[int]) -> torch.Tensor:
         mode = "trilinear"
     return F.interpolate(data.type(torch.float32).unsqueeze(0), size=tuple([s for s in reversed(size)]), mode=mode).squeeze(0).type(data.dtype)
 
+def _affine_matrix(matrix: torch.Tensor, translation: torch.Tensor) -> torch.Tensor:
+    return torch.cat((torch.cat((matrix, translation.unsqueeze(0).T), dim=1), torch.tensor([[0, 0, 0, 1]])), dim=0)
+
+def _resample_affine(data: torch.Tensor, matrix: torch.Tensor):
+    if data.dtype == torch.uint8:
+        mode = "nearest"
+    else:
+        mode = "bilinear"
+    return F.grid_sample(data.unsqueeze(0).type(torch.float32), F.affine_grid(matrix[:, :-1,...].type(torch.float32), [1]+list(data.shape), align_corners=True), align_corners=True, mode=mode, padding_mode="reflection").squeeze(0).type(data.dtype)
+
+
 def getFlatLabel(mask: sitk.Image, labels: list[int]) -> sitk.Image:
     data = sitk.GetArrayFromImage(mask)
     result_data = np.zeros_like(data, np.uint8)
@@ -1149,4 +1155,30 @@ def getFlatLabel(mask: sitk.Image, labels: list[int]) -> sitk.Image:
 
     result = sitk.GetImageFromArray(result_data)
     result.CopyInformation(mask)        
+    return result
+
+def crop_with_mask(image: sitk.Image, mask: sitk.Image, label: list[int], dilatations: list[int]) -> sitk.Image:
+    data = sitk.GetArrayFromImage(image)
+    
+    border = np.where(np.isin(sitk.GetArrayFromImage(mask), label))
+    box = []
+    for w, dilatation, s in zip(border, dilatations, data.shape):
+        box.append([max(np.min(w)-dilatation, 0), min(np.max(w)+dilatation, s)])
+    box = np.asarray(box)
+
+    for i, w in enumerate(box):
+        data = np.delete(data, slice(w[1], data.shape[i]), i)
+        data = np.delete(data, slice(0, w[0]), i)
+    
+    origin = np.asarray(image.GetOrigin())
+    matrix = np.asarray(image.GetDirection()).reshape((len(origin), len(origin)))
+    origin = origin.dot(matrix)
+    for i, w in enumerate(box):
+        origin[-i-1] += w[0]*np.asarray(image.GetSpacing())[-i-1]
+    origin = origin.dot(np.linalg.inv(matrix))
+
+    result = sitk.GetImageFromArray(data)
+    result.SetOrigin(origin)
+    result.SetSpacing(image.GetSpacing())
+    result.SetDirection(image.GetDirection())
     return result

@@ -3,7 +3,7 @@ import torch
 
 import numpy as np
 import SimpleITK as sitk
-from DeepLearning_API.utils import _getModule, Attribute, NeedDevice, DatasetUtils, data_to_image
+from DeepLearning_API.utils import _getModule, Attribute, NeedDevice, DatasetUtils, data_to_image, _resample_affine, _affine_matrix, image_to_data
 from DeepLearning_API.config import config
 from abc import ABC, abstractmethod
 import torch.nn.functional as F
@@ -462,3 +462,45 @@ class Flip(Transform):
     
     def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return input.flip(tuple(self.dims))
+
+class Canonical(Transform):
+
+    def __init__(self) -> None:
+        self.canonical_direction = torch.diag(torch.tensor([-1,-1, 1])).to(torch.double)
+
+    def __call__(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        matrix = _affine_matrix(self.canonical_direction, torch.tensor([0, 0, 0]))
+        cache_attribute["Direction"] = (self.canonical_direction @ cache_attribute.get_tensor("Direction").reshape(3,3)).flatten()
+        center = np.asarray([(input.shape[-i-1]-1) * cache_attribute.get_np_array("Spacing")[i] for i in range(3)])/2+cache_attribute.get_np_array("Origin")
+        translation_center = self.canonical_direction @ (self.canonical_direction.inverse() @ (center)-center)
+        cache_attribute["Origin"] =  self.canonical_direction @ cache_attribute.get_np_array("Origin")+translation_center
+        return _resample_affine(input, matrix.unsqueeze(0))
+    
+    def inverse(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        matrix = _affine_matrix(self.canonical_direction.inverse(), torch.tensor([0, 0, 0]))
+        cache_attribute.pop("Direction")
+        cache_attribute.pop("Origin")
+        return _resample_affine(input, matrix.unsqueeze(0))
+
+class HistogramMatching(Transform):
+
+    def __init__(self, reference_group: str) -> None:
+        self.reference_group = reference_group
+
+    def __call__(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        image = data_to_image(input, cache_attribute)
+        image_ref = None
+        for datasetUtils in self.datasetsUtils:
+            if datasetUtils.isDatasetExist(self.reference_group, name):
+                image_ref = datasetUtils.readImage(self.reference_group, name)
+        if image_ref is None:
+             raise NameError("Image : {}/{} not found".format(self.reference_group, name))
+        matcher = sitk.HistogramMatchingImageFilter()
+        matcher.SetNumberOfHistogramLevels(128)
+        matcher.SetNumberOfMatchPoints(5)
+        matcher.SetThresholdAtMeanIntensity(True)
+        result, _ = image_to_data(matcher.Execute(image, image_ref))
+        return result
+    
+    def inverse(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return input
