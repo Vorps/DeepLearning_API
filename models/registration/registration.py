@@ -4,7 +4,6 @@ from DeepLearning_API.config import config
 from models.segmentation import UNet
 from DeepLearning_API.networks import blocks, network
 import torch.nn.functional as F
-import numpy as np
 
 class VoxelMorph(network.Network):
 

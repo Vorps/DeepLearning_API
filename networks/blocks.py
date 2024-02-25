@@ -8,7 +8,6 @@ from scipy.interpolate import interp1d
 import numpy as np
 import ast
 from typing import Union
-from functools import partial
 
 class NormMode(Enum):
     NONE = 0,

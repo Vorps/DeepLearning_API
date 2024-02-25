@@ -1,10 +1,10 @@
 from DeepLearning_API.config import config
 import os
-from DeepLearning_API import METRICS_DIRECTORY, PREDICTIONS_DIRECTORY
+from DeepLearning_API import METRICS_DIRECTORY, PREDICTIONS_DIRECTORY, DEEP_LEARNING_API_ROOT
 import shutil
 import builtins
 import importlib
-from DeepLearning_API.utils import _getModule, DistributedObject, synchronize_data
+from utils.utils import _getModule, DistributedObject, synchronize_data
 from DeepLearning_API.dataset import DataMetric
 import torch
 import tqdm
@@ -28,7 +28,7 @@ class CriterionsLoader():
         criterions = {}
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
             module, name = _getModule(module_classpath, "measure")
-            criterions[config("{}.metrics.{}.targetsCriterions.{}.criterionsLoader.{}".format(os.environ["DEEP_LEARNING_API_ROOT"], output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
+            criterions[config("{}.metrics.{}.targetsCriterions.{}.criterionsLoader.{}".format(DEEP_LEARNING_API_ROOT(), output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
         return criterions
 
 class TargetCriterionsLoader():

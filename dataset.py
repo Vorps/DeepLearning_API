@@ -11,11 +11,11 @@ from typing import Union, Iterator
 
 from DeepLearning_API.HDF5 import DatasetPatch, Dataset
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, DatasetUtils, State
+from utils.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, State
+from utils.dataset import Dataset
 from DeepLearning_API.transform import TransformLoader, Transform
 from DeepLearning_API.augmentation import DataAugmentationsList
-from multiprocessing import Manager
-import time
+from DeepLearning_API import DL_API_STATE, DEEP_LEARNING_API_ROOT
 
 class GroupTransform:
 
@@ -29,27 +29,27 @@ class GroupTransform:
         self.post_transforms : list[Transform] = []
         self.isInput = isInput
         
-    def load(self, group_src : str, group_dest : str, datasetsUtils: list[DatasetUtils]):
+    def load(self, group_src : str, group_dest : str, datasets: list[Dataset]):
         if self._pre_transforms is not None:
             if isinstance(self._pre_transforms, dict):
                 for classpath, transform in self._pre_transforms.items():
-                    transform = transform.getTransform(classpath, DL_args =  "{}.Dataset.groups_src.{}.groups_dest.{}.pre_transforms".format(os.environ["DEEP_LEARNING_API_ROOT"], group_src, group_dest))
-                    transform.setDatasetsUtils(datasetsUtils)
+                    transform = transform.getTransform(classpath, DL_args =  "{}.Dataset.groups_src.{}.groups_dest.{}.pre_transforms".format(DEEP_LEARNING_API_ROOT(), group_src, group_dest))
+                    transform.setDatasets(datasets)
                     self.pre_transforms.append(transform)
             else:
                 for transform in self._pre_transforms:
-                    transform.setDatasetsUtils(datasetsUtils)
+                    transform.setDatasets(datasets)
                     self.pre_transforms.append(transform)
 
         if self._post_transforms is not None:
             if isinstance(self._post_transforms, dict):
                 for classpath, transform in self._post_transforms.items():
-                    transform = transform.getTransform(classpath, DL_args = "{}.Dataset.groups_src.{}.groups_dest.{}.post_transforms".format(os.environ["DEEP_LEARNING_API_ROOT"], group_src, group_dest))
-                    transform.setDatasetsUtils(datasetsUtils)
+                    transform = transform.getTransform(classpath, DL_args = "{}.Dataset.groups_src.{}.groups_dest.{}.post_transforms".format(DEEP_LEARNING_API_ROOT(), group_src, group_dest))
+                    transform.setDatasets(datasets)
                     self.post_transforms.append(transform)
             else:
                 for transform in self._post_transforms:
-                    transform.setDatasetsUtils(datasetsUtils)
+                    transform.setDatasets(datasets)
                     self.post_transforms.append(transform)
     
     def to(self, device: int):
@@ -157,7 +157,7 @@ class Subset():
     def __call__(self, names: list[str]) -> set[str]:
         inter_name = set(names[0])
         for n in names[1:]:
-            inter_name = inter_name.intersection(n)
+            inter_name = inter_name.intersection(set(n))
         names = sorted(list(inter_name))
         size = len(names)
         index = []
@@ -217,7 +217,7 @@ class Data(ABC):
         self.dataLoader_args = dict(num_workers=num_workers if use_cache else 0, pin_memory=pin_memory)
         self.data : list[list[dict[str, list[Dataset]]], dict[str, list[Dataset]]] = []
         self.map : list[list[list[tuple[int, int, int]]], list[tuple[int, int, int]]] = []
-        self.datasets: dict[str, DatasetUtils] = {}
+        self.datasets: dict[str, Dataset] = {}
 
     def _getDatasets(self, names: list[str], dataset_name: dict[str, dict[str, list[str]]]) -> tuple[dict[str, list[Dataset]], list[tuple[int, int, int]]]:
         nb_dataset = len(names)
@@ -241,7 +241,7 @@ class Data(ABC):
             return [[] for _ in range(world_size)]
         
         maps = []
-        if os.environ["DL_API_STATE"] == str(State.PREDICTION) or os.environ["DL_API_STATE"] == str(State.METRIC):
+        if DL_API_STATE() == str(State.PREDICTION) or DL_API_STATE() == str(State.METRIC):
             np_map = np.asarray(map)
             unique_index = np.unique(np_map[:, 0])
             offset = int(np.ceil(len(unique_index)/world_size))
@@ -261,11 +261,11 @@ class Data(ABC):
         datasets: dict[str, list[str]] = {}
         for dataset_filename in self.dataset_filenames:
             filename, format = dataset_filename.split(":")
-            datasetUtils = DatasetUtils(filename, format) 
-            self.datasets[filename] = datasetUtils
+            dataset = Dataset(filename, format) 
+            self.datasets[filename] = dataset
 
             for group in self.groups_src:
-                if datasetUtils.isGroupExist(group):
+                if dataset.isGroupExist(group):
                     if group in datasets:
                         datasets[group].append(filename) 
                     datasets[group] = [filename]
@@ -292,9 +292,7 @@ class Data(ABC):
                 subset_names.update(subset([dataset_name[group][filename] for group in dataset_name]))
         else:
             subset_names = self.subset(names)
-        
         data, map = self._getDatasets(list(subset_names), dataset_name)
-        
         train_map = map
         validate_map = []
         if isinstance(self.train_size, float):

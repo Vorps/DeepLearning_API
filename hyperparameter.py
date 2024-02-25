@@ -1,5 +1,5 @@
 
-from DeepLearning_API.utils import gpuInfo, DistributedObject, State, getMaxGPUMemory
+from utils.utils import DistributedObject, State, getMaxGPUMemory
 from DeepLearning_API.config import config
 from DeepLearning_API.networks.network import ModelLoader, Network, CPU_Model, ModuleArgsDict
 from DeepLearning_API.dataset import DataHyperparameter

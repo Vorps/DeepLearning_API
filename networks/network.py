@@ -2,7 +2,7 @@ from functools import partial
 import importlib
 import inspect
 import os
-from typing import Any, Iterable, Iterator, Callable
+from typing import Iterable, Iterator, Callable
 from typing_extensions import Self
 import torch
 from abc import ABC
@@ -10,14 +10,15 @@ import numpy as np
 from torch._jit_internal import _copy_to_script_wrapper
 
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import State, _getModule, getDevice, gpuInfo, getGPUMemory
+from utils.utils import State, _getModule, getDevice, getGPUMemory
 
 from DeepLearning_API.HDF5 import Accumulator, ModelPatch
 from collections import OrderedDict
 from torch.utils.checkpoint import checkpoint
 from typing import Union
 from enum import Enum
-from DeepLearning_API.schedulers import Scheduler, Constant
+from DeepLearning_API.schedulers import Scheduler
+from DeepLearning_API import DEEP_LEARNING_API_ROOT
 
 class NetState(Enum):
     TRAIN = 0,
@@ -40,7 +41,7 @@ class OptimizerLoader():
         self.name = name
     
     def getOptimizer(self, key: str, parameter: Iterator[torch.nn.parameter.Parameter]) -> torch.optim.Optimizer:
-        return config("{}.Model.{}.Optimizer".format(os.environ["DEEP_LEARNING_API_ROOT"], key))(getattr(importlib.import_module('torch.optim'), self.name))(parameter, config = None)
+        return config("{}.Model.{}.Optimizer".format(DEEP_LEARNING_API_ROOT(), key))(getattr(importlib.import_module('torch.optim'), self.name))(parameter, config = None)
         
 class SchedulerStep():
     
@@ -98,8 +99,8 @@ class CriterionsLoader():
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
             module, name = _getModule(module_classpath, "measure")
             criterionsAttr.isTorchCriterion = module.startswith("torch")
-            criterionsAttr.sheduler = criterionsAttr.l.getShedulers("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(os.environ["DEEP_LEARNING_API_ROOT"], model_classname, output_group, target_group, module_classpath))
-            criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(os.environ["DEEP_LEARNING_API_ROOT"], model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
+            criterionsAttr.sheduler = criterionsAttr.l.getShedulers("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(DEEP_LEARNING_API_ROOT(), model_classname, output_group, target_group, module_classpath))
+            criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(DEEP_LEARNING_API_ROOT(), model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
         return criterions
 
 class TargetCriterionsLoader():
@@ -173,14 +174,14 @@ class Measure():
                         self._loss[criterionsAttr.group] = {}
                     self._loss[criterionsAttr.group]["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)] = Measure.Loss(criterion.__class__.__name__, output_group, target_group, criterionsAttr.group, criterionsAttr.isLoss, criterionsAttr.accumulation) 
 
-    def update(self, output_group: str, output : torch.Tensor, data_dict: dict[str, torch.Tensor], it: int, nb_patch: int) -> None:
+    def update(self, output_group: str, output : torch.Tensor, data_dict: dict[str, torch.Tensor], it: int, nb_patch: int, training: bool) -> None:
         for target_group in self.outputsCriterions[output_group]:
             target = [data_dict[group].to(output.device) for group in target_group.split("/") if group in data_dict]
             for criterion, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
                 if it >= criterionsAttr.stepStart and (criterionsAttr.stepStop is None or it <= criterionsAttr.stepStop):
                     scheduler = self.update_scheduler(criterionsAttr.sheduler, it)
                     self._loss[criterionsAttr.group]["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)].add(scheduler.get_value(), criterion(output, *target))
-                    if len(np.unique([len(l) for l in self._loss[criterionsAttr.group].values() if l.accumulation and l.isLoss])) == 1:
+                    if training and len(np.unique([len(l) for l in self._loss[criterionsAttr.group].values() if l.accumulation and l.isLoss])) == 1:
                         if criterionsAttr.isLoss:
                             loss = torch.zeros((1), requires_grad = True)
                             for v in [l for l in self._loss[criterionsAttr.group].values() if l.accumulation and l.isLoss]:
@@ -802,7 +803,7 @@ class Network(ModuleArgsDict, ABC):
                 else:
                     input = {k[0] : patch_indexed.patch.getData(v, patch_indexed.index, 0, False) for k, v in data_dict.items()}
                     nb = patch_indexed.patch.getSize(0)
-                self.outputsGroup[name].measure.update(name, layer, input, self._it, nb)
+                self.outputsGroup[name].measure.update(name, layer, input, self._it, nb, self.training)
             if name in output_layers:
                 results.append((name, layer))
         return results
@@ -882,7 +883,7 @@ class ModelLoader():
         
     def getModel(self, train : bool = True, DL_args: Union[str, None] = None, DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain"]) -> Network:
         if not DL_args:
-            DL_args="{}.Model".format(os.environ["DEEP_LEARNING_API_ROOT"])
+            DL_args="{}.Model".format(DEEP_LEARNING_API_ROOT())
         model = partial(getattr(importlib.import_module(self.module), self.name), config = None, DL_args=DL_args)
         if not train: 
             model = partial(model, DL_without = DL_without)

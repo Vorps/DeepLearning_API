@@ -6,11 +6,13 @@ import SimpleITK as sitk
 from torch.functional import Tensor
 
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import _getModule, Attribute, data_to_image
+from utils.utils import _getModule
+from utils.dataset import Attribute, data_to_image
 import torch.nn.functional as F
 from typing import Union
 import os
-import scipy.signal
+from DeepLearning_API import DEEP_LEARNING_API_ROOT
+
 
 def _translate2DMatrix(t: torch.Tensor) -> torch.Tensor:
     return torch.cat((torch.cat((torch.eye(2), torch.tensor([[t[0]], [t[1]]])), dim=1), torch.Tensor([[0,0,1]])), dim=0)
@@ -61,7 +63,7 @@ class DataAugmentationsList():
     def load(self, key: str):
         for augmentation, prob in self.dataAugmentationsLoader.items():
             module, name = _getModule(augmentation, "augmentation")
-            dataAugmentation: DataAugmentation = getattr(importlib.import_module(module), name)(config = None, DL_args="{}.Dataset.augmentations.{}.dataAugmentations".format(os.environ["DEEP_LEARNING_API_ROOT"], key))
+            dataAugmentation: DataAugmentation = getattr(importlib.import_module(module), name)(config = None, DL_args="{}.Dataset.augmentations.{}.dataAugmentations".format(DEEP_LEARNING_API_ROOT(), key))
             dataAugmentation.load(prob.prob)
             self.dataAugmentations.append(dataAugmentation)
     
@@ -547,3 +549,39 @@ class Permute(DataAugmentation):
         for permute in reversed(self._permute_dims[self.permute[index][a]]):
             input = input.permute(tuple(np.argsort(permute)))
         return input
+
+class Mask(DataAugmentation):
+
+    @config("Mask")
+    def __init__(self, mask: str, value: float) -> None:
+        super().__init__()
+        if mask is not None:
+            if os.path.exists(mask):
+                self.mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(mask)))
+            else:
+                raise NameError('Mask file not found')
+        self.positions: dict[int, list[torch.Tensor]] = {}
+        self.value = value
+
+    def _state_init(self, index : int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
+        self.positions[index] = [torch.rand((3) if len(shape) == 3 else (2))*(torch.tensor([max(s1-s2, 0) for s1, s2 in zip(torch.tensor(shape), torch.tensor(self.mask.shape))])) for shape in shapes]
+        return [self.mask.shape for _ in shapes]
+    
+    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
+        results = []
+        for input, position in zip(inputs, self.positions[index]):
+            slices = [slice(None, None)]+[slice(int(s1), int(s1)+s2) for s1, s2 in zip(position, self.mask.shape)]
+            padding = []
+            for s1, s2 in zip(reversed(input.shape), reversed(self.mask.shape)):
+                if s1 < s2:
+                    pad = s2-s1
+                else:
+                    pad = 0
+                padding.append(0)
+                padding.append(pad)
+            value = torch.tensor(0, dtype=torch.uint8) if input.dtype == torch.uint8 else torch.tensor(self.value).to(input.device)
+            results.append(torch.where(self.mask.to(input.device) == 1, torch.nn.functional.pad(input, tuple(padding), mode="constant", value=value)[tuple(slices)], value))
+        return results
+    
+    def _inverse(self, index: int, a: int, input : torch.Tensor) -> torch.Tensor:
+        pass

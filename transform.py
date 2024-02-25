@@ -3,20 +3,20 @@ import torch
 
 import numpy as np
 import SimpleITK as sitk
-from DeepLearning_API.utils import _getModule, Attribute, NeedDevice, DatasetUtils, data_to_image, _resample_affine, _affine_matrix, image_to_data
+from utils.utils import _getModule, NeedDevice, _resample_affine, _affine_matrix
+from utils.dataset import Dataset, Attribute, data_to_image, image_to_data
 from DeepLearning_API.config import config
 from abc import ABC, abstractmethod
 import torch.nn.functional as F
 from typing import Any, Union
-import ast
 
 class Transform(NeedDevice, ABC):
     
     def __init__(self) -> None:
-        self.datasetsUtils : list[DatasetUtils] = []
+        self.datasets : list[Dataset] = []
         
-    def setDatasetsUtils(self, datasetsUtils: list[DatasetUtils]):
-        self.datasetsUtils = datasetsUtils
+    def setDatasets(self, datasets: list[Dataset]):
+        self.datasets = datasets
 
     def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return shape
@@ -258,9 +258,9 @@ class ResampleTransform(Transform):
         image = data_to_image(input, cache_attribute)
         for transform_group, invert in self.transforms.items():
             transform = None
-            for datasetUtils in self.datasetsUtils:
-                if datasetUtils.isDatasetExist(transform_group, name):
-                    transform = datasetUtils.readTransform(transform_group, name)
+            for dataset in self.datasets:
+                if dataset.isDatasetExist(transform_group, name):
+                    transform = dataset.readTransform(transform_group, name)
                     break
             if transform is None:
                 raise NameError("Tranform : {}/{} not found".format(transform_group, name))
@@ -293,9 +293,9 @@ class ResampleTransform(Transform):
         transforms = []
         for transform_group, invert in self.transforms.items():
             transform = None
-            for datasetUtils in self.datasetsUtils:
-                if datasetUtils.isDatasetExist(transform_group, name):
-                    transform = datasetUtils.readTransform(transform_group, name)
+            for dataset in self.datasets:
+                if dataset.isDatasetExist(transform_group, name):
+                    transform = dataset.readTransform(transform_group, name)
                     break
             if transform is None:
                 raise NameError("Tranform : {}/{} not found".format(transform_group, name))
@@ -341,9 +341,9 @@ class Mask(Transform):
             mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path))).unsqueeze(0)
         else:
             mask = None
-            for datasetUtils in self.datasetsUtils:
-                if datasetUtils.isDatasetExist(self.path, name):
-                    mask, _ = datasetUtils.readData(self.path, name)
+            for dataset in self.datasets:
+                if dataset.isDatasetExist(self.path, name):
+                    mask, _ = dataset.readData(self.path, name)
                     break
             if mask is None:
                 raise NameError("Mask : {}/{} not found".format(self.path, name))
@@ -466,20 +466,20 @@ class Flip(Transform):
 class Canonical(Transform):
 
     def __init__(self) -> None:
-        self.canonical_direction = torch.diag(torch.tensor([-1,-1, 1])).to(torch.double)
+        self.canonical_direction = torch.diag(torch.tensor([-1, -1, 1])).to(torch.double)
 
     def __call__(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        matrix = _affine_matrix(self.canonical_direction, torch.tensor([0, 0, 0]))
-        cache_attribute["Direction"] = (self.canonical_direction @ cache_attribute.get_tensor("Direction").reshape(3,3)).flatten()
+        matrix = _affine_matrix(self.canonical_direction @ cache_attribute.get_tensor("Direction").reshape(3,3).inverse(), torch.tensor([0, 0, 0]))
+        cache_attribute["Direction"] = (self.canonical_direction).flatten()
         center = np.asarray([(input.shape[-i-1]-1) * cache_attribute.get_np_array("Spacing")[i] for i in range(3)])/2+cache_attribute.get_np_array("Origin")
         translation_center = self.canonical_direction @ (self.canonical_direction.inverse() @ (center)-center)
         cache_attribute["Origin"] =  self.canonical_direction @ cache_attribute.get_np_array("Origin")+translation_center
         return _resample_affine(input, matrix.unsqueeze(0))
     
     def inverse(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        matrix = _affine_matrix(self.canonical_direction.inverse(), torch.tensor([0, 0, 0]))
         cache_attribute.pop("Direction")
         cache_attribute.pop("Origin")
+        matrix = _affine_matrix((self.canonical_direction @ cache_attribute.get_tensor("Direction").reshape(3,3).inverse()).inverse(), torch.tensor([0, 0, 0]))
         return _resample_affine(input, matrix.unsqueeze(0))
 
 class HistogramMatching(Transform):
@@ -490,9 +490,9 @@ class HistogramMatching(Transform):
     def __call__(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         image = data_to_image(input, cache_attribute)
         image_ref = None
-        for datasetUtils in self.datasetsUtils:
-            if datasetUtils.isDatasetExist(self.reference_group, name):
-                image_ref = datasetUtils.readImage(self.reference_group, name)
+        for dataset in self.datasets:
+            if dataset.isDatasetExist(self.reference_group, name):
+                image_ref = dataset.readImage(self.reference_group, name)
         if image_ref is None:
              raise NameError("Image : {}/{} not found".format(self.reference_group, name))
         matcher = sitk.HistogramMatchingImageFilter()
@@ -501,6 +501,19 @@ class HistogramMatching(Transform):
         matcher.SetThresholdAtMeanIntensity(True)
         result, _ = image_to_data(matcher.Execute(image, image_ref))
         return result
+    
+    def inverse(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return input
+
+class SelectLabel(Transform):
+
+    def __init__(self, labels: list[str]) -> None:
+        self.labels = [l[1:-1].split(",") for l in labels]
+    def __call__(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        data = torch.zeros_like(input)
+        for old_label, new_label in self.labels:
+            data[input == int(old_label)] = int(new_label)
+        return data
     
     def inverse(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return input

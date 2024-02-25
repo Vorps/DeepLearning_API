@@ -6,9 +6,10 @@ import torch
 import tqdm
 import os
 
-from DeepLearning_API import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, MODEL
+from DeepLearning_API import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, MODEL, DEEP_LEARNING_API_ROOT
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import DatasetUtils, State, gpuInfo, Attribute, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule, DistributedObject, DataLog, description
+from utils.utils import State, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule, DistributedObject, DataLog, description
+from utils.dataset import Dataset, Attribute
 from DeepLearning_API.dataset import DataPrediction, DataSet
 from DeepLearning_API.HDF5 import Accumulator, PathCombine
 from DeepLearning_API.networks.network import ModelLoader, Network, NetState
@@ -17,15 +18,12 @@ from DeepLearning_API.transform import Transform, TransformLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 from typing import Union
 import numpy as np
-import random
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
-from functools import partial
-import torch.multiprocessing as mp
 import importlib
 
-class OutDataset(DatasetUtils, NeedDevice, ABC):
+class OutDataset(Dataset, NeedDevice, ABC):
 
     def __init__(self, filename: str, group: str, pre_transforms : dict[str, TransformLoader], post_transforms : dict[str, TransformLoader], final_transforms : dict[str, TransformLoader], patchCombine: Union[str, None]) -> None: 
         filename, format = filename.split(":")
@@ -46,18 +44,19 @@ class OutDataset(DatasetUtils, NeedDevice, ABC):
         self.names: dict[int, str] = {}
         self.nb_data_augmentation = 0
 
-    def load(self, name_layer: str):
+    def load(self, name_layer: str, datasets: list[Dataset]):
         transforms_type = ["pre_transforms", "post_transforms", "final_transforms"]
         for name, _transform_type, transform_type in [(k, getattr(self, "_{}".format(k)), getattr(self, k)) for k in transforms_type]:
             
             if _transform_type is not None:
                 for classpath, transform in _transform_type.items():
-                    transform = transform.getTransform(classpath, DL_args =  "{}.outsDataset.{}.OutDataset.{}".format(os.environ["DEEP_LEARNING_API_ROOT"], name_layer, name))
+                    transform = transform.getTransform(classpath, DL_args =  "{}.outsDataset.{}.OutDataset.{}".format(DEEP_LEARNING_API_ROOT(), name_layer, name))
+                    transform.setDatasets(datasets)
                     transform_type.append(transform)
 
         if self._patchCombine is not None:
             module, name = _getModule(self._patchCombine, "HDF5")
-            self.patchCombine = getattr(importlib.import_module(module), name)(config = None, DL_args =  "{}.outsDataset.{}.OutDataset".format(os.environ["DEEP_LEARNING_API_ROOT"], name_layer))
+            self.patchCombine = getattr(importlib.import_module(module), name)(config = None, DL_args =  "{}.outsDataset.{}.OutDataset".format(DEEP_LEARNING_API_ROOT(), name_layer))
     
     def setPatchConfig(self, patchSize: Union[list[int], None], overlap: Union[int, None], nb_data_augmentation: int) -> None:
         if patchSize is not None and overlap is not None:
@@ -302,11 +301,10 @@ class Predictor(DistributedObject):
         self.datasets_filename = []
         self.predict_path = PREDICTIONS_DIRECTORY()+self.name+"/"
         self.images_log = images_log
-        for name, outDataset in self.outsDataset.items():
+        for outDataset in self.outsDataset.values():
             self.datasets_filename.append(outDataset.filename)
             outDataset.filename = "{}{}".format(self.predict_path, outDataset.filename)
-            outDataset.load(name.replace(".", ":"))
-           
+            
         
         self.gpu_checkpoints = gpu_checkpoints
 
@@ -340,9 +338,7 @@ class Predictor(DistributedObject):
                     accept = builtins.input("The prediction {} already exists ! Do you want to overwrite it (yes,no) : ".format(path))
                     if accept != "yes":
                         return
-            
-                if os.path.exists(path):
-                    shutil.rmtree(path) 
+                    
             if not os.path.exists(path):
                 os.makedirs(path)
 
@@ -357,6 +353,10 @@ class Predictor(DistributedObject):
             exit(0)
 
         self.dataloader = self.dataset.getData(world_size)
+
+        for name, outDataset in self.outsDataset.items():
+            outDataset.load(name.replace(".", ":"), list(self.dataset.datasets.values()))
+           
         self.size = (len(self.gpu_checkpoints)+1 if self.gpu_checkpoints else 1)
 
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):

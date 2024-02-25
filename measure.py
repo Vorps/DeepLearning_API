@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import os
 
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import _getModule
+from utils.utils import _getModule
 from DeepLearning_API.networks.blocks import LatentDistribution
 from DeepLearning_API.networks.network import ModelLoader, Network
 from typing import Callable, Union

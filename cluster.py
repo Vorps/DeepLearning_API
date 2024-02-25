@@ -1,10 +1,9 @@
-from subprocess import call
 import argparse
 import submitit
 import os 
 
-from DeepLearning_API.utils import setupAPI, TensorBoard
-from torch.cuda import device_count
+from utils.utils import setupAPI, TensorBoard
+from DeepLearning_API import STATISTICS_DIRECTORY, PREDICTIONS_DIRECTORY, DL_API_STATE
 
 def main():
     parser = argparse.ArgumentParser(description="DeepLearing API", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -28,7 +27,7 @@ def main():
 
         executor = submitit.AutoExecutor(folder="./Cluster/")
         executor.update_parameters(name=config["name"], mem_gb=config["memory"], gpus_per_node=n_gpu, tasks_per_node=n_gpu//distributedObject.size, cpus_per_task=config["num_workers"], nodes=config["num_nodes"], timeout_min=config["time_limit"])
-        with TensorBoard(distributedObject.name) as _:
+        with TensorBoard(distributedObject.name, PREDICTIONS_DIRECTORY() if DL_API_STATE() == "PREDICTION" else STATISTICS_DIRECTORY()) as _:
             executor.submit(distributedObject)
 
 if __name__ == "__main__":

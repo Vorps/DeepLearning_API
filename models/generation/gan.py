@@ -1,6 +1,4 @@
-import copy
 from functools import partial
-from typing import Callable
 import torch
 from DeepLearning_API.config import config
 from DeepLearning_API.networks import network, blocks

@@ -7,7 +7,8 @@ import os
 import torch.nn.functional as F
 from typing import Any, Iterator
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import DatasetUtils, get_patch_slices_from_shape, Attribute
+from utils.utils import get_patch_slices_from_shape
+from utils.dataset import Dataset, Attribute
 from DeepLearning_API.transform import Transform, Save
 from DeepLearning_API.augmentation import DataAugmentationsList
 from typing import Union
@@ -232,15 +233,15 @@ class ModelPatch(Patch):
 
 class Dataset():
 
-    def __init__(self, index: int, group_src: str, group_dest : str, name: str, datasetUtils : DatasetUtils, patch : Union[DatasetPatch, None], pre_transforms : list[Transform], dataAugmentationsList : list[DataAugmentationsList]) -> None:
+    def __init__(self, index: int, group_src: str, group_dest : str, name: str, dataset : Dataset, patch : Union[DatasetPatch, None], pre_transforms : list[Transform], dataAugmentationsList : list[DataAugmentationsList]) -> None:
         self.group_src = group_src
         self.group_dest = group_dest
         self.name = name
         self.index = index
-        self.datasetUtils = datasetUtils
+        self.dataset = dataset
         self.loaded = False
         self.cache_attributes: list[Attribute] = []
-        _shape, cache_attribute =  self.datasetUtils.getInfos(self.group_src, name)
+        _shape, cache_attribute =  self.dataset.getInfos(self.group_src, name)
         self.cache_attributes.append(cache_attribute)
         _shape = list(_shape[1:])
         
@@ -276,15 +277,15 @@ class Dataset():
         for transformFunction in reversed(pre_transform):
             if isinstance(transformFunction, Save):
                 filename, format = transformFunction.save.split(":")
-                datasetUtils = DatasetUtils(filename, format)
-                if datasetUtils.isDatasetExist(self.group_dest, self.name):
-                    data, attrib = datasetUtils.readData(self.group_dest, self.name)
+                dataset = Dataset(filename, format)
+                if dataset.isDatasetExist(self.group_dest, self.name):
+                    data, attrib = dataset.readData(self.group_dest, self.name)
                     self.cache_attributes[0].update(attrib)
                     break
             i-=1
         
         if i==0:
-            data, _ = self.datasetUtils.readData(self.group_src, self.name)
+            data, _ = self.dataset.readData(self.group_src, self.name)
 
         data = torch.from_numpy(data)
         if len(pre_transform):
@@ -292,8 +293,8 @@ class Dataset():
                 data = transformFunction(self.name, data, self.cache_attributes[0])
                 if isinstance(transformFunction, Save):
                     filename, format = transformFunction.save.split(":")
-                    datasetUtils = DatasetUtils(filename, format)
-                    datasetUtils.write(self.group_dest, self.name, data.numpy(), self.cache_attributes[0])
+                    dataset = Dataset(filename, format)
+                    dataset.write(self.group_dest, self.name, data.numpy(), self.cache_attributes[0])
         self.data : list[torch.Tensor] = list()
         self.data.append(data)
             

@@ -2,8 +2,8 @@ import SimpleITK as sitk
 from typing import Union
 import numpy as np
 import torch
-import torch.nn.functional as F
-from DeepLearning_API.utils import _resample
+from DeepLearning_API.utils.utils import _resample
+import scipy
 
 def _openTransform(transform_files: dict[Union[str, sitk.Transform], bool]) -> list[sitk.Transform]:
     transforms: list[sitk.Transform] = []
@@ -90,12 +90,13 @@ def parameterMap_to_transform(path_src: str) -> Union[sitk.Transform, list[sitk.
     if transform["Transform"][0] == "EulerTransform":
         result = sitk.Euler3DTransform()
         parameters = format(transform["TransformParameters"])
-        fixedParameters = format(transform["CenterOfRotationPoint"]+[0])
+        fixedParameters = format(transform["CenterOfRotationPoint"])+[0]
     elif transform["Transform"][0] == "AffineTransform":
         result = sitk.AffineTransform(3)
         parameters = format(transform["TransformParameters"])
-        fixedParameters = format(transform["CenterOfRotationPoint"]+[0])
+        fixedParameters = format(transform["CenterOfRotationPoint"])+[0]
     elif transform["Transform"][0] == "BSplineStackTransform":
+        parameters = format(transform["TransformParameters"])
         GridSize = format(transform["GridSize"])
         GridOrigin = format(transform["GridOrigin"])
         GridSpacing = format(transform["GridSpacing"])
@@ -111,12 +112,27 @@ def parameterMap_to_transform(path_src: str) -> Union[sitk.Transform, list[sitk.
             result.SetFixedParameters(fixedParameters)
             result.SetParameters(sub_parameters)
             results.append(result)
-            return results
+        return results
+    elif transform["Transform"][0] == "AffineLogStackTransform":
+        parameters = format(transform["TransformParameters"])
+        fixedParameters = format(transform["CenterOfRotationPoint"])+[0]
+
+        nb = int(transform["NumberOfSubTransforms"][0])
+        sub = 12
+        results = []
+        for i in range(nb):
+            result = sitk.AffineTransform(3)
+            sub_parameters = parameters[i*sub:(i+1)*sub]
+
+            result.SetFixedParameters(fixedParameters)
+            result.SetParameters(np.concatenate([scipy.linalg.expm(sub_parameters[:9].reshape((3,3))).flatten(), sub_parameters[-3:]]))
+            results.append(result)
+        return results
     else:
         result = sitk.BSplineTransform(3)
         
         parameters = format(transform["TransformParameters"])
-        GridSize = np.array([int(i) for i in transform["GridSize"]])
+        GridSize = format(transform["GridSize"])
         GridOrigin = format(transform["GridOrigin"])
         GridSpacing = format(transform["GridSpacing"])
         GridDirection = np.array(format(transform["GridDirection"])).reshape((3,3)).T.flatten() 
@@ -139,4 +155,51 @@ def resampleResize(image: sitk.Image, size : list[int] = [100,512,512]):
     result.SetDirection(image.GetDirection())
     result.SetOrigin(image.GetOrigin())
     result.SetSpacing([x/y*z for x,y,z in zip(image.GetSize(), size, image.GetSpacing())])
+    return result
+
+def crop_with_mask(image: sitk.Image, mask: sitk.Image, label: list[int], dilatations: list[int]) -> sitk.Image:
+    data = sitk.GetArrayFromImage(image)
+    
+    border = np.where(np.isin(sitk.GetArrayFromImage(mask), label))
+    box = []
+    for w, dilatation, s in zip(border, dilatations, data.shape):
+        box.append([max(np.min(w)-dilatation, 0), min(np.max(w)+dilatation, s)])
+    box = np.asarray(box)
+
+    for i, w in enumerate(box):
+        data = np.delete(data, slice(w[1], data.shape[i]), i)
+        data = np.delete(data, slice(0, w[0]), i)
+    
+    origin = np.asarray(image.GetOrigin())
+    matrix = np.asarray(image.GetDirection()).reshape((len(origin), len(origin)))
+    origin = origin.dot(matrix)
+    for i, w in enumerate(box):
+        origin[-i-1] += w[0]*np.asarray(image.GetSpacing())[-i-1]
+    origin = origin.dot(np.linalg.inv(matrix))
+
+    result = sitk.GetImageFromArray(data)
+    result.SetOrigin(origin)
+    result.SetSpacing(image.GetSpacing())
+    result.SetDirection(image.GetDirection())
+    return result
+
+def formatMaskLabel(mask: sitk.Image, labels: list[tuple[int, int]]) -> sitk.Image:
+    data = sitk.GetArrayFromImage(mask)
+    result_data = np.zeros_like(data, np.uint8)
+
+    for label_old, label_new in labels:
+        result_data[np.where(data == label_old)] = label_new
+
+    result = sitk.GetImageFromArray(result_data)
+    result.CopyInformation(mask)
+    return result
+
+def getFlatLabel(mask: sitk.Image, labels: list[int]) -> sitk.Image:
+    data = sitk.GetArrayFromImage(mask)
+    result_data = np.zeros_like(data, np.uint8)
+    for label in labels:
+        result_data[np.where(data == label)] = 1
+
+    result = sitk.GetImageFromArray(result_data)
+    result.CopyInformation(mask)        
     return result

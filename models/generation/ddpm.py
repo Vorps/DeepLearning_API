@@ -1,7 +1,7 @@
 from DeepLearning_API.config import config
 from DeepLearning_API.networks import network
 from DeepLearning_API.HDF5 import ModelPatch
-from DeepLearning_API.utils import gpuInfo
+from utils.utils import gpuInfo
 from typing import Union, Callable
 from DeepLearning_API.networks import blocks
 from DeepLearning_API.measure import Criterion

@@ -4,7 +4,6 @@ import inspect
 import collections
 from copy import deepcopy
 from typing import Union
-
 import torch
 
 from DeepLearning_API import CONFIG_FILE

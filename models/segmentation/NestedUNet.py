@@ -5,7 +5,6 @@ from DeepLearning_API.HDF5 import ModelPatch
 from typing import Union
 
 import torch
-from torch import nn
      
 class NestedUNetBlock(network.ModuleArgsDict):
 

@@ -3,10 +3,10 @@ from torch.utils.data import DataLoader
 import tqdm
 import numpy as np
 import os
-from DeepLearning_API import MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, MODEL, DATE
+from DeepLearning_API import MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, MODEL, DATE, DL_API_STATE
 from DeepLearning_API.dataset import DataTrain
 from DeepLearning_API.config import config
-from DeepLearning_API.utils import gpuInfo, State, DataLog, DistributedObject, description
+from utils.utils import State, DataLog, DistributedObject, description
 from DeepLearning_API.networks.network import Network, ModelLoader, NetState, CPU_Model
 import dill
 from typing import Union
@@ -293,7 +293,7 @@ class Trainer(DistributedObject):
         return (1-self.ema_decay) * averaged_model_parameter + self.ema_decay * model_parameter
     
     def setup(self, world_size: int):
-        state = State._member_map_[os.environ["DL_API_STATE"]]
+        state = State._member_map_[DL_API_STATE()]
         if state != State.RESUME and os.path.exists(STATISTICS_DIRECTORY()+self.name+"/"):
             if os.environ["DL_API_OVERWRITE"] != "True":
                 accept = input("The model {} already exists ! Do you want to overwrite it (yes,no) : ".format(self.name))
